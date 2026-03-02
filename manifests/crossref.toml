@@ -1,0 +1,38 @@
+[provider]
+name = "crossref"
+description = "Crossref — Published academic papers with DOI metadata"
+base_url = "https://api.crossref.org"
+auth_type = "none"
+
+[[tools]]
+name = "academic_search_crossref"
+description = "Search Crossref for published academic papers. Returns titles, authors, DOIs, journal info, and citation counts."
+endpoint = "/works"
+method = "GET"
+scope = "tool:academic_search_crossref"
+
+[tools.input_schema]
+type = "object"
+required = ["query"]
+
+[tools.input_schema.properties.query]
+type = "string"
+description = "Search query for academic papers"
+
+[tools.input_schema.properties.rows]
+type = "integer"
+description = "Maximum number of results to return"
+default = 10
+
+[tools.input_schema.properties.mailto]
+type = "string"
+description = "Email for polite API usage (gets priority access)"
+default = "research@parcha.ai"
+
+[tools.input_schema.properties.filter]
+type = "string"
+description = "Filter by type: journal-article, book-chapter, conference-paper, etc."
+
+[tools.response]
+extract = "$.message.items[*]"
+format = "json"

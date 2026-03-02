@@ -1,0 +1,53 @@
+[package]
+name = "ati"
+version = "0.1.0"
+edition = "2021"
+description = "Agent Tools Interface — secure CLI for AI agent tool execution"
+license = "Apache-2.0"
+repository = "https://github.com/Parcha-ai/ati"
+readme = "README.md"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Crypto
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+
+# Secure memory
+zeroize = { version = "1", features = ["derive"] }
+libc = "0.2"
+
+# Response processing
+jsonpath-rust = "0.7"
+
+# Output formatting
+comfy-table = "7"
+
+# Encoding
+base64 = "0.22"
+
+# Misc
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+glob = "0.3"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"
+assert_cmd = "2"
+predicates = "3"

@@ -1,0 +1,44 @@
+[provider]
+name = "hackernews"
+description = "Hacker News — Top tech stories from Y Combinator's news aggregator"
+base_url = "https://hacker-news.firebaseio.com/v0"
+auth_type = "none"
+
+[[tools]]
+name = "hackernews_top_stories"
+description = "Get IDs of the current top 500 Hacker News stories. Returns an array of story IDs sorted by ranking. Use web_fetch on https://hacker-news.firebaseio.com/v0/item/{id}.json to get individual story details."
+endpoint = "/topstories.json"
+method = "GET"
+scope = "tool:hackernews_stories"
+
+[tools.input_schema]
+type = "object"
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "hackernews_new_stories"
+description = "Get IDs of the newest 500 Hacker News stories."
+endpoint = "/newstories.json"
+method = "GET"
+scope = "tool:hackernews_stories"
+
+[tools.input_schema]
+type = "object"
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "hackernews_best_stories"
+description = "Get IDs of the best 200 Hacker News stories."
+endpoint = "/beststories.json"
+method = "GET"
+scope = "tool:hackernews_stories"
+
+[tools.input_schema]
+type = "object"
+
+[tools.response]
+format = "json"

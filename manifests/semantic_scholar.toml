@@ -1,0 +1,44 @@
+[provider]
+name = "semantic_scholar"
+description = "Semantic Scholar — AI-powered academic paper search with citation data"
+base_url = "https://api.semanticscholar.org/graph/v1"
+auth_type = "header"
+auth_header_name = "x-api-key"
+auth_key_name = "semantic_scholar_api_key"
+
+[[tools]]
+name = "academic_search_semantic_scholar"
+description = "Search Semantic Scholar for academic papers. Returns titles, abstracts, citation counts, and influence scores. Works without API key (rate limited) or with key for higher limits."
+endpoint = "/paper/search"
+method = "GET"
+scope = "tool:academic_search_semantic_scholar"
+
+[tools.input_schema]
+type = "object"
+required = ["query"]
+
+[tools.input_schema.properties.query]
+type = "string"
+description = "Search query for academic papers"
+
+[tools.input_schema.properties.limit]
+type = "integer"
+description = "Maximum number of results to return"
+default = 10
+
+[tools.input_schema.properties.fields]
+type = "string"
+description = "Comma-separated fields to return"
+default = "title,abstract,url,year,citationCount,influentialCitationCount,authors"
+
+[tools.input_schema.properties.year]
+type = "string"
+description = "Filter by year (e.g. '2023' or '2020-2023')"
+
+[tools.input_schema.properties.fieldsOfStudy]
+type = "string"
+description = "Filter by field (e.g. 'Computer Science', 'Medicine')"
+
+[tools.response]
+extract = "$.data[*]"
+format = "json"

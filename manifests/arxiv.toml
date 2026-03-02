@@ -1,0 +1,38 @@
+[provider]
+name = "arxiv"
+description = "arXiv — Open-access preprint papers in physics, math, CS, and more"
+base_url = "http://export.arxiv.org/api"
+auth_type = "none"
+
+[[tools]]
+name = "academic_search_arxiv"
+description = "Search arXiv for academic preprints. Returns paper titles, abstracts, authors, and links. Supports physics, math, CS, biology, and more."
+endpoint = "/query"
+method = "GET"
+scope = "tool:academic_search_arxiv"
+
+[tools.input_schema]
+type = "object"
+required = ["search_query"]
+
+[tools.input_schema.properties.search_query]
+type = "string"
+description = "Search query (e.g. 'transformer attention mechanism', 'au:Vaswani ti:attention')"
+
+[tools.input_schema.properties.max_results]
+type = "integer"
+description = "Maximum number of results to return"
+default = 10
+
+[tools.input_schema.properties.sortBy]
+type = "string"
+description = "Sort order: relevance, lastUpdatedDate, or submittedDate"
+default = "relevance"
+
+[tools.input_schema.properties.sortOrder]
+type = "string"
+description = "Sort direction: ascending or descending"
+default = "descending"
+
+[tools.response]
+format = "text"

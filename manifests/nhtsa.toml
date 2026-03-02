@@ -1,0 +1,29 @@
+[provider]
+name = "nhtsa"
+description = "NHTSA — Vehicle Identification Number (VIN) decoder"
+base_url = "https://vpic.nhtsa.dot.gov/api"
+auth_type = "none"
+
+[[tools]]
+name = "vehicle_vin_lookup"
+description = "Decode a Vehicle Identification Number (VIN) to get make, model, year, engine, and safety information from NHTSA."
+endpoint = "/vehicles/DecodeVinValuesBatch/"
+method = "POST"
+scope = "tool:vehicle_vin_lookup"
+
+[tools.input_schema]
+type = "object"
+required = ["vins"]
+
+[tools.input_schema.properties.vins]
+type = "string"
+description = "Vehicle Identification Number(s) to decode. For multiple VINs, separate with semicolons."
+
+[tools.input_schema.properties.format]
+type = "string"
+description = "Response format"
+default = "json"
+
+[tools.response]
+extract = "$.Results[*]"
+format = "json"

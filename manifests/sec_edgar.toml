@@ -1,0 +1,40 @@
+[provider]
+name = "sec_edgar"
+description = "SEC EDGAR — Search SEC filings, annual reports, and company disclosures"
+base_url = "https://efts.sec.gov/LATEST"
+auth_type = "none"
+
+[[tools]]
+name = "sec_filing_search"
+description = "Search SEC EDGAR full-text search for company filings (10-K, 10-Q, 8-K, etc.). Returns filing titles, dates, company names, and links to documents."
+endpoint = "/search-index"
+method = "GET"
+scope = "tool:sec_filing_search"
+
+[tools.input_schema]
+type = "object"
+required = ["q"]
+
+[tools.input_schema.properties.q]
+type = "string"
+description = "Search query (company name, ticker, or keywords)"
+
+[tools.input_schema.properties.forms]
+type = "string"
+description = "Filing types to search (comma-separated, e.g. '10-K,10-Q,8-K')"
+
+[tools.input_schema.properties.startdt]
+type = "string"
+description = "Start date filter (YYYY-MM-DD)"
+
+[tools.input_schema.properties.enddt]
+type = "string"
+description = "End date filter (YYYY-MM-DD)"
+
+[tools.input_schema.properties.dateRange]
+type = "string"
+description = "Predefined date range: custom, 1d, 7d, 30d, 1y, 5y"
+
+[tools.response]
+extract = "$.hits.hits[*]"
+format = "json"

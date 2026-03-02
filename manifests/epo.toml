@@ -1,0 +1,29 @@
+[provider]
+name = "epo"
+description = "European Patent Office (EPO) Open Patent Services"
+base_url = "https://ops.epo.org/3.2/rest-services"
+auth_type = "bearer"
+auth_key_name = "epo_api_key"
+
+[[tools]]
+name = "patent_search_epo"
+description = "Search the European Patent Office for patents by keyword, applicant, or inventor"
+endpoint = "/published-data/search"
+method = "GET"
+scope = "tool:patent_search_epo"
+
+[tools.input_schema]
+type = "object"
+required = ["q"]
+
+[tools.input_schema.properties.q]
+type = "string"
+description = "Search query in EPO CQL format (e.g. 'ta=solar AND pa=tesla')"
+
+[tools.input_schema.properties.Range]
+type = "string"
+description = "Result range (e.g. '1-25')"
+default = "1-25"
+
+[tools.response]
+format = "json"

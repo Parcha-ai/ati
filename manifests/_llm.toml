@@ -1,0 +1,13 @@
+[provider]
+name = "_llm"
+description = "LLM provider for ati help (internal)"
+base_url = "https://api.cerebras.ai/v1"
+auth_type = "bearer"
+auth_key_name = "cerebras_api_key"
+internal = true
+
+[[tools]]
+name = "_chat_completion"
+description = "Chat completion via Cerebras (internal, for ati help)"
+endpoint = "/chat/completions"
+method = "POST"

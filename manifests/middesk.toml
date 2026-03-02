@@ -1,0 +1,32 @@
+[provider]
+name = "middesk"
+description = "Middesk US business verification and identity"
+base_url = "https://api.middesk.com/v1"
+auth_type = "bearer"
+auth_key_name = "middesk_api_key"
+
+[[tools]]
+name = "middesk_us_business_lookup"
+description = "Create a Middesk business order to verify a US business entity"
+endpoint = "/businesses"
+method = "POST"
+scope = "tool:middesk_us_business_lookup"
+
+[tools.input_schema]
+type = "object"
+required = ["name"]
+
+[tools.input_schema.properties.name]
+type = "string"
+description = "Business name to verify (e.g. 'Acme Corp')"
+
+[tools.input_schema.properties.state]
+type = "string"
+description = "US state abbreviation (e.g. 'CA', 'NY')"
+
+[tools.input_schema.properties.ein]
+type = "string"
+description = "Employer Identification Number (EIN)"
+
+[tools.response]
+format = "json"

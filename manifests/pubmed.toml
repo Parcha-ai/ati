@@ -1,0 +1,39 @@
+[provider]
+name = "pubmed"
+description = "PubMed medical literature search (free, no API key required)"
+base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+auth_type = "none"
+
+[[tools]]
+name = "medical_search_pubmed"
+description = "Search PubMed for medical research articles by keyword"
+endpoint = "/esearch.fcgi"
+method = "GET"
+scope = "tool:medical_search_pubmed"
+
+[tools.input_schema]
+type = "object"
+required = ["term"]
+
+[tools.input_schema.properties.term]
+type = "string"
+description = "Search term (e.g. 'CRISPR gene therapy')"
+
+[tools.input_schema.properties.retmax]
+type = "integer"
+description = "Maximum number of results to return"
+default = 20
+
+[tools.input_schema.properties.db]
+type = "string"
+description = "Database to search"
+default = "pubmed"
+
+[tools.input_schema.properties.retmode]
+type = "string"
+description = "Return mode"
+default = "json"
+
+[tools.response]
+extract = "$.esearchresult"
+format = "json"
