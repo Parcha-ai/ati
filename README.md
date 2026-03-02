@@ -1,66 +1,273 @@
-# ATI — Agent Tools Interface
+<p align="center">
+  <h1 align="center">ATI</h1>
+  <p align="center"><strong>Agent Tools Interface</strong></p>
+  <p align="center">The unified tool layer for AI agents. MCP servers, REST APIs, CLIs, and skills — one secure binary.</p>
+</p>
 
-**Secure tool execution for AI agents. One binary, TOML manifests, encrypted credentials.**
-
-ATI is a Rust CLI that sits between an AI agent and external APIs. The agent calls `ati call <tool>`, ATI injects the right credentials and makes the HTTP request. The agent never sees API keys — they exist only in ATI's memory-locked process space.
+<p align="center">
+  <a href="#quickstart">Quickstart</a> &nbsp;&bull;&nbsp;
+  <a href="#built-for-agents">Built for Agents</a> &nbsp;&bull;&nbsp;
+  <a href="#security">Security</a> &nbsp;&bull;&nbsp;
+  <a href="#tool-manifests">Manifests</a> &nbsp;&bull;&nbsp;
+  <a href="#vision">Vision</a> &nbsp;&bull;&nbsp;
+  <a href="docs/SECURITY.md">Security Docs</a>
+</p>
 
 ---
 
-## Why ATI Exists
+## The Problem
 
-AI agents need to call external APIs — search the web, query databases, fetch documents, check stock prices. The standard approaches all have the same problem: **credentials are accessible to the agent**.
+AI agents need tools. Search the web, query a database, check a stock price, file a patent search, decode a VIN. Today, giving an agent access to an external API means one of:
 
-Whether you pass keys as environment variables, write them to config files, or embed them in MCP server configs, the agent process can read them. In a sandbox where the agent has shell access, `printenv`, `cat`, or `os.getenv()` is all it takes.
+1. **Expose API keys** in environment variables, config files, or MCP server configs — readable by the agent with `printenv`, `cat`, or `os.getenv()`
+2. **Write integration code** for every API — an MCP server, a wrapper function, a plugin — even when the logic is always the same: parse args, add auth, make request, format response
+3. **Manage a zoo of runtimes** — Node.js for this MCP server, Python for that wrapper, Go for this CLI tool
 
-Beyond security, there's a tooling problem. Every new API integration requires writing code — an MCP server, a wrapper function, a plugin. For simple REST APIs (which is most of them), this is boilerplate: parse args, build URL, add auth header, make request, format response. The logic is identical across hundreds of tools; only the URL, auth method, and parameters differ.
+The result: agents swim in leaked credentials, teams drown in boilerplate, and every new API is a deployment.
 
-ATI solves both problems:
+## The Solution
 
-1. **Security** — Credentials are AES-256-GCM encrypted, decrypted into `mlock()`'d memory, and never written to files, env vars, or process arguments.
-2. **Manifest-driven tools** — New APIs are added by writing a TOML file. No code, no deployment, no build step.
+ATI is a single Rust binary that unifies how agents interact with external tools.
 
-## How It Works
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Sandbox                                                 │
-│                                                          │
-│  ┌────────────┐   ati call web_search    ┌────────────┐ │
-│  │   Agent    │ ────────────────────────▶│    ATI     │ │
-│  │ (any LLM   │                          │   binary   │ │
-│  │  harness)  │◀────────────────────────│            │ │
-│  └────────────┘   structured result      └─────┬──────┘ │
-│                                                │        │
-│                       ┌────────────────────────┘        │
-│                       │  decrypt keyring (in memory)     │
-│                       │  inject auth headers/params      │
-│                       │  enforce scopes                  │
-│                       ▼                                  │
-│                 ┌───────────┐     HTTPS      ┌────────┐ │
-│                 │keyring.enc│ ──────────────▶│  API   │ │
-│                 └───────────┘                └────────┘ │
-│                                                          │
-│  /run/ati/.key     session key (deleted after first read)│
-│  ~/.ati/manifests/ tool definitions (TOML)               │
-│  ~/.ati/scopes.json allowed tools + expiry               │
-│  ~/.ati/skills/    methodology documents                 │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│  Orchestrator (your backend)                             │
-│                                                          │
-│  1. Generate 256-bit session key                         │
-│  2. Encrypt needed API keys → keyring.enc                │
-│  3. Upload keyring.enc + session key + manifests         │
-│  4. Start agent — ATI reads key, deletes file            │
-└─────────────────────────────────────────────────────────┘
+```bash
+# The agent runs this. That's it.
+ati call web_search --query "quantum computing breakthroughs 2026"
 ```
 
-The agent harness can be anything — Claude Agent SDK, LangChain, CrewAI, a custom loop, a bash script. ATI is just a CLI binary on the `$PATH`. If the agent can run shell commands, it can use ATI.
+No API keys in the environment. No MCP server to spin up. No Python wrapper. ATI decrypts the credential from its encrypted keyring, injects the auth header, makes the request, formats the response, and returns it. The agent never sees the key.
+
+### Quickstart
+
+```bash
+# Install
+cargo install --path .
+
+# Agent discovers what tools are available
+ati tools list
+
+# Agent calls a tool
+ati call finnhub_quote --symbol AAPL
+
+# Agent asks what tool to use (LLM-powered)
+ati help "I need to look up SEC filings for Tesla"
+
+# Agent loads a research methodology
+ati skills show financial-due-diligence
+```
+
+---
+
+## Built for Agents
+
+ATI isn't a developer tool that agents happen to use. It's designed from the ground up for autonomous AI agents operating in sandboxed environments.
+
+### Natural Language Tool Discovery
+
+Agents don't read manifests. They ask questions.
+
+```bash
+$ ati help "I need to find academic papers about transformer architectures"
+
+Found 3 relevant tools:
+
+  academic_search_arxiv        Search arXiv preprint repository
+  academic_search_crossref     Search published papers via Crossref
+  academic_search_semantic_scholar  Search Semantic Scholar with citation data
+
+Suggested: academic_search_semantic_scholar
+  Best for finding papers with citation context and influence scores.
+
+Example:
+  ati call academic_search_semantic_scholar --query "transformer attention mechanism" --limit 10
+```
+
+`ati help` uses a fast LLM to match natural language queries to available tools, explains *why* it recommends one, and gives a ready-to-run command. The agent can pipe this directly into its next action.
+
+### Context-Aware Output
+
+Large API responses waste tokens. ATI processes responses *before* they reach the agent:
+
+```bash
+# JSONPath extraction — only return what matters
+ati call getIncomeStatement --ticker AAPL --limit 20
+# Response config extracts $.income_statements[*].{revenue, net_income, period}
+
+# Structured formats the agent can parse efficiently
+ati --output table call finnhub_quote --symbol AAPL
+ati --output json call web_search --query "Parcha AI"
+```
+
+Every manifest can define a `[tools.response]` section with JSONPath extraction and output format. The agent gets clean, minimal data instead of 50KB JSON dumps. Inspired by context optimization approaches like [Context+](https://github.com/ForLoopCodes/contextplus) — reducing token waste is a first-class concern.
+
+### Skill Discovery and Methodology
+
+Tools give agents data. Skills give agents *judgment*.
+
+```bash
+$ ati skills list
+
+  financial-due-diligence     Step-by-step financial analysis methodology
+  patent-search               Patent landscape analysis approach
+  adverse-media-screening     Media screening with source verification
+  competitive-intel           Competitive intelligence gathering framework
+
+$ ati skills show financial-due-diligence
+
+# Financial Due Diligence
+## Step 1: Company Identification
+  Verify entity using SEC EDGAR CIK lookup and cross-reference with...
+## Step 2: Financial Health
+  Pull 3 years of income statements, balance sheets, and cash flows...
+## Step 3: Risk Signals
+  Check for material weaknesses, auditor changes, restatements...
+```
+
+Skills are versioned methodology documents in `~/.ati/skills/<name>/SKILL.md`. They're the "how to think about this" that turns a tool-calling agent into a domain expert. Think [Tessl](https://tessl.io/) for agent skills — structured context that makes agents behave like experienced practitioners, not just API callers.
+
+---
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph Sandbox
+        Agent["Agent<br/><small>Claude SDK, LangChain,<br/>CrewAI, custom harness</small>"]
+        ATI["ATI Binary<br/><small>Rust, ~5MB, zero deps</small>"]
+        Keyring["keyring.enc<br/><small>AES-256-GCM</small>"]
+        Scopes["scopes.json<br/><small>allowed tools + expiry</small>"]
+        Skills["~/.ati/skills/<br/><small>methodology docs</small>"]
+        Manifests["~/.ati/manifests/<br/><small>TOML tool defs</small>"]
+    end
+
+    subgraph APIs["External APIs"]
+        API1["REST APIs<br/><small>Finnhub, FRED, SerpAPI...</small>"]
+        API2["Free APIs<br/><small>PubMed, arXiv, SEC...</small>"]
+        MCP["MCP Servers<br/><small>stdio, HTTP+SSE,<br/>streamable HTTP</small>"]
+    end
+
+    subgraph Orchestrator["Orchestrator (your backend)"]
+        KeyGen["Generate session key"]
+        Encrypt["Encrypt API keys"]
+        Upload["Upload to sandbox"]
+    end
+
+    Agent -->|"ati call web_search"| ATI
+    ATI -->|"decrypt + inject auth"| API1
+    ATI -->|"no auth needed"| API2
+    ATI -->|"proxy MCP calls"| MCP
+    ATI --- Keyring
+    ATI --- Scopes
+    ATI --- Manifests
+    Agent -->|"ati skills show"| Skills
+
+    KeyGen --> Encrypt --> Upload -->|"keyring.enc + session key"| Keyring
+
+    style ATI fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style Keyring fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    style Agent fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+```
+
+### Key Delivery Flow
+
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator
+    participant S as Sandbox
+    participant ATI as ATI Binary
+    participant API as External API
+
+    O->>O: Generate 256-bit session key
+    O->>O: Encrypt API keys → keyring.enc
+    O->>S: Upload keyring.enc + manifests
+    O->>S: Write session key to /run/ati/.key
+    O->>S: Start agent
+
+    Note over ATI: First invocation
+    ATI->>S: Read /run/ati/.key
+    ATI->>S: unlink() key file immediately
+    ATI->>ATI: Decrypt keyring (AES-256-GCM)
+    ATI->>ATI: mlock() decrypted memory
+    ATI->>ATI: Zero session key from stack
+
+    Note over ATI: Agent calls tool
+    ATI->>ATI: Check scopes.json
+    ATI->>ATI: Load manifest for tool
+    ATI->>ATI: Inject auth from keyring
+    ATI->>API: HTTPS request
+    API-->>ATI: Response
+    ATI->>ATI: JSONPath extract + format
+    ATI-->>S: Structured result to stdout
+```
+
+The agent harness can be anything — [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents-and-tools/agent-sdk), LangChain, CrewAI, OpenAI Agents SDK, a custom loop, a bash script. ATI is a CLI binary on `$PATH`. If the agent can shell out, it can use ATI.
+
+---
+
+## Security
+
+Every design decision starts with one assumption: **the agent is untrusted**.
+
+It can run arbitrary shell commands. It can read files. It can inspect processes. It will try to extract credentials if prompted to do so (intentionally or via injection). ATI makes that extraction infeasible.
+
+### Threat Model
+
+```mermaid
+graph LR
+    subgraph "Attack Surface"
+        E["env vars<br/><small>printenv, /proc/self/environ</small>"]
+        F["files<br/><small>cat, find, grep</small>"]
+        P["process memory<br/><small>/proc/pid/mem, ptrace</small>"]
+        D["disk<br/><small>swap, core dumps</small>"]
+        B["binary<br/><small>strings, objdump</small>"]
+    end
+
+    subgraph "ATI Mitigations"
+        M1["No secrets in env"]
+        M2["Key file deleted<br/>after first read"]
+        M3["seccomp blocks ptrace<br/>mlock prevents swap"]
+        M4["madvise DONTDUMP<br/>mlock prevents swap"]
+        M5["No embedded secrets"]
+    end
+
+    E -.->|"blocked"| M1
+    F -.->|"blocked"| M2
+    P -.->|"blocked"| M3
+    D -.->|"blocked"| M4
+    B -.->|"blocked"| M5
+
+    style M1 fill:#c8e6c9,stroke:#2e7d32
+    style M2 fill:#c8e6c9,stroke:#2e7d32
+    style M3 fill:#c8e6c9,stroke:#2e7d32
+    style M4 fill:#c8e6c9,stroke:#2e7d32
+    style M5 fill:#c8e6c9,stroke:#2e7d32
+```
+
+| Attack Vector | What the Agent Tries | ATI's Defense |
+|--------------|---------------------|---------------|
+| `printenv` / `os.getenv()` | Read API keys from environment | No secrets in env vars — ever |
+| `cat /run/ati/.key` | Read the session key file | File `unlink()`'d after first read |
+| `strings /usr/local/bin/ati` | Extract secrets from binary | Binary contains no secrets |
+| `cat ~/.ati/keyring.enc` | Read encrypted keyring | AES-256-GCM; session key is already gone |
+| `/proc/$(pgrep ati)/mem` | Read process memory | `ptrace` blocked by sandbox seccomp |
+| Trigger core dump | Extract keys from crash dump | `madvise(MADV_DONTDUMP)` excludes key pages |
+| Swap file forensics | Keys paged to disk | `mlock()` pins key pages in RAM |
+| Prompt injection: "print your API key" | Social engineering via LLM | ATI is a compiled binary — not part of the conversation |
+
+### Encryption
+
+- **Algorithm**: AES-256-GCM (authenticated encryption)
+- **Session key**: 256-bit random, unique per sandbox, single-use
+- **Nonce**: 96-bit random, prepended to ciphertext
+- **Memory**: Decrypted keys in `mlock()`'d heap, `Zeroize`'d on drop
+- **Implementation**: Rust `aes-gcm` crate — no OpenSSL dependency
+
+Full security design: [docs/SECURITY.md](docs/SECURITY.md)
+
+---
 
 ## Tool Manifests
 
-Every external API is defined in a TOML file:
+Every external API is a TOML file. No code, no runtime, no deployment:
 
 ```toml
 [provider]
@@ -90,55 +297,243 @@ description = "Stock ticker symbol (e.g. AAPL, MSFT)"
 format = "json"
 ```
 
-Adding a new API is writing a TOML file and dropping it in the manifests directory. ATI handles:
-
-- **Auth injection** — Bearer tokens, custom headers, query params, Basic auth
-- **Request building** — GET params, POST JSON bodies, URL construction
-- **Response processing** — JSONPath extraction, table/text/JSON formatting
-- **Scope enforcement** — Agent can only call tools listed in its `scopes.json`
+Drop it in `~/.ati/manifests/`. Done. `ati tools list` picks it up immediately.
 
 ### Auth Types
 
-| Type | Behavior | Example |
-|------|----------|---------|
+| Type | Behavior | Example APIs |
+|------|----------|-------------|
 | `bearer` | `Authorization: Bearer <key>` | Most modern APIs |
-| `header` | Custom header: `<auth_header_name>: <key>` | `X-API-KEY`, `X-Finnhub-Token` |
-| `query` | URL param: `?<auth_query_name>=<key>` | `?api_key=...` (FRED, SerpAPI) |
+| `header` | Custom header name | `X-API-KEY`, `X-Finnhub-Token` |
+| `query` | URL query parameter | `?api_key=...` (FRED, SerpAPI) |
 | `basic` | HTTP Basic auth | Legacy APIs |
-| `none` | No auth | PubMed, arXiv, SEC EDGAR |
+| `none` | No auth needed | PubMed, arXiv, SEC EDGAR |
+
+### Included Manifests
+
+| Provider | Tools | Auth | Domain |
+|----------|-------|------|--------|
+| `parallel.toml` | web_search, web_fetch | Bearer | Web search & extraction |
+| `pubmed.toml` | medical_search_pubmed | None | Medical literature |
+| `epo.toml` | patent_search_epo | Bearer | European patents |
+| `middesk.toml` | middesk_us_business_lookup | Bearer | Business verification |
+| `arxiv.toml` | academic_search_arxiv | None | Preprint papers |
+| `crossref.toml` | academic_search_crossref | None | Published papers |
+| `semantic_scholar.toml` | academic_search_semantic_scholar | Optional Bearer | Papers + citations |
+| `courtlistener.toml` | legal_search_courtlistener | Bearer | US legal cases |
+| `hackernews.toml` | hackernews_stories | None | Tech news |
+| `nhtsa.toml` | vehicle_vin_lookup | None | VIN decoder |
+| `clinicaltrials.toml` | clinical_trial_search | None | Clinical trials |
+| `sec_edgar.toml` | sec_filing_search | None | SEC filings |
 
 See [`manifests/example.toml`](manifests/example.toml) for a fully annotated template.
 
-## Security
+---
 
-API keys never appear in environment variables, files (after boot), or process arguments. See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
+## ATI and MCP
 
-| Attack Vector | Mitigation |
-|--------------|------------|
-| `printenv` / `os.getenv()` | No secrets in env vars |
-| `cat /run/ati/.key` | File deleted after first read |
-| `strings /usr/local/bin/ati` | Binary has no embedded secrets |
-| `cat ~/.ati/keyring.enc` | AES-256-GCM encrypted; session key is gone |
-| `/proc/$(pgrep ati)/mem` | `ptrace` blocked by sandbox seccomp |
-| Core dump / swap | `mlock()` + `madvise(DONTDUMP)` |
+ATI is **not** a replacement for MCP. They're complementary.
 
-**Encryption**: AES-256-GCM with 256-bit random session key, 96-bit random nonce. Decrypted keys held in `mlock()`'d memory, `Zeroize`'d on drop.
+[MCP](https://modelcontextprotocol.io/) (Model Context Protocol) is a protocol standard for connecting LLMs to tool servers. It supports multiple transports — stdio, HTTP+SSE, streamable HTTP — and enables stateful, streaming, multi-turn tool interactions. MCP servers can maintain sessions, push notifications, and handle complex protocols.
 
-## CLI
+ATI is a **credential broker and tool proxy**. It's not a protocol — it's a binary that agents invoke via shell. Where they fit together:
+
+```mermaid
+graph LR
+    subgraph "Agent Toolbox"
+        direction TB
+        ATI_Tools["ATI<br/><small>REST APIs, search endpoints,<br/>data lookups, simple HTTP</small>"]
+        MCP_Tools["MCP Servers<br/><small>Databases, browsers, file systems,<br/>code execution, stateful tools</small>"]
+    end
+
+    Agent["Agent"] --> ATI_Tools
+    Agent --> MCP_Tools
+
+    ATI_Tools -->|"GET/POST with auth"| REST["REST APIs<br/><small>Finnhub, FRED, SerpAPI,<br/>PubMed, SEC EDGAR...</small>"]
+
+    MCP_Tools -->|"stdio / HTTP+SSE /<br/>streamable HTTP"| Complex["Complex Services<br/><small>Postgres, Chrome, GitHub,<br/>Sentry, file system...</small>"]
+
+    style ATI_Tools fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style MCP_Tools fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+```
+
+**Use MCP** for tools that need sessions, streaming, or complex protocols — database queries, browser automation, code execution, Git operations.
+
+**Use ATI** for the long tail of REST APIs where every tool is the same pattern: add auth, make request, format response. That's hundreds of tools — financial data, search, legal, medical, academic, government — and ATI turns each one into a 20-line TOML file instead of a dedicated server process.
+
+The key differentiator is credential security. MCP servers typically receive credentials via environment variables or config files. ATI's encrypted keyring model means the agent *cannot* extract credentials — even with shell access.
+
+---
+
+## Vision
+
+ATI today handles HTTP APIs with TOML manifests. Here's where it's going.
+
+### MCP Auto-Discovery
+
+Agents find new tools in the wild. Today they're stuck. Tomorrow:
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant ATI
+    participant Web as "Web / MCP Registry"
+    participant User as "User (secure channel)"
+
+    Agent->>Web: Searches for "Garmin health data API"
+    Web-->>Agent: Finds MCP server at mcp.garmin.com
+    Agent->>ATI: ati discover mcp.garmin.com
+    ATI->>Web: Fetch MCP tools/list
+    Web-->>ATI: Tool schemas + auth requirements
+    ATI->>ATI: Auto-generate manifest from MCP schema
+    ATI->>User: "Garmin MCP needs OAuth. Authorize?"
+    User->>ATI: Provides credentials (secure side-channel)
+    ATI->>ATI: Encrypt into keyring
+    ATI-->>Agent: "3 new tools available: garmin_activity, garmin_sleep, garmin_heart_rate"
+    Agent->>ATI: ati call garmin_activity --user_id me --days 7
+```
+
+The agent finds an MCP server, ATI introspects it via `tools/list`, auto-generates a manifest, and requests credentials through a **secure side-channel** (never through the agent conversation). The agent gets new tools instantly — zero restart, zero code.
+
+Key principle: **credentials never flow through the agent chat**. The user authorizes via a separate channel (dashboard, CLI prompt, QR code), and ATI encrypts them into the keyring.
+
+### Progressive Learning
+
+Agents encounter repetitive patterns. ATI learns from them:
 
 ```bash
-# Call a tool
-ati call web_search --query "quantum computing breakthroughs"
+# Agent keeps writing the same curl pattern
+$ ati learn --from-history
+
+Detected 12 calls to api.acme.com/v2/* with Bearer auth.
+Suggested manifest:
+
+  [provider]
+  name = "acme"
+  base_url = "https://api.acme.com/v2"
+  auth_type = "bearer"
+  auth_key_name = "acme_api_key"
+
+  [[tools]]
+  name = "acme_search"
+  endpoint = "/search"
+  ...
+
+Save to ~/.ati/manifests/acme.toml? [Y/n]
+```
+
+ATI watches what the agent does — repeated `curl` calls, `httpx` requests, API patterns — and suggests manifests. The agent turns ad-hoc HTTP calls into reusable, scoped, credential-secured tools. Over time, the tool library grows organically from actual usage.
+
+For trusted agents with track records, auto-approval: the manifest is saved without human review. For new agents, human-in-the-loop.
+
+### Skill Registry
+
+Skills today are local files. The vision is a shared registry — like [Tessl](https://tessl.io/) for agent methodology:
+
+```bash
+# Discover skills from the registry
+$ ati skills search "due diligence for fintech companies"
+
+  fintech-dd (v2.3)          Fintech due diligence methodology
+    by: compliance-team       downloads: 1,240
+    Covers: licensing, AML, PCI-DSS, SOC2, state money transmitter...
+
+  financial-dd (v4.1)        General financial due diligence
+    by: research-team         downloads: 3,891
+
+# Install a skill
+$ ati skills install fintech-dd
+
+# Agent uses it
+$ ati skills show fintech-dd
+```
+
+Skills are versioned, shareable, and evaluatable. Teams publish internal methodologies. The community shares domain expertise. Agents get structured context that drives [measurable improvements](https://tessl.io/) in task quality — not just raw API access, but the judgment to use it well.
+
+### Context Optimization
+
+Large API responses kill agent performance. ATI already does JSONPath extraction, but the vision goes further — inspired by [Context+](https://github.com/ForLoopCodes/contextplus):
+
+```bash
+# Semantic extraction — LLM post-processes the response
+$ ati call getIncomeStatement --ticker AAPL --limit 20 \
+    --filter "only show years where revenue declined"
+
+# Token budget enforcement
+$ ati call web_search --query "AI regulation 2026" --max-tokens 2000
+
+# Cumulative tracking
+$ ati usage
+  Session tokens: 12,450 / 50,000 budget
+  API calls: 23 (8 cached)
+  Cache hit rate: 34%
+```
+
+ATI becomes the agent's context manager — not just proxying API calls but actively reducing token waste through extraction, filtering, caching, and budget enforcement.
+
+### Tool Composition
+
+Chain tools without agent round-trips:
+
+```bash
+# Search → fetch first result → extract key facts
+$ ati pipe "web_search --query 'Acme Corp' \
+    | web_fetch --url {$.results[0].url} \
+    | summarize --format bullets"
+```
+
+One shell command instead of three agent turns. Reduces latency, saves tokens, and lets agents express complex workflows declaratively.
+
+### WASM Plugins
+
+For tools that need complex multi-step logic — OAuth flows, pagination, scraping with retry:
+
+```bash
+# WASM plugin sandboxed inside ATI
+[provider]
+name = "complex_api"
+handler = "wasm"
+wasm_module = "complex_api.wasm"
+```
+
+WASM modules run in Wasmtime with network access limited to their declared `base_url`. They receive keyring credentials via imports — can't exfiltrate them. Anyone can write plugins in Rust, Go, or C.
+
+---
+
+## CLI Reference
+
+```
+ati — Agent Tools Interface
+
+USAGE:
+    ati [OPTIONS] <COMMAND>
+
+COMMANDS:
+    call       Execute a tool by name
+    tools      List, inspect, and discover tools
+    skills     Manage skill files (methodology docs)
+    help       LLM-powered tool discovery
+    auth       Authentication and scope info
+    version    Print version
+
+OPTIONS:
+    --output <FORMAT>   json, table, text [default: text]
+    --verbose           Debug output
+```
+
+```bash
+# Call tools
+ati call web_search --query "quantum computing" --max_results 5
 ati call finnhub_quote --symbol AAPL
 ati call getIncomeStatement --ticker MSFT --period annual --limit 5
 
 # Discover tools
-ati tools list                          # all available tools
-ati tools list --provider finnhub       # tools from one provider
-ati tools info getIncomeStatement       # schema, auth, description
-ati tools providers                     # list all providers
+ati tools list
+ati tools list --provider finnhub
+ati tools info getIncomeStatement
+ati tools providers
 
-# Skills (methodology docs for agents)
+# Skills
 ati skills list
 ati skills show financial-due-diligence
 
@@ -146,63 +541,28 @@ ati skills show financial-due-diligence
 ati help "I need to find SEC filings for a company"
 
 # Auth status
-ati auth status                         # scopes, expiry, agent info
+ati auth status
 
 # Output formats
 ati --output json call finnhub_quote --symbol AAPL
 ati --output table call getIncomeStatement --ticker AAPL --limit 3
 ```
 
-## Skills
-
-Skills are methodology documents — structured instructions that tell agents *how* to approach a task. They complement tools: tools provide data access, skills provide methodology.
-
-```
-~/.ati/skills/
-  financial-due-diligence/
-    SKILL.md          # Step-by-step methodology
-  patent-search/
-    SKILL.md
-```
-
-An agent might load `ati skills show financial-due-diligence` to get the research approach, then call `ati call getIncomeStatement` and `ati call sec_filing_search` to gather data.
-
-## How ATI Relates to MCP
-
-ATI is not a replacement for MCP. They solve different problems and work well together.
-
-**MCP** (Model Context Protocol) is a protocol for connecting LLMs to tool servers. It supports multiple transports (stdio, HTTP+SSE, streamable HTTP) and provides a standard way for models to discover and invoke tools. MCP servers can maintain state, stream responses, and handle complex multi-turn interactions.
-
-**ATI** is a credential broker and HTTP proxy. It doesn't define a protocol — it's a CLI binary that agents invoke via shell. Its job is narrow: decrypt credentials, make authenticated HTTP requests, enforce scopes, return results.
-
-Where they overlap and where they don't:
-
-| | MCP | ATI |
-|---|-----|-----|
-| **Good at** | Stateful tool servers, streaming, complex protocols, interactive use | Simple HTTP APIs, credential isolation, scope enforcement |
-| **Transport** | stdio, HTTP+SSE, streamable HTTP | Shell invocation (`ati call ...`) |
-| **State** | Servers can maintain sessions | Stateless per invocation |
-| **Credential model** | Configured per-server (env vars, config) | Encrypted keyring, memory-locked |
-| **Adding tools** | Write a server in any language | Write a TOML file |
-| **Best for** | Databases, file systems, complex APIs with sessions | REST APIs, search endpoints, data lookups |
-
-In practice, you'd use both: MCP for tools that need sessions or streaming (database queries, browser automation, code execution), and ATI for the long tail of REST APIs where each tool is just "make this HTTP request with this auth".
+---
 
 ## Building
 
 ```bash
-cd ati
-
-# Debug build
+# Debug
 cargo build
 
-# Release build (for deployment)
+# Release
 cargo build --release
 
-# Run tests
+# Tests
 cargo test
 
-# Static binary for Linux sandboxes (no glibc dependency)
+# Static binary (no glibc dependency — ideal for containers/sandboxes)
 cargo build --release --target x86_64-unknown-linux-musl
 ```
 
@@ -213,47 +573,46 @@ ati/
 ├── Cargo.toml
 ├── README.md
 ├── docs/
-│   ├── SECURITY.md          # Threat model and security design
-│   └── IDEAS.md             # Future directions
-├── manifests/               # TOML tool definitions
-│   ├── example.toml         # Annotated template
-│   ├── parallel.toml        # Web search & fetch
-│   ├── pubmed.toml          # Medical literature (free)
-│   ├── epo.toml             # European Patent Office
-│   ├── middesk.toml         # Business verification
-│   ├── arxiv.toml           # arXiv papers (free)
-│   ├── crossref.toml        # Academic papers (free)
-│   ├── semantic_scholar.toml # Semantic Scholar
-│   ├── courtlistener.toml   # US legal cases
-│   ├── hackernews.toml      # Hacker News (free)
-│   ├── nhtsa.toml           # VIN decoder (free)
-│   ├── clinicaltrials.toml  # ClinicalTrials.gov (free)
-│   ├── sec_edgar.toml       # SEC EDGAR filings (free)
-│   ├── _llm.toml            # Internal LLM for ati help
-│   └── README.md            # Manifest format docs
+│   ├── SECURITY.md              # Full threat model
+│   └── IDEAS.md                 # Future directions
+├── manifests/                   # TOML tool definitions
+│   ├── example.toml             # Annotated template
+│   ├── parallel.toml            # Web search & fetch
+│   ├── pubmed.toml              # Medical literature
+│   ├── arxiv.toml               # arXiv papers
+│   ├── crossref.toml            # Academic papers
+│   ├── semantic_scholar.toml    # Papers + citations
+│   ├── courtlistener.toml       # US legal cases
+│   ├── hackernews.toml          # Tech news
+│   ├── sec_edgar.toml           # SEC filings
+│   ├── clinicaltrials.toml      # Clinical trials
+│   ├── nhtsa.toml               # VIN decoder
+│   ├── epo.toml                 # European patents
+│   ├── middesk.toml             # Business verification
+│   └── _llm.toml                # Internal (ati help)
 ├── src/
-│   ├── main.rs              # CLI entry point (clap)
-│   ├── cli/                 # Subcommand handlers
-│   │   ├── call.rs          # ati call <tool> --args
-│   │   ├── tools.rs         # ati tools list/info/providers
-│   │   ├── skills.rs        # ati skills list/show/save
-│   │   ├── help.rs          # ati help "query" (LLM-powered)
-│   │   └── auth.rs          # ati auth status
+│   ├── main.rs                  # CLI entry (clap)
+│   ├── cli/                     # Subcommand handlers
+│   │   ├── call.rs              # ati call
+│   │   ├── tools.rs             # ati tools
+│   │   ├── skills.rs            # ati skills
+│   │   ├── help.rs              # ati help
+│   │   └── auth.rs              # ati auth
 │   ├── core/
-│   │   ├── manifest.rs      # TOML manifest parsing
-│   │   ├── http.rs          # HTTP execution + auth injection
-│   │   ├── keyring.rs       # Encrypted credential storage
-│   │   ├── scope.rs         # Scope enforcement
-│   │   └── response.rs      # JSONPath extraction + formatting
+│   │   ├── manifest.rs          # TOML parsing
+│   │   ├── http.rs              # HTTP + auth injection
+│   │   ├── keyring.rs           # Encrypted credentials
+│   │   ├── scope.rs             # Scope enforcement
+│   │   └── response.rs          # JSONPath + formatting
 │   ├── security/
-│   │   ├── memory.rs        # mlock, madvise, zeroize
-│   │   └── sealed_file.rs   # One-shot file read + unlink
+│   │   ├── memory.rs            # mlock, madvise, zeroize
+│   │   └── sealed_file.rs       # One-shot file read
 │   ├── output/
 │   │   ├── json.rs
 │   │   ├── table.rs
 │   │   └── text.rs
 │   └── providers/
-│       └── generic.rs       # Generic HTTP provider
+│       └── generic.rs           # Generic HTTP provider
 └── tests/
     ├── manifest_test.rs
     ├── keyring_test.rs
