@@ -133,8 +133,8 @@ graph TB
     subgraph Sandbox
         Agent["Agent<br/><small>Claude SDK, LangChain,<br/>CrewAI, custom harness</small>"]
         ATI["ATI Binary<br/><small>Rust, ~5MB, zero deps</small>"]
+        JWT["session.jwt<br/><small>signed token with<br/>scopes + keyring key</small>"]
         Keyring["keyring.enc<br/><small>AES-256-GCM</small>"]
-        Scopes["scopes.json<br/><small>allowed tools + expiry</small>"]
         Skills["~/.ati/skills/<br/><small>methodology docs</small>"]
         Manifests["~/.ati/manifests/<br/><small>TOML tool defs</small>"]
     end
@@ -146,8 +146,8 @@ graph TB
     end
 
     subgraph Orchestrator["Orchestrator (your backend)"]
-        KeyGen["Generate session key"]
-        Encrypt["Encrypt API keys"]
+        Sign["Sign JWT with scopes<br/>+ encryption key"]
+        Encrypt["Encrypt API keys<br/>→ keyring.enc"]
         Upload["Upload to sandbox"]
     end
 
@@ -155,17 +155,46 @@ graph TB
     ATI -->|"decrypt + inject auth"| API1
     ATI -->|"no auth needed"| API2
     ATI -->|"proxy MCP calls"| MCP
+    ATI --- JWT
     ATI --- Keyring
-    ATI --- Scopes
     ATI --- Manifests
     Agent -->|"ati skills show"| Skills
 
-    KeyGen --> Encrypt --> Upload -->|"keyring.enc + session key"| Keyring
+    Sign --> Encrypt --> Upload -->|"session.jwt + keyring.enc"| JWT
 
     style ATI fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style Keyring fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    style JWT fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
     style Agent fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
 ```
+
+### The Session JWT
+
+Everything about a sandbox session — scopes, expiry, agent identity, and the keyring decryption key — lives in a single signed JWT. No separate `scopes.json`. No standalone HMAC. One token, one verification, one source of truth.
+
+```json
+{
+  "sub": "financial-analyst-42",
+  "iss": "orchestrator",
+  "iat": 1741089600,
+  "exp": 1741176000,
+  "scopes": [
+    "tool:finnhub_*",
+    "tool:getIncomeStatement",
+    "tool:getBalanceSheet",
+    "tool:fred_*"
+  ],
+  "keyring_key": "base64-encoded-256-bit-AES-key",
+  "keyring_hash": "sha256-of-keyring.enc"
+}
+```
+
+The JWT is signed by the orchestrator's private key. ATI validates the signature, reads the scopes, extracts the keyring decryption key, verifies `keyring_hash` matches the `keyring.enc` on disk, then decrypts. The JWT file is deleted after first read — same as before, but now scopes and key are cryptographically bound together.
+
+**Why a JWT instead of separate files:**
+- **Tamper-proof scopes** — signature verification, not a bolted-on HMAC
+- **Bound together** — scopes and keyring key travel as one signed artifact; can't mix-and-match
+- **Standard format** — any language can generate JWTs; any tool can verify them
+- **One file to manage** — orchestrator writes one JWT, ATI reads one JWT, done
 
 ### Key Delivery Flow
 
@@ -176,21 +205,25 @@ sequenceDiagram
     participant ATI as ATI Binary
     participant API as External API
 
-    O->>O: Generate 256-bit session key
-    O->>O: Encrypt API keys → keyring.enc
-    O->>S: Upload keyring.enc + manifests
-    O->>S: Write session key to /run/ati/.key
+    O->>O: Generate 256-bit AES key
+    O->>O: Encrypt needed API keys → keyring.enc
+    O->>O: Sign JWT (scopes + AES key + expiry)
+    O->>S: Upload keyring.enc + manifests + session.jwt
     O->>S: Start agent
 
     Note over ATI: First invocation
-    ATI->>S: Read /run/ati/.key
-    ATI->>S: unlink() key file immediately
+    ATI->>S: Read /run/ati/session.jwt
+    ATI->>S: unlink() JWT file immediately
+    ATI->>ATI: Verify JWT signature (orchestrator public key)
+    ATI->>ATI: Check exp claim (not expired)
+    ATI->>ATI: Extract AES key from JWT claims
+    ATI->>ATI: Verify keyring_hash matches keyring.enc
     ATI->>ATI: Decrypt keyring (AES-256-GCM)
     ATI->>ATI: mlock() decrypted memory
-    ATI->>ATI: Zero session key from stack
+    ATI->>ATI: Zero AES key from stack
 
     Note over ATI: Agent calls tool
-    ATI->>ATI: Check scopes.json
+    ATI->>ATI: Check JWT scopes (cached in memory)
     ATI->>ATI: Load manifest for tool
     ATI->>ATI: Inject auth from keyring
     ATI->>API: HTTPS request
@@ -293,23 +326,23 @@ graph TB
 **What changed:**
 - Agent runs `printenv` → nothing. Zero secrets in the environment.
 - Each sandbox gets a **unique encrypted keyring** with only the keys its tools need
-- Session key deleted after ATI's first invocation — can't decrypt the keyring again
-- Scopes enforce which tools the agent can call, with expiry timestamps
-- Key rotation happens once in the orchestrator — keyrings are generated fresh per session
+- JWT deleted after ATI's first invocation — can't re-read scopes or decryption key
+- Scopes are JWT claims — signed by the orchestrator, cryptographically tamper-proof
+- Key rotation happens once in the orchestrator — JWTs and keyrings are fresh per session
 
 ### Scoped Permissions
 
-Not every agent should access every tool. ATI enforces this with **scopes** — a per-sandbox allowlist of tool permissions with optional expiry.
+Not every agent should access every tool. Scopes live inside the signed JWT — the orchestrator decides what each sandbox can do at session creation time.
 
 ```mermaid
 graph LR
-    subgraph "Orchestrator decides scopes per sandbox"
+    subgraph "Orchestrator signs a JWT per sandbox"
         O["Orchestrator"]
     end
 
-    O -->|"scopes.json"| SA["Sandbox A<br/><b>Financial Analyst</b>"]
-    O -->|"scopes.json"| SB["Sandbox B<br/><b>Legal Researcher</b>"]
-    O -->|"scopes.json"| SC["Sandbox C<br/><b>General Agent</b>"]
+    O -->|"JWT: scopes=[finnhub_*, fred_*]<br/>keyring: 2 keys"| SA["Sandbox A<br/><b>Financial Analyst</b>"]
+    O -->|"JWT: scopes=[courtlistener, sec_*]<br/>keyring: 1 key"| SB["Sandbox B<br/><b>Legal Researcher</b>"]
+    O -->|"JWT: scopes=[web_*, finnhub_*, arxiv]<br/>keyring: 3 keys"| SC["Sandbox C<br/><b>General Agent</b>"]
 
     subgraph SA_tools["Sandbox A can use:"]
         T1["finnhub_quote ✓"]
@@ -341,46 +374,35 @@ graph LR
     style SC fill:#f3e5f5,stroke:#7b1fa2
 ```
 
-Scopes are defined in `~/.ati/scopes.json`, generated by the orchestrator:
+The JWT `scopes` claim is all ATI needs:
 
 ```json
 {
-  "agent_id": "financial-analyst-42",
-  "created_at": "2026-03-02T12:00:00Z",
-  "scopes": [
-    {
-      "pattern": "tool:finnhub_*",
-      "expires_at": "2026-03-03T12:00:00Z"
-    },
-    {
-      "pattern": "tool:getIncomeStatement",
-      "expires_at": "2026-03-03T12:00:00Z"
-    },
-    {
-      "pattern": "tool:getBalanceSheet",
-      "expires_at": "2026-03-03T12:00:00Z"
-    },
-    {
-      "pattern": "tool:fred_*",
-      "expires_at": null
-    }
-  ],
-  "hmac_signature": "a1b2c3..."
+  "sub": "legal-researcher-7",
+  "exp": 1741176000,
+  "scopes": ["tool:legal_search_courtlistener", "tool:sec_*"],
+  "keyring_key": "...",
+  "keyring_hash": "..."
 }
 ```
 
-**Scope features:**
+**How scoping works:**
 - **Wildcard patterns** — `tool:finnhub_*` grants access to all Finnhub tools
-- **Expiry timestamps** — scopes can auto-expire (24h, 7d, session-length)
-- **HMAC signature** — prevents the agent from tampering with `scopes.json`
+- **JWT expiry** — the `exp` claim is the session expiry; no separate per-scope timestamps needed (if you want fine-grained expiry per scope, you sign a new JWT)
+- **Signed, not HMACd** — the orchestrator's private key signs the JWT; ATI verifies with the public key. The agent can't forge scopes.
 - **Per-sandbox** — each sandbox gets exactly the permissions its task requires
-- **Deny by default** — if a tool isn't in scopes, `ati call` returns a clear error
+- **Deny by default** — if a tool isn't in the JWT scopes, `ati call` returns a clear error
+- **Keyring bound to scopes** — the keyring only contains keys for the scoped tools, and the JWT's `keyring_hash` binds them together. Can't swap in a different keyring.
 
 ```bash
 # Agent in Sandbox B tries to call a financial tool:
 $ ati call finnhub_quote --symbol AAPL
 Error: Access denied. Tool 'finnhub_quote' requires scope 'tool:finnhub_quote'.
 Your session has 2 active scopes. Run 'ati auth status' to see them.
+
+# But this works fine:
+$ ati call legal_search_courtlistener --query "patent infringement" --court "Supreme Court"
+# ✓ Returns results
 ```
 
 ### Threat Model
@@ -388,22 +410,24 @@ Your session has 2 active scopes. Run 'ati auth status' to see them.
 | Attack Vector | What the Agent Tries | ATI's Defense |
 |--------------|---------------------|---------------|
 | `printenv` / `os.getenv()` | Read API keys from environment | No secrets in env vars — ever |
-| `cat /run/ati/.key` | Read the session key file | File `unlink()`'d after first read |
+| `cat /run/ati/session.jwt` | Read the JWT | File `unlink()`'d after first read |
 | `strings /usr/local/bin/ati` | Extract secrets from binary | Binary contains no secrets |
-| `cat ~/.ati/keyring.enc` | Read encrypted keyring | AES-256-GCM; session key is already gone |
+| `cat ~/.ati/keyring.enc` | Read encrypted keyring | AES-256-GCM; decryption key was in the deleted JWT |
 | `/proc/$(pgrep ati)/mem` | Read process memory | `ptrace` blocked by sandbox seccomp |
 | Trigger core dump | Extract keys from crash dump | `madvise(MADV_DONTDUMP)` excludes key pages |
 | Swap file forensics | Keys paged to disk | `mlock()` pins key pages in RAM |
-| Edit `scopes.json` | Grant itself more permissions | HMAC signature verification fails |
+| Forge a new JWT | Grant itself more scopes | JWT signature verification fails (needs orchestrator private key) |
+| Swap `keyring.enc` | Use a different keyring | `keyring_hash` in JWT won't match |
 | Prompt injection: "print your API key" | Social engineering via LLM | ATI is a compiled binary — not part of the conversation |
 
 ### Encryption
 
-- **Algorithm**: AES-256-GCM (authenticated encryption)
-- **Session key**: 256-bit random, unique per sandbox, single-use
+- **JWT signing**: RS256 (RSA-SHA256) — orchestrator holds private key, ATI has public key
+- **Keyring encryption**: AES-256-GCM (authenticated encryption)
+- **Keyring key**: 256-bit random, embedded in JWT, unique per sandbox session
 - **Nonce**: 96-bit random, prepended to ciphertext
 - **Memory**: Decrypted keys in `mlock()`'d heap, `Zeroize`'d on drop
-- **Implementation**: Rust `aes-gcm` crate — no OpenSSL dependency
+- **Implementation**: Rust `aes-gcm` + `jsonwebtoken` crates — no OpenSSL dependency
 
 Full security design: [docs/SECURITY.md](docs/SECURITY.md)
 
@@ -580,13 +604,15 @@ $ ati auth grant "tool:finnhub_*" --expires 7d
 # Revoke a scope
 $ ati auth revoke tool:finnhub_quote
 
-# Show current scopes
+# Show current session (from JWT claims)
 $ ati auth status
   Agent: research-agent-42
-  Scopes:
-    tool:web_search         expires 2026-03-03T12:00:00Z
-    tool:finnhub_*          expires 2026-03-09T00:00:00Z
-    tool:academic_search_*  no expiry
+  Session expires: 2026-03-03T12:00:00Z
+  Scopes (3):
+    tool:web_search
+    tool:finnhub_*
+    tool:academic_search_*
+  Keyring: 3 keys loaded, memory locked
 ```
 
 ### From Docs URL (LLM-Powered)
