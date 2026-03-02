@@ -330,6 +330,139 @@ See [`manifests/example.toml`](manifests/example.toml) for a fully annotated tem
 
 ---
 
+## Registry Management
+
+You don't have to hand-write TOML files. ATI's CLI can add providers, tools, secrets, and MCP servers interactively:
+
+### Add a REST API
+
+```bash
+# Interactive — ATI asks for base URL, auth type, endpoints
+$ ati add provider
+
+  Provider name: finnhub
+  Base URL: https://finnhub.io/api/v1
+  Auth type (bearer/header/query/basic/none): header
+  Auth header name [X-Api-Key]: X-Finnhub-Token
+  Key name in keyring: finnhub_api_key
+
+  Created manifests/finnhub.toml
+
+  Add a tool? [Y/n] y
+  Tool name: finnhub_quote
+  Description: Get real-time stock price
+  Endpoint: /quote
+  Method (GET/POST) [GET]: GET
+  Required params (comma-separated): symbol
+
+  Added finnhub_quote to manifests/finnhub.toml
+  Add another tool? [Y/n]
+```
+
+Or one-liner for scripting:
+
+```bash
+# Non-interactive
+ati add provider finnhub \
+  --base-url https://finnhub.io/api/v1 \
+  --auth header \
+  --auth-header-name "X-Finnhub-Token" \
+  --key-name finnhub_api_key
+
+ati add tool finnhub finnhub_quote \
+  --endpoint /quote \
+  --method GET \
+  --param "symbol:string:required:Stock ticker symbol"
+```
+
+### Add an MCP Server
+
+```bash
+# stdio-based MCP server
+$ ati add mcp github \
+  --transport stdio \
+  --command "npx -y @modelcontextprotocol/server-github" \
+  --key-name github_token
+
+  Connecting to MCP server...
+  Discovered 12 tools via tools/list
+  Created manifests/github.toml with 12 tools
+
+# Remote MCP server (HTTP+SSE)
+$ ati add mcp linear \
+  --transport sse \
+  --url https://mcp.linear.app/sse \
+  --key-name linear_api_key
+
+  Discovered 8 tools via tools/list
+  Created manifests/linear.toml with 8 tools
+```
+
+ATI introspects the MCP server's `tools/list`, auto-generates the manifest with proper input schemas, and wires up auth. The agent never talks MCP — it just calls `ati call linear_create_issue`.
+
+### Add Secrets
+
+```bash
+# Add a key to the keyring
+$ ati auth add-key finnhub_api_key
+  Enter value: ****
+  Encrypted and saved to keyring.
+
+# Import from environment (for migration from env-var based setups)
+$ ati auth import-env FINNHUB_API_KEY --as finnhub_api_key
+  Imported, encrypted, and saved. You can now unset FINNHUB_API_KEY.
+
+# List keys (names only, never values)
+$ ati auth keys
+  finnhub_api_key       (header auth)
+  parallel_api_key      (bearer auth)
+  fred_api_key          (query auth)
+
+# Rotate a key
+$ ati auth rotate finnhub_api_key
+  Enter new value: ****
+  Rotated and re-encrypted.
+```
+
+### Add Scopes
+
+```bash
+# Grant a tool scope to the current session
+$ ati auth grant tool:finnhub_quote --expires 24h
+
+# Grant all tools from a provider
+$ ati auth grant "tool:finnhub_*" --expires 7d
+
+# Revoke a scope
+$ ati auth revoke tool:finnhub_quote
+
+# Show current scopes
+$ ati auth status
+  Agent: research-agent-42
+  Scopes:
+    tool:web_search         expires 2026-03-03T12:00:00Z
+    tool:finnhub_*          expires 2026-03-09T00:00:00Z
+    tool:academic_search_*  no expiry
+```
+
+### From Docs URL (LLM-Powered)
+
+```bash
+# Point ATI at API docs, it generates the manifest
+$ ati add from-docs https://developer.finnhub.io/docs/api
+
+  Analyzing API documentation...
+  Found 14 endpoints across 5 categories.
+
+  Generated manifest with 14 tools:
+    finnhub_quote, finnhub_profile, finnhub_news,
+    finnhub_peers, finnhub_metrics, finnhub_candles, ...
+
+  Save to manifests/finnhub.toml? [Y/n]
+```
+
+---
+
 ## One Interface, Everything Behind It
 
 The agent calls `ati call <tool>`. It doesn't know — or care — what's behind that tool.
@@ -506,9 +639,10 @@ USAGE:
 COMMANDS:
     call       Execute a tool by name
     tools      List, inspect, and discover tools
+    add        Add providers, tools, MCP servers, or generate from docs
+    auth       Manage secrets, scopes, and session info
     skills     Manage skill files (methodology docs)
     help       LLM-powered tool discovery
-    auth       Authentication and scope info
     version    Print version
 
 OPTIONS:
@@ -528,15 +662,25 @@ ati tools list --provider finnhub
 ati tools info getIncomeStatement
 ati tools providers
 
+# Add providers and tools
+ati add provider finnhub --base-url https://finnhub.io/api/v1 --auth header
+ati add tool finnhub finnhub_quote --endpoint /quote --method GET
+ati add mcp github --transport stdio --command "npx -y @modelcontextprotocol/server-github"
+ati add from-docs https://developer.finnhub.io/docs/api
+
+# Manage secrets and scopes
+ati auth add-key finnhub_api_key
+ati auth import-env FINNHUB_API_KEY --as finnhub_api_key
+ati auth keys
+ati auth grant "tool:finnhub_*" --expires 7d
+ati auth status
+
 # Skills
 ati skills list
 ati skills show financial-due-diligence
 
 # LLM-powered discovery
 ati help "I need to find SEC filings for a company"
-
-# Auth status
-ati auth status
 
 # Output formats
 ati --output json call finnhub_quote --symbol AAPL
