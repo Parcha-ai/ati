@@ -330,38 +330,33 @@ See [`manifests/example.toml`](manifests/example.toml) for a fully annotated tem
 
 ---
 
-## ATI and MCP
+## One Interface, Everything Behind It
 
-ATI is **not** a replacement for MCP. They're complementary.
-
-[MCP](https://modelcontextprotocol.io/) (Model Context Protocol) is a protocol standard for connecting LLMs to tool servers. It supports multiple transports — stdio, HTTP+SSE, streamable HTTP — and enables stateful, streaming, multi-turn tool interactions. MCP servers can maintain sessions, push notifications, and handle complex protocols.
-
-ATI is a **credential broker and tool proxy**. It's not a protocol — it's a binary that agents invoke via shell. Where they fit together:
+The agent calls `ati call <tool>`. It doesn't know — or care — what's behind that tool.
 
 ```mermaid
-graph LR
-    subgraph "Agent Toolbox"
-        direction TB
-        ATI_Tools["ATI<br/><small>REST APIs, search endpoints,<br/>data lookups, simple HTTP</small>"]
-        MCP_Tools["MCP Servers<br/><small>Databases, browsers, file systems,<br/>code execution, stateful tools</small>"]
-    end
+graph TB
+    Agent["Agent"] -->|"ati call <tool>"| ATI["ATI"]
 
-    Agent["Agent"] --> ATI_Tools
-    Agent --> MCP_Tools
+    ATI -->|"Direct HTTP"| REST["REST APIs<br/><small>Finnhub, FRED, SerpAPI,<br/>PubMed, SEC EDGAR...</small>"]
+    ATI -->|"stdio proxy"| MCP_Stdio["MCP Servers (stdio)<br/><small>npx-based servers,<br/>local tools</small>"]
+    ATI -->|"HTTP+SSE / streamable"| MCP_HTTP["MCP Servers (HTTP)<br/><small>Remote MCP endpoints,<br/>hosted services</small>"]
+    ATI -->|"Shell exec"| CLI["CLI Tools<br/><small>git, docker, kubectl,<br/>custom scripts</small>"]
 
-    ATI_Tools -->|"GET/POST with auth"| REST["REST APIs<br/><small>Finnhub, FRED, SerpAPI,<br/>PubMed, SEC EDGAR...</small>"]
-
-    MCP_Tools -->|"stdio / HTTP+SSE /<br/>streamable HTTP"| Complex["Complex Services<br/><small>Postgres, Chrome, GitHub,<br/>Sentry, file system...</small>"]
-
-    style ATI_Tools fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style MCP_Tools fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style ATI fill:#e8f5e9,stroke:#2e7d32,stroke-width:3px
+    style Agent fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
 ```
 
-**Use MCP** for tools that need sessions, streaming, or complex protocols — database queries, browser automation, code execution, Git operations.
+Behind the scenes, ATI can:
 
-**Use ATI** for the long tail of REST APIs where every tool is the same pattern: add auth, make request, format response. That's hundreds of tools — financial data, search, legal, medical, academic, government — and ATI turns each one into a 20-line TOML file instead of a dedicated server process.
+- **Call a REST API** directly (TOML manifest → HTTP request with injected auth)
+- **Proxy an MCP server** over any transport — stdio, HTTP+SSE, streamable HTTP — without the agent managing MCP connections or knowing the protocol exists
+- **Wrap a CLI tool** — shell out to `git`, `kubectl`, whatever, with structured input/output
+- **Chain tools** — compose multiple calls into one invocation
 
-The key differentiator is credential security. MCP servers typically receive credentials via environment variables or config files. ATI's encrypted keyring model means the agent *cannot* extract credentials — even with shell access.
+The agent gets one consistent interface: `ati call <tool_name> --args`. ATI handles the protocol, the credentials, and the response formatting. MCP, REST, CLI — they're all just backends.
+
+This is the point: **agents shouldn't think about transport protocols**. They should think about what data they need. ATI is the abstraction layer that makes "search the web," "query Postgres," and "check a stock price" all look the same from the agent's perspective — while keeping credentials locked down regardless of which backend handles the request.
 
 ---
 
