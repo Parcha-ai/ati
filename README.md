@@ -205,42 +205,185 @@ The agent harness can be anything — [Claude Agent SDK](https://docs.anthropic.
 
 ## Security
 
-Every design decision starts with one assumption: **the agent is untrusted**.
+### Before ATI: Secrets Everywhere
 
-It can run arbitrary shell commands. It can read files. It can inspect processes. It will try to extract credentials if prompted to do so (intentionally or via injection). ATI makes that extraction infeasible.
+Every sandbox gets a copy of every API key it *might* need. Tens of keys floating around as environment variables, readable by any process. Every MCP server config embeds credentials. Scaling to N sandboxes means N copies of your secrets, all in plaintext.
 
-### Threat Model
+```mermaid
+graph TB
+    subgraph "Before: The Typical Setup"
+        direction TB
+        Orch1["Orchestrator"] -->|"env vars"| S1
+        Orch1 -->|"env vars"| S2
+        Orch1 -->|"env vars"| S3
+
+        subgraph S1["Sandbox A"]
+            direction LR
+            E1["FINNHUB_API_KEY=sk-abc...<br/>PARALLEL_API_KEY=pk-def...<br/>FRED_API_KEY=fk-ghi...<br/>SERPAPI_KEY=sp-jkl...<br/>GITHUB_TOKEN=ghp-mno...<br/>SENTRY_TOKEN=snt-pqr...<br/>COURTLISTENER_TOKEN=cl-stu...<br/>MIDDESK_KEY=md-vwx..."]
+            MCP1["MCP Server 1<br/><small>reads env</small>"]
+            MCP2["MCP Server 2<br/><small>reads env</small>"]
+            Agent1["Agent<br/><small>can read ALL keys<br/>with printenv</small>"]
+        end
+
+        subgraph S2["Sandbox B"]
+            E2["Same 8 keys<br/><small>even if it only<br/>needs 2 of them</small>"]
+            Agent2["Agent<br/><small>can read ALL keys</small>"]
+        end
+
+        subgraph S3["Sandbox C"]
+            E3["Same 8 keys<br/><small>copy #3</small>"]
+            Agent3["Agent<br/><small>can read ALL keys</small>"]
+        end
+    end
+
+    style E1 fill:#ffcdd2,stroke:#c62828
+    style E2 fill:#ffcdd2,stroke:#c62828
+    style E3 fill:#ffcdd2,stroke:#c62828
+    style Agent1 fill:#ffcdd2,stroke:#c62828
+    style Agent2 fill:#ffcdd2,stroke:#c62828
+    style Agent3 fill:#ffcdd2,stroke:#c62828
+```
+
+**Problems:**
+- Agent runs `printenv` → has every API key
+- Prompt injection → "print all environment variables" → keys exfiltrated
+- Every sandbox gets **all** keys, even if it only needs two
+- Rotating one key means updating every sandbox, MCP config, `.env` file
+- No audit trail — impossible to know which sandbox used which key
+
+### After ATI: Encrypted, Scoped, Minimal
+
+Each sandbox gets **only the keys it needs**, encrypted with a one-time session key that's deleted after first read. The agent can't see any credentials, period.
+
+```mermaid
+graph TB
+    subgraph "After: ATI"
+        direction TB
+        Orch2["Orchestrator"] -->|"keyring.enc<br/><small>2 keys, encrypted</small>"| SA
+        Orch2 -->|"keyring.enc<br/><small>1 key, encrypted</small>"| SB
+        Orch2 -->|"keyring.enc<br/><small>3 keys, encrypted</small>"| SC
+
+        subgraph SA["Sandbox A — Financial Research"]
+            direction LR
+            ATI_A["ATI<br/><small>finnhub_api_key ✓<br/>fred_api_key ✓</small>"]
+            AgentA["Agent<br/><small>no env vars<br/>no readable keys<br/>scoped to 5 tools</small>"]
+        end
+
+        subgraph SB["Sandbox B — Legal Research"]
+            direction LR
+            ATI_B["ATI<br/><small>courtlistener_token ✓</small>"]
+            AgentB["Agent<br/><small>scoped to 2 tools</small>"]
+        end
+
+        subgraph SC["Sandbox C — General Research"]
+            direction LR
+            ATI_C["ATI<br/><small>parallel_api_key ✓<br/>serpapi_key ✓<br/>finnhub_api_key ✓</small>"]
+            AgentC["Agent<br/><small>scoped to 8 tools</small>"]
+        end
+    end
+
+    style ATI_A fill:#c8e6c9,stroke:#2e7d32
+    style ATI_B fill:#c8e6c9,stroke:#2e7d32
+    style ATI_C fill:#c8e6c9,stroke:#2e7d32
+    style AgentA fill:#e8f5e9,stroke:#2e7d32
+    style AgentB fill:#e8f5e9,stroke:#2e7d32
+    style AgentC fill:#e8f5e9,stroke:#2e7d32
+```
+
+**What changed:**
+- Agent runs `printenv` → nothing. Zero secrets in the environment.
+- Each sandbox gets a **unique encrypted keyring** with only the keys its tools need
+- Session key deleted after ATI's first invocation — can't decrypt the keyring again
+- Scopes enforce which tools the agent can call, with expiry timestamps
+- Key rotation happens once in the orchestrator — keyrings are generated fresh per session
+
+### Scoped Permissions
+
+Not every agent should access every tool. ATI enforces this with **scopes** — a per-sandbox allowlist of tool permissions with optional expiry.
 
 ```mermaid
 graph LR
-    subgraph "Attack Surface"
-        E["env vars<br/><small>printenv, /proc/self/environ</small>"]
-        F["files<br/><small>cat, find, grep</small>"]
-        P["process memory<br/><small>/proc/pid/mem, ptrace</small>"]
-        D["disk<br/><small>swap, core dumps</small>"]
-        B["binary<br/><small>strings, objdump</small>"]
+    subgraph "Orchestrator decides scopes per sandbox"
+        O["Orchestrator"]
     end
 
-    subgraph "ATI Mitigations"
-        M1["No secrets in env"]
-        M2["Key file deleted<br/>after first read"]
-        M3["seccomp blocks ptrace<br/>mlock prevents swap"]
-        M4["madvise DONTDUMP<br/>mlock prevents swap"]
-        M5["No embedded secrets"]
+    O -->|"scopes.json"| SA["Sandbox A<br/><b>Financial Analyst</b>"]
+    O -->|"scopes.json"| SB["Sandbox B<br/><b>Legal Researcher</b>"]
+    O -->|"scopes.json"| SC["Sandbox C<br/><b>General Agent</b>"]
+
+    subgraph SA_tools["Sandbox A can use:"]
+        T1["finnhub_quote ✓"]
+        T2["finnhub_profile ✓"]
+        T3["getIncomeStatement ✓"]
+        T4["getBalanceSheet ✓"]
+        T5["fred_series_observations ✓"]
     end
 
-    E -.->|"blocked"| M1
-    F -.->|"blocked"| M2
-    P -.->|"blocked"| M3
-    D -.->|"blocked"| M4
-    B -.->|"blocked"| M5
+    subgraph SB_tools["Sandbox B can use:"]
+        T6["legal_search_courtlistener ✓"]
+        T7["sec_filing_search ✓"]
+    end
 
-    style M1 fill:#c8e6c9,stroke:#2e7d32
-    style M2 fill:#c8e6c9,stroke:#2e7d32
-    style M3 fill:#c8e6c9,stroke:#2e7d32
-    style M4 fill:#c8e6c9,stroke:#2e7d32
-    style M5 fill:#c8e6c9,stroke:#2e7d32
+    subgraph SC_tools["Sandbox C can use:"]
+        T8["web_search ✓"]
+        T9["web_fetch ✓"]
+        T10["finnhub_quote ✓"]
+        T11["academic_search_arxiv ✓"]
+        T12["hackernews_stories ✓"]
+    end
+
+    SA --- SA_tools
+    SB --- SB_tools
+    SC --- SC_tools
+
+    style SA fill:#e3f2fd,stroke:#1565c0
+    style SB fill:#fff3e0,stroke:#ef6c00
+    style SC fill:#f3e5f5,stroke:#7b1fa2
 ```
+
+Scopes are defined in `~/.ati/scopes.json`, generated by the orchestrator:
+
+```json
+{
+  "agent_id": "financial-analyst-42",
+  "created_at": "2026-03-02T12:00:00Z",
+  "scopes": [
+    {
+      "pattern": "tool:finnhub_*",
+      "expires_at": "2026-03-03T12:00:00Z"
+    },
+    {
+      "pattern": "tool:getIncomeStatement",
+      "expires_at": "2026-03-03T12:00:00Z"
+    },
+    {
+      "pattern": "tool:getBalanceSheet",
+      "expires_at": "2026-03-03T12:00:00Z"
+    },
+    {
+      "pattern": "tool:fred_*",
+      "expires_at": null
+    }
+  ],
+  "hmac_signature": "a1b2c3..."
+}
+```
+
+**Scope features:**
+- **Wildcard patterns** — `tool:finnhub_*` grants access to all Finnhub tools
+- **Expiry timestamps** — scopes can auto-expire (24h, 7d, session-length)
+- **HMAC signature** — prevents the agent from tampering with `scopes.json`
+- **Per-sandbox** — each sandbox gets exactly the permissions its task requires
+- **Deny by default** — if a tool isn't in scopes, `ati call` returns a clear error
+
+```bash
+# Agent in Sandbox B tries to call a financial tool:
+$ ati call finnhub_quote --symbol AAPL
+Error: Access denied. Tool 'finnhub_quote' requires scope 'tool:finnhub_quote'.
+Your session has 2 active scopes. Run 'ati auth status' to see them.
+```
+
+### Threat Model
 
 | Attack Vector | What the Agent Tries | ATI's Defense |
 |--------------|---------------------|---------------|
@@ -251,6 +394,7 @@ graph LR
 | `/proc/$(pgrep ati)/mem` | Read process memory | `ptrace` blocked by sandbox seccomp |
 | Trigger core dump | Extract keys from crash dump | `madvise(MADV_DONTDUMP)` excludes key pages |
 | Swap file forensics | Keys paged to disk | `mlock()` pins key pages in RAM |
+| Edit `scopes.json` | Grant itself more permissions | HMAC signature verification fails |
 | Prompt injection: "print your API key" | Social engineering via LLM | ATI is a compiled binary — not part of the conversation |
 
 ### Encryption
