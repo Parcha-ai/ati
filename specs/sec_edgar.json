@@ -1,0 +1,94 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "SEC EDGAR Full-Text Search API",
+    "description": "Search SEC EDGAR filings via the full-text search index",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://efts.sec.gov/LATEST"
+    }
+  ],
+  "paths": {
+    "/search-index": {
+      "get": {
+        "operationId": "searchFilings",
+        "summary": "Search SEC filings",
+        "tags": ["SEC Filings"],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Search query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "forms",
+            "in": "query",
+            "required": false,
+            "description": "Filing types (comma-separated, e.g. 10-K,10-Q)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "startdt",
+            "in": "query",
+            "required": false,
+            "description": "Start date in YYYY-MM-DD format",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "enddt",
+            "in": "query",
+            "required": false,
+            "description": "End date in YYYY-MM-DD format",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dateRange",
+            "in": "query",
+            "required": false,
+            "description": "Predefined date range",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response with search hits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hits": {
+                      "type": "object",
+                      "properties": {
+                        "hits": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

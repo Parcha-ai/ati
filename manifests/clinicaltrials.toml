@@ -1,42 +1,8 @@
 [provider]
 name = "clinicaltrials"
 description = "ClinicalTrials.gov — Search the US clinical trials database"
+handler = "openapi"
 base_url = "https://clinicaltrials.gov/api/v2"
+openapi_spec = "clinicaltrials.json"
 auth_type = "none"
-
-[[tools]]
-name = "clinical_trial_search"
-description = "Search ClinicalTrials.gov for clinical trials by condition, intervention, or sponsor. Returns trial titles, status, phases, locations, and eligibility criteria."
-endpoint = "/studies"
-method = "GET"
-scope = "tool:clinical_trial_search"
-
-[tools.input_schema]
-type = "object"
-required = ["query.term"]
-
-[tools.input_schema.properties."query.term"]
-type = "string"
-description = "Search term (condition, intervention, sponsor name, or NCT number)"
-
-[tools.input_schema.properties.pageSize]
-type = "integer"
-description = "Number of results per page"
-default = 10
-
-[tools.input_schema.properties.format]
-type = "string"
-description = "Response format"
-default = "json"
-
-[tools.input_schema.properties."filter.overallStatus"]
-type = "string"
-description = "Filter by status: RECRUITING, ACTIVE_NOT_RECRUITING, COMPLETED, etc."
-
-[tools.input_schema.properties."filter.phase"]
-type = "string"
-description = "Filter by phase: PHASE1, PHASE2, PHASE3, PHASE4, EARLY_PHASE1"
-
-[tools.response]
-extract = "$.studies[*]"
-format = "json"
+category = "medical"

@@ -1,0 +1,10 @@
+[provider]
+name = "aviationstack"
+description = "Aviationstack — Real-time and historical flight tracking data"
+handler = "openapi"
+base_url = "http://api.aviationstack.com"
+openapi_spec = "aviationstack.json"
+auth_type = "query"
+auth_query_name = "access_key"
+auth_key_name = "aviationstack_api_key"
+category = "aviation"

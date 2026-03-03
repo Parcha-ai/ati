@@ -1,0 +1,10 @@
+[provider]
+name = "attom"
+description = "ATTOM — Property data, assessments, and ownership information"
+handler = "openapi"
+base_url = "https://api.gateway.attomdata.com"
+openapi_spec = "attom.json"
+auth_type = "query"
+auth_query_name = "apikey"
+auth_key_name = "attom_api_key"
+category = "real_estate"

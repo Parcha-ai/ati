@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
@@ -21,6 +21,7 @@ pub enum AuthType {
     Query,
     Basic,
     None,
+    Oauth2,
 }
 
 impl Default for AuthType {
@@ -33,6 +34,8 @@ impl Default for AuthType {
 pub struct Provider {
     pub name: String,
     pub description: String,
+    /// Base URL for HTTP providers. Optional for MCP providers.
+    #[serde(default)]
     pub base_url: String,
     #[serde(default)]
     pub auth_type: AuthType,
@@ -45,14 +48,94 @@ pub struct Provider {
     /// Custom query parameter name for auth_type = "query" (default: "api_key").
     #[serde(default)]
     pub auth_query_name: Option<String>,
+    /// Optional prefix for auth header value (e.g. "Token ", "Basic ").
+    /// Used with auth_type = "header". Value becomes: "{prefix}{key}".
+    #[serde(default)]
+    pub auth_value_prefix: Option<String>,
+    /// Additional headers to include on every request for this provider.
+    /// Examples: X-Goog-FieldMask, X-EBAY-C-MARKETPLACE-ID
+    #[serde(default)]
+    pub extra_headers: HashMap<String, String>,
+    /// Token URL for OAuth2 (relative to base_url or absolute)
+    #[serde(default)]
+    pub oauth2_token_url: Option<String>,
+    /// Second key name for OAuth2 client_secret
+    #[serde(default)]
+    pub auth_secret_name: Option<String>,
+    /// If true, send OAuth2 credentials via Basic Auth header instead of form body.
+    /// Some providers (e.g. Sovos) require this per RFC 6749 §2.3.1.
+    #[serde(default)]
+    pub oauth2_basic_auth: bool,
     #[serde(default)]
     pub internal: bool,
     #[serde(default = "default_handler")]
     pub handler: String,
+
+    // --- MCP provider fields (handler = "mcp") ---
+
+    /// MCP transport type: "stdio" or "http"
+    #[serde(default)]
+    pub mcp_transport: Option<String>,
+    /// Command to launch stdio MCP server (e.g., "npx", "uvx")
+    #[serde(default)]
+    pub mcp_command: Option<String>,
+    /// Arguments for stdio command (e.g., ["-y", "@modelcontextprotocol/server-github"])
+    #[serde(default)]
+    pub mcp_args: Vec<String>,
+    /// URL for HTTP/Streamable HTTP MCP server
+    #[serde(default)]
+    pub mcp_url: Option<String>,
+    /// Environment variables to pass to stdio subprocess
+    #[serde(default)]
+    pub mcp_env: HashMap<String, String>,
+
+    // --- OpenAPI provider fields (handler = "openapi") ---
+
+    /// Path (relative to ~/.ati/specs/) or URL to OpenAPI spec (JSON or YAML)
+    #[serde(default)]
+    pub openapi_spec: Option<String>,
+    /// Only include operations with these tags
+    #[serde(default)]
+    pub openapi_include_tags: Vec<String>,
+    /// Exclude operations with these tags
+    #[serde(default)]
+    pub openapi_exclude_tags: Vec<String>,
+    /// Only include operations with these operationIds
+    #[serde(default)]
+    pub openapi_include_operations: Vec<String>,
+    /// Exclude operations with these operationIds
+    #[serde(default)]
+    pub openapi_exclude_operations: Vec<String>,
+    /// Maximum number of operations to register (for huge APIs)
+    #[serde(default)]
+    pub openapi_max_operations: Option<usize>,
+    /// Per-operationId overrides (hint, tags, description, response_extract, etc.)
+    #[serde(default)]
+    pub openapi_overrides: HashMap<String, OpenApiToolOverride>,
+
+    // --- Optional metadata fields ---
+
+    /// Provider category for discovery (e.g., "finance", "search", "social")
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 fn default_handler() -> String {
     "http".to_string()
+}
+
+/// Per-operationId overrides for OpenAPI-discovered tools.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct OpenApiToolOverride {
+    pub hint: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub examples: Vec<String>,
+    pub description: Option<String>,
+    pub scope: Option<String>,
+    pub response_extract: Option<String>,
+    pub response_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,14 +205,38 @@ pub struct Tool {
     /// Response extraction config
     #[serde(default)]
     pub response: Option<ResponseConfig>,
+
+    // --- Optional metadata fields ---
+
+    /// Tags for discovery (e.g., ["search", "real-time"])
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Short hint for the LLM on when to use this tool
+    #[serde(default)]
+    pub hint: Option<String>,
+    /// Example invocations
+    #[serde(default)]
+    pub examples: Vec<String>,
 }
 
 /// A parsed manifest file: one provider + multiple tools.
+/// For MCP providers, tools may be empty — they're discovered dynamically via tools/list.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub provider: Provider,
-    #[serde(rename = "tools")]
+    #[serde(default, rename = "tools")]
     pub tools: Vec<Tool>,
+}
+
+/// A tool discovered from an MCP server via tools/list.
+/// Converted into a Tool for the registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, rename = "inputSchema")]
+    pub input_schema: Option<serde_json::Value>,
 }
 
 /// Registry holding all loaded manifests, with indexes for fast lookup.
@@ -141,6 +248,7 @@ pub struct ManifestRegistry {
 
 impl ManifestRegistry {
     /// Load all .toml manifests from a directory.
+    /// OpenAPI providers (handler = "openapi") have their specs loaded and tools auto-registered.
     pub fn load(dir: &Path) -> Result<Self, ManifestError> {
         if !dir.is_dir() {
             return Err(ManifestError::NoDirectory(dir.display().to_string()));
@@ -153,12 +261,33 @@ impl ManifestRegistry {
         let entries = glob::glob(pattern.to_str().unwrap_or(""))
             .map_err(|e| ManifestError::NoDirectory(e.to_string()))?;
 
+        // Resolve specs dir: sibling of manifests dir (e.g., ~/.ati/specs/)
+        let specs_dir = dir.parent().map(|p| p.join("specs"));
+
         for entry in entries {
             let path = entry.map_err(|e| ManifestError::Io(format!("{e}"), std::io::Error::other("glob error")))?;
             let contents = std::fs::read_to_string(&path)
                 .map_err(|e| ManifestError::Io(path.display().to_string(), e))?;
-            let manifest: Manifest = toml::from_str(&contents)
+            let mut manifest: Manifest = toml::from_str(&contents)
                 .map_err(|e| ManifestError::Parse(path.display().to_string(), e))?;
+
+            // For OpenAPI providers, load spec and register tools
+            if manifest.provider.is_openapi() {
+                if let Some(spec_ref) = &manifest.provider.openapi_spec {
+                    match crate::core::openapi::load_and_register(&manifest.provider, spec_ref, specs_dir.as_deref()) {
+                        Ok(tools) => {
+                            manifest.tools = tools;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: failed to load OpenAPI spec for provider '{}': {e}",
+                                manifest.provider.name
+                            );
+                            // Graceful degradation — continue without tools
+                        }
+                    }
+                }
+            }
 
             let mi = manifests.len();
             for (ti, tool) in manifest.tools.iter().enumerate() {
@@ -171,6 +300,14 @@ impl ManifestRegistry {
             manifests,
             tool_index,
         })
+    }
+
+    /// Create an empty registry (no manifests loaded).
+    pub fn empty() -> Self {
+        ManifestRegistry {
+            manifests: Vec::new(),
+            tool_index: HashMap::new(),
+        }
     }
 
     /// Look up a tool by name. Returns the provider and tool definition.
@@ -211,5 +348,75 @@ impl ManifestRegistry {
     /// Get the number of loaded providers.
     pub fn provider_count(&self) -> usize {
         self.manifests.len()
+    }
+
+    /// List all MCP providers (handler = "mcp").
+    pub fn list_mcp_providers(&self) -> Vec<&Provider> {
+        self.manifests
+            .iter()
+            .filter(|m| m.provider.handler == "mcp")
+            .map(|m| &m.provider)
+            .collect()
+    }
+
+    /// List all OpenAPI providers (handler = "openapi").
+    pub fn list_openapi_providers(&self) -> Vec<&Provider> {
+        self.manifests
+            .iter()
+            .filter(|m| m.provider.handler == "openapi")
+            .map(|m| &m.provider)
+            .collect()
+    }
+
+    /// Register dynamically discovered MCP tools for a provider.
+    /// Tools are prefixed with provider name: "github__read_file".
+    pub fn register_mcp_tools(&mut self, provider_name: &str, mcp_tools: Vec<McpToolDef>) {
+        // Find the manifest for this provider
+        let mi = match self
+            .manifests
+            .iter()
+            .position(|m| m.provider.name == provider_name)
+        {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        for mcp_tool in mcp_tools {
+            let prefixed_name = format!("{}__{}", provider_name, mcp_tool.name);
+
+            let tool = Tool {
+                name: prefixed_name.clone(),
+                description: mcp_tool.description.unwrap_or_default(),
+                endpoint: String::new(),
+                method: HttpMethod::Post,
+                scope: Some(format!("tool:{prefixed_name}")),
+                input_schema: mcp_tool.input_schema,
+                response: None,
+                tags: Vec::new(),
+                hint: None,
+                examples: Vec::new(),
+            };
+
+            let ti = self.manifests[mi].tools.len();
+            self.manifests[mi].tools.push(tool);
+            self.tool_index.insert(prefixed_name, (mi, ti));
+        }
+    }
+}
+
+impl Provider {
+    /// Returns true if this provider uses MCP protocol.
+    pub fn is_mcp(&self) -> bool {
+        self.handler == "mcp"
+    }
+
+    /// Returns true if this provider uses OpenAPI spec-based tool discovery.
+    pub fn is_openapi(&self) -> bool {
+        self.handler == "openapi"
+    }
+
+    /// Returns the MCP transport type, defaulting to "stdio".
+    pub fn mcp_transport_type(&self) -> &str {
+        self.mcp_transport.as_deref().unwrap_or("stdio")
     }
 }

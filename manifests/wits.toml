@@ -1,0 +1,40 @@
+[provider]
+name = "wits"
+description = "World Bank WITS — International trade statistics and tariff data"
+base_url = "https://wits.worldbank.org"
+auth_type = "none"
+
+[[tools]]
+name = "supplier_search_wits"
+description = "Query international trade data between countries. Returns trade volumes, values, and product-level statistics."
+endpoint = "/API/V1/SDMX/V21/rest/data/df_wits_tradestats_trade"
+method = "GET"
+scope = "tool:supplier_search_wits"
+
+[tools.input_schema]
+type = "object"
+required = ["reporter", "partner", "product"]
+
+[tools.input_schema.properties.reporter]
+type = "string"
+description = "Reporting country ISO3 code (e.g. 'USA')"
+
+[tools.input_schema.properties.partner]
+type = "string"
+description = "Partner country ISO3 code (e.g. 'CHN')"
+
+[tools.input_schema.properties.product]
+type = "string"
+description = "HS product code (e.g. '010121')"
+
+[tools.input_schema.properties.indicator]
+type = "string"
+description = "Trade indicator"
+default = "MPRT-TRD-VL"
+
+[tools.input_schema.properties.year]
+type = "string"
+description = "Year or range (e.g. '2020' or '2018:2022')"
+
+[tools.response]
+format = "json"

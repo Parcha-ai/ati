@@ -1,0 +1,99 @@
+[provider]
+name = "xai"
+description = "xAI — Grok-powered web search, X/Twitter search, and trending topics"
+base_url = "https://api.x.ai/v1"
+auth_type = "bearer"
+auth_key_name = "xai_api_key"
+handler = "xai"
+
+[[tools]]
+name = "xai_web_search"
+description = "Search the web using Grok AI. Returns comprehensive web search results."
+endpoint = "/responses"
+method = "POST"
+scope = "tool:xai_web_search"
+
+[tools.input_schema]
+type = "object"
+required = ["query"]
+
+[tools.input_schema.properties.query]
+type = "string"
+description = "Search query"
+
+[tools.input_schema.properties.model]
+type = "string"
+description = "Grok model to use"
+default = "grok-4-fast-non-reasoning"
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "xai_x_search"
+description = "Search X/Twitter posts using Grok AI. Returns relevant tweets and discussions."
+endpoint = "/responses"
+method = "POST"
+scope = "tool:xai_x_search"
+
+[tools.input_schema]
+type = "object"
+required = ["query"]
+
+[tools.input_schema.properties.query]
+type = "string"
+description = "Search query"
+
+[tools.input_schema.properties.model]
+type = "string"
+description = "Grok model to use"
+default = "grok-4-fast-non-reasoning"
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "xai_trending_search"
+description = "Get trending topics and discussions from X/Twitter via Grok AI."
+endpoint = "/responses"
+method = "POST"
+scope = "tool:xai_trending_search"
+
+[tools.input_schema]
+type = "object"
+required = ["query"]
+
+[tools.input_schema.properties.query]
+type = "string"
+description = "Topic to explore trends for"
+
+[tools.input_schema.properties.model]
+type = "string"
+description = "Grok model to use"
+default = "grok-4-fast-non-reasoning"
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "xai_combined_search"
+description = "Search both web and X/Twitter simultaneously using Grok AI."
+endpoint = "/responses"
+method = "POST"
+scope = "tool:xai_combined_search"
+
+[tools.input_schema]
+type = "object"
+required = ["query"]
+
+[tools.input_schema.properties.query]
+type = "string"
+description = "Search query"
+
+[tools.input_schema.properties.model]
+type = "string"
+description = "Grok model to use"
+default = "grok-4-fast-non-reasoning"
+
+[tools.response]
+format = "json"

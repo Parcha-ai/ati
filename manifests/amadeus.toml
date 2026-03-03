@@ -1,0 +1,11 @@
+[provider]
+name = "amadeus"
+description = "Amadeus — Flight search and travel booking data"
+handler = "openapi"
+base_url = "https://test.api.amadeus.com"
+openapi_spec = "amadeus.json"
+auth_type = "oauth2"
+auth_key_name = "amadeus_api_key"
+auth_secret_name = "amadeus_api_secret"
+oauth2_token_url = "/v1/security/oauth2/token"
+category = "travel"

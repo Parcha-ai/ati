@@ -2,16 +2,40 @@
 
 ## Overview
 
-ATI (Agent Tools Interface) is designed to give AI agents access to external tools **without exposing API keys**. Keys exist only in ATI's process memory — never in environment variables, files, or anywhere the agent can read.
+ATI (Agent Tools Interface) is designed to give AI agents access to external tools **without exposing API keys**. It supports two execution modes with different security properties.
 
-## Key Delivery
+## Execution Modes
+
+### Local Mode (default)
+
+Keys are encrypted and provisioned into the sandbox. ATI decrypts them in process memory, makes API calls directly, and the keys never appear in environment variables or readable files.
+
+**Trade-off:** Keys ARE in the sandbox (encrypted, memory-locked), but no external infrastructure needed.
+
+### Proxy Mode (opt-in via `ATI_PROXY_URL`)
+
+Zero credentials in the sandbox. ATI forwards tool calls to an external proxy server that holds the real API keys. The sandbox never sees any key material.
+
+**Trade-off:** Stronger isolation, but requires running a proxy server and adds a network hop.
+
+### Mode Auto-Detection
+
+`ati call` checks the `ATI_PROXY_URL` environment variable:
+- **Set** → proxy mode (forward to proxy server)
+- **Not set** → local mode (use keyring)
+
+The agent never needs to know which mode is active.
+
+## Local Mode Security
+
+### Key Delivery
 
 1. **Orchestrator** generates a random 256-bit **session key** per sandbox
 2. Orchestrator encrypts scoped API keys with session key → `keyring.enc`
 3. Session key written to `/run/ati/.key` on tmpfs (mode 0400)
 4. `keyring.enc` + tool manifests uploaded to sandbox
 
-## First ATI Invocation
+### First ATI Invocation
 
 1. ATI reads `/run/ati/.key`, immediately `unlink()`s the file
 2. ATI decrypts `keyring.enc` with AES-256-GCM
@@ -19,7 +43,7 @@ ATI (Agent Tools Interface) is designed to give AI agents access to external too
 4. Session key zeroed from stack
 5. Keys exist **only** in ATI's locked heap
 
-## Encryption Details
+### Encryption Details
 
 - **Algorithm**: AES-256-GCM (authenticated encryption with associated data)
 - **Session key**: 256-bit random, unique per sandbox session
@@ -27,7 +51,7 @@ ATI (Agent Tools Interface) is designed to give AI agents access to external too
 - **Format**: `[12-byte nonce][ciphertext + 16-byte GCM tag]`
 - **Rust crate**: `aes-gcm` v0.10
 
-## Attack Surface Analysis
+### Attack Surface (Local Mode)
 
 | Attack Vector | Mitigation |
 |--------------|------------|
@@ -42,7 +66,58 @@ ATI (Agent Tools Interface) is designed to give AI agents access to external too
 | Swap file | `mlock()` prevents swap-out |
 | Agent imports ATI internals | ATI is compiled Rust binary, not importable |
 
+### Honest Limitations (Local Mode)
+
+- If the sandbox has no seccomp profile, `ptrace` can read ATI's memory
+- If the agent can run arbitrary code with sufficient privileges, it could theoretically extract keys from ATI's process memory during execution
+- The session key exists in `/run/ati/.key` briefly before ATI reads it — a race condition is theoretically possible
+- `mlock()` is best-effort on some kernels (may silently fail if RLIMIT_MEMLOCK is low)
+
+## Proxy Mode Security
+
+### How It Works
+
+1. Orchestrator starts the proxy server: `ati proxy --port 8090 --ati-dir /path/to/ati`
+2. Orchestrator sets `ATI_PROXY_URL` in the sandbox environment
+3. ATI sends `POST /call` with `{tool_name, args}` to the proxy
+4. Proxy server validates the request, injects API keys from its keyring, calls the upstream API
+5. Proxy returns the result to ATI in the sandbox
+
+The proxy server is built into the same `ati` binary — run `ati proxy` to start it. It loads manifests and keyring from its own ATI directory.
+
+### What's in the Sandbox (Proxy Mode)
+
+- ATI binary
+- Tool manifests (`.toml` files) — tool definitions only, no secrets
+- Scope config (`scopes.json`) — which tools are allowed
+- `ATI_PROXY_URL` — URL of the proxy server
+
+### What's NOT in the Sandbox (Proxy Mode)
+
+- No `keyring.enc`
+- No session key (`.key` file)
+- No API keys in any form (encrypted or otherwise)
+
+### Attack Surface (Proxy Mode)
+
+| Attack Vector | Mitigation |
+|--------------|------------|
+| Any local key extraction | No keys exist in the sandbox |
+| `ATI_PROXY_URL` leak | URL is not secret; proxy validates requests |
+| Man-in-the-middle on proxy | Use HTTPS for proxy URL |
+| Proxy server compromise | Same risk as any credential store (Vault, etc.) |
+| Agent sends malicious requests | Proxy can validate/rate-limit per-tool |
+
+### Honest Limitations (Proxy Mode)
+
+- The proxy URL is visible via `printenv` — not a secret, but reveals infrastructure
+- Proxy server is a single point of failure; if it's down, all tool calls fail
+- Extra network hop adds latency (~10-50ms per call)
+- Proxy server itself must be secured — it holds the real API keys
+
 ## Scope Enforcement
+
+Both modes enforce scopes:
 
 - `scopes.json` lists allowed tool scopes per session
 - Generated by orchestrator based on agent/expert configuration
@@ -50,10 +125,20 @@ ATI (Agent Tools Interface) is designed to give AI agents access to external too
 - Scopes have expiration timestamps
 - Optional HMAC signature prevents tampering
 
-## Memory Security
+## Memory Security (Local Mode)
 
 - Decrypted keys held in `HashMap<String, String>` with `Zeroize` on drop
 - Raw JSON bytes also zeroized on drop
 - `mlock()` prevents kernel from swapping secret pages
 - `madvise(MADV_DONTDUMP)` excludes from core dumps
 - All security functions degrade gracefully on non-Linux (warning, not error)
+
+## Choosing a Mode
+
+| Scenario | Recommended Mode |
+|----------|-----------------|
+| Standard sandbox deployment | **Local** — simpler, no extra infrastructure |
+| High-security / regulated workloads | **Proxy** — zero key exposure |
+| Air-gapped or offline sandboxes | **Local** — no network dependency |
+| Multi-tenant with shared sandboxes | **Proxy** — strongest isolation |
+| Development / testing | **Local** — easiest to set up |

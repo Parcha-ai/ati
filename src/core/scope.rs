@@ -59,6 +59,10 @@ impl ScopeConfig {
         if tool_scope.is_empty() {
             return true;
         }
+        // Wildcard scope allows everything
+        if self.is_wildcard() {
+            return true;
+        }
         self.scopes.iter().any(|s| s == tool_scope)
     }
 

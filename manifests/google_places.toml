@@ -1,0 +1,38 @@
+[provider]
+name = "google_places"
+description = "Google Places — Search for businesses and points of interest with ratings, addresses, and contact info"
+base_url = "https://places.googleapis.com"
+auth_type = "header"
+auth_header_name = "X-Goog-Api-Key"
+auth_key_name = "google_places_api_key"
+
+[provider.extra_headers]
+X-Goog-FieldMask = "places.displayName,places.formattedAddress,places.internationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,places.googleMapsUri"
+
+[[tools]]
+name = "google_places_search"
+description = "Search for places by text query. Returns business names, addresses, phone numbers, websites, ratings, and Google Maps links."
+endpoint = "/v1/places:searchText"
+method = "POST"
+scope = "tool:google_places_search"
+
+[tools.input_schema]
+type = "object"
+required = ["textQuery"]
+
+[tools.input_schema.properties.textQuery]
+type = "string"
+description = "Search query (e.g. 'coffee shops in NYC', 'Stripe headquarters')"
+
+[tools.input_schema.properties.maxResultCount]
+type = "integer"
+description = "Maximum number of results to return"
+default = 10
+
+[tools.input_schema.properties.languageCode]
+type = "string"
+description = "Language for results (BCP-47 code)"
+default = "en"
+
+[tools.response]
+format = "json"

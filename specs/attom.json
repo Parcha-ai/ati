@@ -1,0 +1,68 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ATTOM Property Data API",
+    "description": "ATTOM property data API for real estate information",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.gateway.attomdata.com"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "apikey"
+      }
+    }
+  },
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "paths": {
+    "/propertyapi/v1.0.0/property/detail": {
+      "get": {
+        "operationId": "propertyDetail",
+        "summary": "Get property details by address",
+        "tags": ["Property Data"],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "required": true,
+            "description": "Street address",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "required": true,
+            "description": "City, state, and zip code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response with property details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -14,8 +14,14 @@ clap = { version = "4", features = ["derive"] }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# HTTP
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+
+# HTTP server (for `ati proxy`)
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +46,10 @@ comfy-table = "7"
 # Encoding
 base64 = "0.22"
 
+# OpenAPI spec parsing
+openapiv3 = "2"
+serde_yaml = "0.9"
+
 # Misc
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
@@ -51,3 +61,6 @@ tempfile = "3"
 wiremock = "0.6"
 assert_cmd = "2"
 predicates = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }

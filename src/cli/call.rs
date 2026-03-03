@@ -4,8 +4,11 @@ use std::path::PathBuf;
 
 use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
+use crate::core::mcp_client;
 use crate::core::scope::ScopeConfig;
+use crate::output;
 use crate::providers::generic;
+use crate::proxy::client as proxy_client;
 use crate::Cli;
 
 /// Default paths for ATI config
@@ -55,15 +58,39 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
 }
 
 /// Execute: ati call <tool_name> [--arg val]...
+///
+/// Auto-detects mode:
+/// - If ATI_PROXY_URL is set → proxy mode (forwards to external server)
+/// - Otherwise → local mode (keyring + direct HTTP)
 pub async fn execute(
     cli: &Cli,
     tool_name: &str,
     raw_args: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ati_dir = ati_dir();
-
-    // Parse tool arguments
     let args = parse_tool_args(raw_args)?;
+
+    // Auto-detect: proxy mode if ATI_PROXY_URL is set
+    if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
+        if cli.verbose {
+            eprintln!("Mode: proxy (ATI_PROXY_URL={proxy_url})");
+        }
+        return execute_via_proxy(cli, tool_name, &args, &proxy_url).await;
+    }
+
+    // Local mode: keyring + direct HTTP
+    if cli.verbose {
+        eprintln!("Mode: local (no ATI_PROXY_URL)");
+    }
+    execute_local(cli, tool_name, &args).await
+}
+
+/// Local mode: load manifests, scopes, keyring, call upstream API directly.
+async fn execute_local(
+    cli: &Cli,
+    tool_name: &str,
+    args: &HashMap<String, Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ati_dir = ati_dir();
 
     if cli.verbose {
         eprintln!("Tool: {tool_name}");
@@ -113,10 +140,39 @@ pub async fn execute(
         Keyring::empty()
     };
 
-    // Execute via generic provider
-    let output = generic::execute(provider, tool, &args, &keyring, &cli.output).await?;
+    // Execute — dispatch based on handler type
+    let result = match provider.handler.as_str() {
+        "mcp" => {
+            let value = mcp_client::execute(provider, tool_name, args, &keyring).await?;
+            output::format_output(&value, &cli.output)
+        }
+        _ => {
+            generic::execute(provider, tool, args, &keyring, &cli.output).await?
+        }
+    };
 
-    println!("{output}");
+    println!("{result}");
+    Ok(())
+}
+
+/// Proxy mode: forward the call to an external ATI proxy server.
+async fn execute_via_proxy(
+    cli: &Cli,
+    tool_name: &str,
+    args: &HashMap<String, Value>,
+    proxy_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.verbose {
+        eprintln!("Tool: {tool_name}");
+        eprintln!("Args: {args:?}");
+        eprintln!("Proxy: {proxy_url}");
+    }
+
+    let result = proxy_client::call_tool(proxy_url, tool_name, args).await?;
+
+    // Format using the requested output format
+    let formatted = output::format_output(&result, &cli.output);
+    println!("{formatted}");
     Ok(())
 }
 

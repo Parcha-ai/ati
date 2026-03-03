@@ -1,53 +1,10 @@
 [provider]
 name = "courtlistener"
 description = "CourtListener — US court opinions, dockets, and legal documents"
+handler = "openapi"
 base_url = "https://www.courtlistener.com/api/rest/v4"
+openapi_spec = "courtlistener.json"
 auth_type = "header"
 auth_header_name = "Authorization"
 auth_key_name = "courtlistener_api_key"
-
-[[tools]]
-name = "legal_search_courtlistener"
-description = "Search CourtListener for US court opinions and legal documents. Supports filtering by court, date range, and case type."
-endpoint = "/search/"
-method = "GET"
-scope = "tool:legal_search_courtlistener"
-
-[tools.input_schema]
-type = "object"
-required = ["q"]
-
-[tools.input_schema.properties.q]
-type = "string"
-description = "Search keywords, case names, or legal citations"
-
-[tools.input_schema.properties.type]
-type = "string"
-description = "Document type: o (opinions), r (RECAP/dockets), oa (oral arguments)"
-default = "o"
-
-[tools.input_schema.properties.order_by]
-type = "string"
-description = "Sort order: score desc, dateFiled desc, dateFiled asc"
-default = "score desc"
-
-[tools.input_schema.properties.format]
-type = "string"
-description = "Response format"
-default = "json"
-
-[tools.input_schema.properties.court]
-type = "string"
-description = "Court ID filter (e.g. 'scotus' for Supreme Court)"
-
-[tools.input_schema.properties.filed_after]
-type = "string"
-description = "Filter filings after this date (YYYY-MM-DD)"
-
-[tools.input_schema.properties.filed_before]
-type = "string"
-description = "Filter filings before this date (YYYY-MM-DD)"
-
-[tools.response]
-extract = "$.results[*]"
-format = "json"
+category = "legal"

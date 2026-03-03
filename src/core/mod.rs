@@ -1,5 +1,9 @@
 pub mod http;
 pub mod keyring;
 pub mod manifest;
+pub mod mcp_client;
+pub mod openapi;
 pub mod response;
 pub mod scope;
+pub mod skill;
+pub mod xai;

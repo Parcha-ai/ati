@@ -1,0 +1,15 @@
+# DeepWiki — AI-powered documentation for GitHub repos via MCP
+#
+# Remote MCP server, no auth required. Uses Streamable HTTP with SSE.
+# Tools: read_wiki_structure, read_wiki_contents, ask_question
+#
+# https://mcp.deepwiki.com
+
+[provider]
+name = "deepwiki"
+description = "DeepWiki — AI-powered documentation for GitHub repositories"
+handler = "mcp"
+mcp_transport = "http"
+mcp_url = "https://mcp.deepwiki.com/mcp"
+auth_type = "none"
+category = "documentation"

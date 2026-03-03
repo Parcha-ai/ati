@@ -1,0 +1,33 @@
+[provider]
+name = "google_patents"
+description = "Google Patents — Patent search and analysis"
+base_url = "https://patents.google.com"
+auth_type = "none"
+
+[[tools]]
+name = "patent_search_google"
+description = "Search patents by keywords, inventors, or assignees. Returns patent titles, abstracts, and filing information."
+endpoint = "/xhr/query"
+method = "GET"
+scope = "tool:patent_search_google"
+
+[tools.input_schema]
+type = "object"
+required = ["q"]
+
+[tools.input_schema.properties.q]
+type = "string"
+description = "Patent search query (e.g. 'solar panel efficiency', 'assignee:Google')"
+
+[tools.input_schema.properties.num]
+type = "integer"
+description = "Number of results to return"
+default = 10
+
+[tools.input_schema.properties.page]
+type = "integer"
+description = "Page number for pagination"
+default = 0
+
+[tools.response]
+format = "json"

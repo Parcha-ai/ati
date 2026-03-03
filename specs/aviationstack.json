@@ -1,0 +1,95 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Aviationstack API",
+    "description": "Real-time flight status and aviation data",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://api.aviationstack.com"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "access_key"
+      }
+    }
+  },
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "paths": {
+    "/v1/flights": {
+      "get": {
+        "operationId": "searchFlights",
+        "summary": "Search for flights",
+        "tags": ["Aviation"],
+        "parameters": [
+          {
+            "name": "flight_iata",
+            "in": "query",
+            "required": false,
+            "description": "IATA flight number",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "airline_iata",
+            "in": "query",
+            "required": false,
+            "description": "IATA airline code",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dep_iata",
+            "in": "query",
+            "required": false,
+            "description": "Departure airport IATA code",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "arr_iata",
+            "in": "query",
+            "required": false,
+            "description": "Arrival airport IATA code",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "flight_date",
+            "in": "query",
+            "required": false,
+            "description": "Flight date in YYYY-MM-DD format",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response with flight data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

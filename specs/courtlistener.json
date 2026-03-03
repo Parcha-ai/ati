@@ -1,0 +1,124 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CourtListener API",
+    "description": "Search and access US court opinions, oral arguments, and legal data",
+    "version": "4.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://www.courtlistener.com/api/rest/v4"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "tokenAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization"
+      }
+    }
+  },
+  "security": [
+    {
+      "tokenAuth": []
+    }
+  ],
+  "paths": {
+    "/search/": {
+      "get": {
+        "operationId": "searchCases",
+        "summary": "Search court cases and opinions",
+        "tags": ["Legal"],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Search keywords",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Document type",
+            "schema": {
+              "type": "string",
+              "default": "o"
+            }
+          },
+          {
+            "name": "order_by",
+            "in": "query",
+            "required": false,
+            "description": "Sort order",
+            "schema": {
+              "type": "string",
+              "default": "score desc"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "description": "Response format",
+            "schema": {
+              "type": "string",
+              "default": "json"
+            }
+          },
+          {
+            "name": "court",
+            "in": "query",
+            "required": false,
+            "description": "Court ID filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filed_after",
+            "in": "query",
+            "required": false,
+            "description": "Filed after date filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filed_before",
+            "in": "query",
+            "required": false,
+            "description": "Filed before date filter",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response with search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

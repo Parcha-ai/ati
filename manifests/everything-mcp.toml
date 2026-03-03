@@ -1,0 +1,16 @@
+# MCP "Everything" test server — for testing and development.
+#
+# This uses the official @modelcontextprotocol/server-everything package
+# which implements all MCP capabilities for testing.
+# No auth needed — it's a local test server.
+
+[provider]
+name = "everything"
+description = "MCP Everything test server (for development/testing)"
+handler = "mcp"
+mcp_transport = "stdio"
+mcp_command = "npx"
+mcp_args = ["-y", "@modelcontextprotocol/server-everything"]
+auth_type = "none"
+internal = true
+category = "testing"

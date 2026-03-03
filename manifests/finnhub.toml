@@ -1,0 +1,11 @@
+[provider]
+name = "finnhub"
+description = "Finnhub — Real-time stock quotes, company profiles, financial metrics, and market data"
+handler = "openapi"
+base_url = "https://finnhub.io/api/v1"
+openapi_spec = "finnhub.json"
+auth_type = "query"
+auth_query_name = "token"
+auth_key_name = "finnhub_api_key"
+category = "finance"
+openapi_max_operations = 50

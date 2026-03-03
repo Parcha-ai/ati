@@ -37,6 +37,7 @@ pub async fn execute(
         ToolsCommands::List { provider } => list_tools(cli, &registry, &scopes, provider.as_deref()),
         ToolsCommands::Info { name } => tool_info(cli, &registry, name),
         ToolsCommands::Providers => list_providers(cli, &registry),
+        ToolsCommands::Search { query } => search_tools(cli, &registry, &scopes, query),
     }
 }
 
@@ -120,17 +121,37 @@ fn tool_info(
         OutputFormat::Table | OutputFormat::Text => {
             println!("Tool:        {}", tool.name);
             println!("Provider:    {} ({})", provider.name, provider.description);
-            println!("Endpoint:    {} {}{}", tool.method, provider.base_url, tool.endpoint);
+            println!("Handler:     {}", provider.handler);
+            if provider.is_mcp() {
+                println!("Transport:   MCP ({})", provider.mcp_transport_type());
+            } else {
+                println!("Endpoint:    {} {}{}", tool.method, provider.base_url, tool.endpoint);
+            }
             println!("Description: {}", tool.description);
             if let Some(scope) = &tool.scope {
                 println!("Scope:       {scope}");
+            }
+            if let Some(category) = &provider.category {
+                println!("Category:    {category}");
+            }
+            if !tool.tags.is_empty() {
+                println!("Tags:        {}", tool.tags.join(", "));
+            }
+            if let Some(hint) = &tool.hint {
+                println!("Hint:        {hint}");
             }
             if let Some(schema) = &tool.input_schema {
                 println!("\nInput Schema:");
                 println!("{}", serde_json::to_string_pretty(schema)?);
             }
+            if !tool.examples.is_empty() {
+                println!("\nExamples:");
+                for ex in &tool.examples {
+                    println!("  {ex}");
+                }
+            }
             // Show example usage
-            println!("\nExample:");
+            println!("\nUsage:");
             print!("  ati call {}", tool.name);
             if let Some(schema) = &tool.input_schema {
                 if let Some(props) = schema.get("properties") {
@@ -151,6 +172,146 @@ fn tool_info(
     }
 
     Ok(())
+}
+
+fn search_tools(
+    cli: &Cli,
+    registry: &ManifestRegistry,
+    scopes: &ScopeConfig,
+    query: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut tools = registry.list_public_tools();
+    tools = scope::filter_tools_by_scope(tools, scopes);
+
+    let query_lower = query.to_lowercase();
+    let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+
+    // Score each tool by how well it matches the query
+    let mut scored: Vec<(f64, &crate::core::manifest::Provider, &crate::core::manifest::Tool)> = tools
+        .iter()
+        .filter_map(|(p, t)| {
+            let score = score_tool_match(p, t, &query_terms);
+            if score > 0.0 {
+                Some((score, *p, *t))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by score (highest first)
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Limit to top 20 results
+    scored.truncate(20);
+
+    if scored.is_empty() {
+        eprintln!("No tools match '{query}'. Try a different search term.");
+        return Ok(());
+    }
+
+    match cli.output {
+        OutputFormat::Json => {
+            let json_tools: Vec<serde_json::Value> = scored
+                .iter()
+                .map(|(_score, p, t)| {
+                    serde_json::json!({
+                        "provider": p.name,
+                        "tool": t.name,
+                        "description": t.description,
+                        "handler": p.handler,
+                        "category": p.category,
+                        "tags": t.tags,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&json_tools)?);
+        }
+        OutputFormat::Table | OutputFormat::Text => {
+            let value = serde_json::json!(
+                scored.iter().map(|(_score, p, t)| {
+                    serde_json::json!({
+                        "PROVIDER": p.name,
+                        "TOOL": t.name,
+                        "DESCRIPTION": t.description,
+                    })
+                }).collect::<Vec<_>>()
+            );
+            println!("{}", output::table::format(&value));
+        }
+    }
+
+    Ok(())
+}
+
+/// Score how well a tool matches the search query terms.
+/// Returns 0.0 for no match, higher scores for better matches.
+fn score_tool_match(
+    provider: &crate::core::manifest::Provider,
+    tool: &crate::core::manifest::Tool,
+    query_terms: &[&str],
+) -> f64 {
+    let mut score = 0.0;
+
+    let name_lower = tool.name.to_lowercase();
+    let desc_lower = tool.description.to_lowercase();
+    let provider_lower = provider.name.to_lowercase();
+    let category_lower = provider
+        .category
+        .as_deref()
+        .unwrap_or("")
+        .to_lowercase();
+    let tags_lower: Vec<String> = tool.tags.iter().map(|t| t.to_lowercase()).collect();
+
+    for term in query_terms {
+        let mut term_score = 0.0;
+
+        // Exact name match (highest weight)
+        if name_lower == *term {
+            term_score += 10.0;
+        } else if name_lower.contains(term) {
+            term_score += 5.0;
+        }
+
+        // Provider name match
+        if provider_lower.contains(term) {
+            term_score += 3.0;
+        }
+
+        // Category match
+        if category_lower.contains(term) {
+            term_score += 3.0;
+        }
+
+        // Tag match
+        for tag in &tags_lower {
+            if tag.contains(term) {
+                term_score += 4.0;
+                break;
+            }
+        }
+
+        // Description match (lower weight)
+        if desc_lower.contains(term) {
+            term_score += 2.0;
+        }
+
+        // Hint match
+        if let Some(hint) = &tool.hint {
+            if hint.to_lowercase().contains(term) {
+                term_score += 1.5;
+            }
+        }
+
+        if term_score == 0.0 {
+            // If any term has zero score, this tool doesn't match
+            return 0.0;
+        }
+
+        score += term_score;
+    }
+
+    score
 }
 
 fn list_providers(

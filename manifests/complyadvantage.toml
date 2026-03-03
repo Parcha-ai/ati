@@ -1,0 +1,183 @@
+[provider]
+name = "complyadvantage"
+description = "ComplyAdvantage — Sanctions, PEP, and adverse media screening for businesses and individuals"
+base_url = "https://api.complyadvantage.com"
+auth_type = "header"
+auth_header_name = "Authorization"
+auth_value_prefix = "Token "
+auth_key_name = "complyadvantage_api_key"
+
+[[tools]]
+name = "ca_business_sanctions_search"
+description = "Search business entities against global sanctions lists. Returns matches with source details and risk indicators. Automatically filters for sanction-type results on company entities."
+endpoint = "/searches"
+method = "POST"
+scope = "tool:ca_business_sanctions_search"
+
+[tools.input_schema]
+type = "object"
+required = ["search_term"]
+
+[tools.input_schema.properties.search_term]
+type = "string"
+description = "Business name to search against sanctions lists"
+
+[tools.input_schema.properties.fuzziness]
+type = "number"
+description = "Match fuzziness from 0.0 (exact) to 1.0 (loose)"
+default = 0.6
+
+[tools.input_schema.properties.share_url]
+type = "integer"
+description = "Set to 1 to include a shareable result URL"
+
+[tools.input_schema.properties.filters]
+type = "object"
+description = "Search filters (auto-set for this tool)"
+
+[tools.input_schema.properties.filters.default]
+types = ["sanction"]
+entity_type = "company"
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "ca_person_sanctions_search"
+description = "Search individuals against global sanctions lists. Returns matches with source details and risk indicators. Automatically filters for sanction-type results on person entities."
+endpoint = "/searches"
+method = "POST"
+scope = "tool:ca_person_sanctions_search"
+
+[tools.input_schema]
+type = "object"
+required = ["search_term"]
+
+[tools.input_schema.properties.search_term]
+type = "string"
+description = "Person name to search against sanctions lists"
+
+[tools.input_schema.properties.fuzziness]
+type = "number"
+description = "Match fuzziness from 0.0 (exact) to 1.0 (loose)"
+default = 0.6
+
+[tools.input_schema.properties.share_url]
+type = "integer"
+description = "Set to 1 to include a shareable result URL"
+
+[tools.input_schema.properties.filters]
+type = "object"
+description = "Search filters (auto-set for this tool)"
+
+[tools.input_schema.properties.filters.default]
+types = ["sanction"]
+entity_type = "person"
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "ca_person_pep_search"
+description = "Search individuals for Politically Exposed Person (PEP) status. Returns matches with political roles and risk levels. Automatically filters for all PEP classes."
+endpoint = "/searches"
+method = "POST"
+scope = "tool:ca_person_pep_search"
+
+[tools.input_schema]
+type = "object"
+required = ["search_term"]
+
+[tools.input_schema.properties.search_term]
+type = "string"
+description = "Person name to search for PEP status"
+
+[tools.input_schema.properties.fuzziness]
+type = "number"
+description = "Match fuzziness from 0.0 (exact) to 1.0 (loose)"
+default = 0.6
+
+[tools.input_schema.properties.share_url]
+type = "integer"
+description = "Set to 1 to include a shareable result URL"
+
+[tools.input_schema.properties.filters]
+type = "object"
+description = "PEP search filters (auto-set for this tool)"
+
+[tools.input_schema.properties.filters.default]
+types = ["pep", "pep-class-1", "pep-class-2", "pep-class-3", "pep-class-4"]
+entity_type = "person"
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "ca_adverse_media_search"
+description = "Search business entities for adverse media coverage. Returns matches with news sources and risk categories. Automatically filters for adverse media types on company entities."
+endpoint = "/searches"
+method = "POST"
+scope = "tool:ca_adverse_media_search"
+
+[tools.input_schema]
+type = "object"
+required = ["search_term"]
+
+[tools.input_schema.properties.search_term]
+type = "string"
+description = "Business name to search for adverse media"
+
+[tools.input_schema.properties.fuzziness]
+type = "number"
+description = "Match fuzziness from 0.0 (exact) to 1.0 (loose)"
+default = 0.6
+
+[tools.input_schema.properties.share_url]
+type = "integer"
+description = "Set to 1 to include a shareable result URL"
+
+[tools.input_schema.properties.filters]
+type = "object"
+description = "Adverse media search filters (auto-set for this tool)"
+
+[tools.input_schema.properties.filters.default]
+types = ["adverse-media", "adverse-media-financial-crime", "adverse-media-fraud", "adverse-media-general"]
+entity_type = "company"
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "ca_person_adverse_media_search"
+description = "Search individuals for adverse media coverage. Returns matches with news sources and risk categories. Automatically filters for adverse media types on person entities."
+endpoint = "/searches"
+method = "POST"
+scope = "tool:ca_person_adverse_media_search"
+
+[tools.input_schema]
+type = "object"
+required = ["search_term"]
+
+[tools.input_schema.properties.search_term]
+type = "string"
+description = "Person name to search for adverse media"
+
+[tools.input_schema.properties.fuzziness]
+type = "number"
+description = "Match fuzziness from 0.0 (exact) to 1.0 (loose)"
+default = 0.6
+
+[tools.input_schema.properties.share_url]
+type = "integer"
+description = "Set to 1 to include a shareable result URL"
+
+[tools.input_schema.properties.filters]
+type = "object"
+description = "Adverse media search filters (auto-set for this tool)"
+
+[tools.input_schema.properties.filters.default]
+types = ["adverse-media", "adverse-media-financial-crime", "adverse-media-fraud", "adverse-media-general"]
+entity_type = "person"
+
+[tools.response]
+format = "json"

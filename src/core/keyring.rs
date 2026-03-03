@@ -92,6 +92,58 @@ impl Keyring {
         self.keys.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Create a keyring from environment variables.
+    ///
+    /// Used in `--env-keys` mode where API keys are in env vars (e.g. host deployments)
+    /// instead of encrypted keyring files.
+    pub fn from_env() -> Self {
+        const KEY_TO_ENV: &[(&str, &str)] = &[
+            // Original providers
+            ("financial_datasets_api_key", "FINANCIAL_DATASETS_API_KEY"),
+            ("parallel_api_key", "PARALLEL_API_KEY"),
+            ("finnhub_api_key", "FINNHUB_API_KEY"),
+            ("fred_api_key", "FRED_API_KEY"),
+            ("serpapi_api_key", "SERPAPI_KEY"),
+            ("epo_api_key", "EPO_API_KEY"),
+            ("middesk_api_key", "MIDDESK_API_KEY"),
+            ("semantic_scholar_api_key", "SEMANTIC_SCHOLAR_API_KEY"),
+            ("courtlistener_api_key", "COURTLISTENER_TOKEN"),
+            ("cerebras_api_key", "CEREBRAS_API_KEY"),
+            // New providers (ATI migration)
+            ("pdl_api_key", "PDL_API_KEY"),
+            ("complyadvantage_api_key", "COMPLYADVANTAGE_API_KEY"),
+            ("xai_api_key", "X_AI_API_KEY"),
+            ("google_places_api_key", "GOOGLE_PLACES_API_KEY"),
+            ("opencorporates_api_key", "OPEN_CORPORATES_API_KEY"),
+            ("pipl_api_key", "PIPL_API_KEY"),
+            ("vesselfinder_api_key", "VESSELFINDER_API_KEY"),
+            ("datalastic_api_key", "DATALASTIC_API_KEY"),
+            ("aviationstack_api_key", "AVIATIONSTACK_API_KEY"),
+            ("aviation_edge_api_key", "AVIATION_EDGE_API_KEY"),
+            ("ebay_api_key", "EBAY_API_KEY"),
+            ("amadeus_api_key", "AMADEUS_API_KEY"),
+            ("amadeus_api_secret", "AMADEUS_API_SECRET"),
+            ("apify_api_key", "APIFY_API_KEY"),
+            ("sovos_api_key", "SOVOS_API_KEY"),
+            ("sovos_api_secret", "SOVOS_API_SECRET"),
+            ("rapidapi_key", "RAPIDAPI_KEY"),
+            ("attom_api_key", "ATTOM_API_KEY"),
+        ];
+
+        let mut keys = HashMap::new();
+        for (key_name, env_var) in KEY_TO_ENV {
+            if let Ok(value) = std::env::var(env_var) {
+                if !value.is_empty() {
+                    keys.insert(key_name.to_string(), value);
+                }
+            }
+        }
+        Keyring {
+            keys,
+            _raw_json: Vec::new(),
+        }
+    }
+
     /// Create an empty keyring (for tools with auth_type = none).
     pub fn empty() -> Self {
         Keyring {

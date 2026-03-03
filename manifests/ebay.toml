@@ -1,0 +1,12 @@
+[provider]
+name = "ebay"
+description = "eBay — Product search and marketplace listings"
+handler = "openapi"
+base_url = "https://api.ebay.com"
+openapi_spec = "ebay.json"
+auth_type = "bearer"
+auth_key_name = "ebay_api_key"
+category = "ecommerce"
+
+[provider.extra_headers]
+"X-EBAY-C-MARKETPLACE-ID" = "EBAY_US"

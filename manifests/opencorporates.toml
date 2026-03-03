@@ -1,0 +1,71 @@
+[provider]
+name = "opencorporates"
+description = "OpenCorporates — Global company registry search for corporate filings, officers, and jurisdictions"
+base_url = "https://api.opencorporates.com"
+auth_type = "query"
+auth_query_name = "api_token"
+auth_key_name = "opencorporates_api_key"
+
+[[tools]]
+name = "opencorporates_company_search"
+description = "Search the global company registry for businesses by name or keyword. Returns company names, jurisdictions, registration numbers, and status."
+endpoint = "/v0.4.8/companies/search"
+method = "GET"
+scope = "tool:opencorporates_company_search"
+
+[tools.input_schema]
+type = "object"
+required = ["q"]
+
+[tools.input_schema.properties.q]
+type = "string"
+description = "Company name or search query (e.g. 'Stripe Inc', 'Acme')"
+
+[tools.input_schema.properties.jurisdiction_code]
+type = "string"
+description = "Jurisdiction code to filter by (e.g. 'us_ca', 'gb', 'de')"
+
+[tools.input_schema.properties.page]
+type = "integer"
+description = "Page number for pagination"
+default = 1
+
+[tools.input_schema.properties.per_page]
+type = "integer"
+description = "Number of results per page"
+default = 30
+
+[tools.response]
+format = "json"
+
+[[tools]]
+name = "opencorporates_officer_search"
+description = "Search for company officers (directors, secretaries, etc.) by name. Returns officer details, positions, and associated companies."
+endpoint = "/v0.4.8/officers/search"
+method = "GET"
+scope = "tool:opencorporates_officer_search"
+
+[tools.input_schema]
+type = "object"
+required = ["q"]
+
+[tools.input_schema.properties.q]
+type = "string"
+description = "Officer name to search for"
+
+[tools.input_schema.properties.jurisdiction_code]
+type = "string"
+description = "Jurisdiction code to filter by (e.g. 'us_ca', 'gb')"
+
+[tools.input_schema.properties.page]
+type = "integer"
+description = "Page number for pagination"
+default = 1
+
+[tools.input_schema.properties.per_page]
+type = "integer"
+description = "Number of results per page"
+default = 30
+
+[tools.response]
+format = "json"

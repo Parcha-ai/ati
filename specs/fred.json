@@ -1,0 +1,221 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "FRED API",
+    "description": "Federal Reserve Economic Data API for economic time series data",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.stlouisfed.org/fred"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "api_key"
+      }
+    }
+  },
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "paths": {
+    "/series/search": {
+      "get": {
+        "operationId": "seriesSearch",
+        "summary": "Search for FRED economic data series",
+        "tags": ["Economic Data"],
+        "parameters": [
+          {
+            "name": "search_text",
+            "in": "query",
+            "required": true,
+            "description": "Search query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum number of results",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          },
+          {
+            "name": "file_type",
+            "in": "query",
+            "required": false,
+            "description": "Response format",
+            "schema": {
+              "type": "string",
+              "default": "json"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response with matching series",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "seriess": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/series": {
+      "get": {
+        "operationId": "seriesInfo",
+        "summary": "Get metadata for a FRED series",
+        "tags": ["Economic Data"],
+        "parameters": [
+          {
+            "name": "series_id",
+            "in": "query",
+            "required": true,
+            "description": "FRED series ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_type",
+            "in": "query",
+            "required": false,
+            "description": "Response format",
+            "schema": {
+              "type": "string",
+              "default": "json"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response with series metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "seriess": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/series/observations": {
+      "get": {
+        "operationId": "seriesObservations",
+        "summary": "Get observations for a FRED series",
+        "tags": ["Economic Data"],
+        "parameters": [
+          {
+            "name": "series_id",
+            "in": "query",
+            "required": true,
+            "description": "FRED series ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum number of observations",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          },
+          {
+            "name": "sort_order",
+            "in": "query",
+            "required": false,
+            "description": "Sort order",
+            "schema": {
+              "type": "string",
+              "default": "desc"
+            }
+          },
+          {
+            "name": "observation_start",
+            "in": "query",
+            "required": false,
+            "description": "Start date in YYYY-MM-DD format",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "observation_end",
+            "in": "query",
+            "required": false,
+            "description": "End date in YYYY-MM-DD format",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_type",
+            "in": "query",
+            "required": false,
+            "description": "Response format",
+            "schema": {
+              "type": "string",
+              "default": "json"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response with observations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "observations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

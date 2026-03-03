@@ -1,0 +1,10 @@
+[provider]
+name = "fred"
+description = "Federal Reserve Economic Data (FRED) — 800,000+ US and international economic time series"
+handler = "openapi"
+base_url = "https://api.stlouisfed.org/fred"
+openapi_spec = "fred.json"
+auth_type = "query"
+auth_query_name = "api_key"
+auth_key_name = "fred_api_key"
+category = "economics"

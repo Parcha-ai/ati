@@ -1,0 +1,91 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ClinicalTrials.gov API",
+    "description": "Search and retrieve clinical trial studies from ClinicalTrials.gov",
+    "version": "2.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://clinicaltrials.gov/api/v2"
+    }
+  ],
+  "paths": {
+    "/studies": {
+      "get": {
+        "operationId": "searchStudies",
+        "summary": "Search clinical trial studies",
+        "tags": ["Clinical Trials"],
+        "parameters": [
+          {
+            "name": "query.term",
+            "in": "query",
+            "required": true,
+            "description": "Search term",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Results per page",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "description": "Response format",
+            "schema": {
+              "type": "string",
+              "default": "json"
+            }
+          },
+          {
+            "name": "filter.overallStatus",
+            "in": "query",
+            "required": false,
+            "description": "Filter by overall study status",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter.phase",
+            "in": "query",
+            "required": false,
+            "description": "Filter by study phase",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response with studies array",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "studies": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

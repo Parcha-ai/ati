@@ -1,0 +1,10 @@
+[provider]
+name = "financial_datasets"
+description = "Financial Datasets — SEC filings, financial statements, stock prices, and company news"
+handler = "openapi"
+base_url = "https://api.financialdatasets.ai"
+openapi_spec = "financial_datasets.json"
+auth_type = "header"
+auth_header_name = "X-API-KEY"
+auth_key_name = "financial_datasets_api_key"
+category = "finance"

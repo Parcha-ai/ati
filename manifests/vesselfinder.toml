@@ -1,0 +1,32 @@
+[provider]
+name = "vesselfinder"
+description = "VesselFinder — Real-time vessel tracking and maritime data"
+base_url = "https://api.vesselfinder.com"
+auth_type = "query"
+auth_query_name = "userkey"
+auth_key_name = "vesselfinder_api_key"
+
+[[tools]]
+name = "vessel_search_vesselfinder"
+description = "Search for vessels by MMSI, IMO number, or name"
+endpoint = "/vessels"
+method = "GET"
+scope = "tool:vessel_search_vesselfinder"
+
+[tools.input_schema]
+type = "object"
+
+[tools.input_schema.properties.mmsi]
+type = "string"
+description = "Maritime Mobile Service Identity number"
+
+[tools.input_schema.properties.imo]
+type = "string"
+description = "IMO vessel number"
+
+[tools.input_schema.properties.name]
+type = "string"
+description = "Vessel name"
+
+[tools.response]
+format = "json"

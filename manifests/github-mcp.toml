@@ -1,0 +1,23 @@
+# GitHub via official MCP server (stdio transport)
+#
+# This manifest uses handler = "mcp" — tools are discovered dynamically via
+# the MCP protocol's tools/list method. No [[tools]] section needed.
+#
+# The MCP server is launched as a subprocess. Auth is handled by passing
+# GITHUB_PERSONAL_ACCESS_TOKEN as an env var to the subprocess.
+#
+# In proxy mode, the proxy host runs the subprocess with real credentials.
+# The sandbox ATI client never sees the token.
+
+[provider]
+name = "github"
+description = "GitHub via official MCP server"
+handler = "mcp"
+mcp_transport = "stdio"
+mcp_command = "npx"
+mcp_args = ["-y", "@modelcontextprotocol/server-github"]
+auth_type = "none"
+category = "developer-tools"
+
+[provider.mcp_env]
+GITHUB_PERSONAL_ACCESS_TOKEN = "${github_token}"
