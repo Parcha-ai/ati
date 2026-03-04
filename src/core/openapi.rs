@@ -84,9 +84,9 @@ pub fn load_and_register(
 pub fn load_spec(spec_ref: &str, specs_dir: Option<&Path>) -> Result<OpenAPI, OpenApiError> {
     let content = if spec_ref.starts_with("http://") || spec_ref.starts_with("https://") {
         // URL — for now we don't support runtime fetching during load.
-        // The `ati openapi import` command downloads specs to ~/.ati/specs/.
+        // The `ati provider import-openapi` command downloads specs to ~/.ati/specs/.
         return Err(OpenApiError::UnsupportedFormat(
-            "URL specs must be downloaded first with `ati openapi import`. Use a local file path.".into(),
+            "URL specs must be downloaded first with `ati provider import-openapi`. Use a local file path.".into(),
         ));
     } else {
         // Local file path

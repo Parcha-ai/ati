@@ -1,7 +1,7 @@
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Without ATI_PROXY_URL, `ati call` should attempt local mode.
+/// Without ATI_PROXY_URL, `ati run` should attempt local mode.
 /// Since there's no manifest dir in the test env, it fails with a manifest error (not a proxy error).
 #[tokio::test]
 async fn test_call_without_proxy_uses_local_mode() {
@@ -9,7 +9,7 @@ async fn test_call_without_proxy_uses_local_mode() {
     std::env::remove_var("ATI_PROXY_URL");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
-        .args(["call", "web_search", "--query", "test"])
+        .args(["run", "web_search", "--query", "test"])
         .env_remove("ATI_PROXY_URL")
         .env("ATI_DIR", "/tmp/ati-test-nonexistent")
         .output()
@@ -24,7 +24,7 @@ async fn test_call_without_proxy_uses_local_mode() {
     );
 }
 
-/// With ATI_PROXY_URL set, `ati call` should forward to the proxy.
+/// With ATI_PROXY_URL set, `ati run` should forward to the proxy.
 #[tokio::test]
 async fn test_call_with_proxy_url_routes_to_proxy() {
     let mock_server = MockServer::start().await;
@@ -42,7 +42,7 @@ async fn test_call_with_proxy_url_routes_to_proxy() {
         .await;
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
-        .args(["call", "web_search", "--query", "test"])
+        .args(["run", "web_search", "--query", "test"])
         .env("ATI_PROXY_URL", mock_server.uri())
         .env("ATI_DIR", "/tmp/ati-test-nonexistent") // no local manifests needed
         .output()
@@ -78,7 +78,7 @@ async fn test_verbose_shows_proxy_mode() {
         .await;
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
-        .args(["--verbose", "call", "some_tool"])
+        .args(["--verbose", "run", "some_tool"])
         .env("ATI_PROXY_URL", mock_server.uri())
         .env("ATI_DIR", "/tmp/ati-test-nonexistent")
         .output()
@@ -103,7 +103,7 @@ async fn test_proxy_error_propagated() {
         .await;
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
-        .args(["call", "web_search", "--query", "test"])
+        .args(["run", "web_search", "--query", "test"])
         .env("ATI_PROXY_URL", mock_server.uri())
         .env("ATI_DIR", "/tmp/ati-test-nonexistent")
         .output()
@@ -121,7 +121,7 @@ async fn test_help_with_proxy_url_routes_to_proxy() {
         .and(path("/help"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "content": "Use ati call web_search --query \"your query\"",
+                "content": "Use ati run web_search --query \"your query\"",
                 "error": null
             })),
         )

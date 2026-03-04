@@ -5,7 +5,7 @@ use crate::core::manifest::ManifestRegistry;
 use crate::core::mcp_client::McpClient;
 use crate::core::scope::{self, ScopeConfig};
 use crate::output;
-use crate::{Cli, OutputFormat, ToolsCommands};
+use crate::{Cli, OutputFormat, ToolCommands};
 
 /// Load scopes from ATI_SESSION_TOKEN JWT, or return unrestricted.
 fn load_scopes_from_env() -> ScopeConfig {
@@ -58,10 +58,10 @@ async fn discover_mcp_tools(registry: &mut ManifestRegistry, keyring: &Keyring, 
     }
 }
 
-/// Execute: ati tools <subcommand>
+/// Execute: ati tool <subcommand>
 pub async fn execute(
     cli: &Cli,
-    subcmd: &ToolsCommands,
+    subcmd: &ToolCommands,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = common::ati_dir();
     let manifests_dir = ati_dir.join("manifests");
@@ -77,10 +77,9 @@ pub async fn execute(
     let scopes = load_scopes_from_env();
 
     match subcmd {
-        ToolsCommands::List { provider } => list_tools(cli, &registry, &scopes, provider.as_deref()),
-        ToolsCommands::Info { name } => tool_info(cli, &registry, name),
-        ToolsCommands::Providers => list_providers(cli, &registry),
-        ToolsCommands::Search { query } => search_tools(cli, &registry, &scopes, query),
+        ToolCommands::List { provider } => list_tools(cli, &registry, &scopes, provider.as_deref()),
+        ToolCommands::Info { name } => tool_info(cli, &registry, name),
+        ToolCommands::Search { query } => search_tools(cli, &registry, &scopes, query),
     }
 }
 
@@ -144,7 +143,7 @@ fn tool_info(
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (provider, tool) = registry.get_tool(name).ok_or_else(|| {
-        format!("Unknown tool: '{name}'. Run 'ati tools list' to see available tools.")
+        format!("Unknown tool: '{name}'. Run 'ati tool list' to see available tools.")
     })?;
 
     match cli.output {
@@ -195,7 +194,7 @@ fn tool_info(
             }
             // Show example usage
             println!("\nUsage:");
-            print!("  ati call {}", tool.name);
+            print!("  ati run {}", tool.name);
             if let Some(schema) = &tool.input_schema {
                 if let Some(props) = schema.get("properties") {
                     if let Some(obj) = props.as_object() {
@@ -357,40 +356,3 @@ fn score_tool_match(
     score
 }
 
-fn list_providers(
-    cli: &Cli,
-    registry: &ManifestRegistry,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let providers = registry.list_providers();
-
-    match cli.output {
-        OutputFormat::Json => {
-            let json: Vec<serde_json::Value> = providers
-                .iter()
-                .map(|p| {
-                    serde_json::json!({
-                        "name": p.name,
-                        "description": p.description,
-                        "base_url": p.base_url,
-                        "internal": p.internal,
-                    })
-                })
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-        OutputFormat::Table | OutputFormat::Text => {
-            let value = serde_json::json!(
-                providers.iter().filter(|p| !p.internal).map(|p| {
-                    serde_json::json!({
-                        "PROVIDER": p.name,
-                        "DESCRIPTION": p.description,
-                        "BASE_URL": p.base_url,
-                    })
-                }).collect::<Vec<_>>()
-            );
-            println!("{}", output::table::format(&value));
-        }
-    }
-
-    Ok(())
-}

@@ -8,7 +8,7 @@ This directory contains example tool manifest files for ATI (Agent Tools Interfa
 2. Edit the provider section with your API details
 3. Define one or more `[[tools]]` sections
 4. Place the file in `~/.ati/manifests/`
-5. Run `ati tools list` to verify it loaded
+5. Run `ati tool list` to verify it loaded
 
 ## File Format
 

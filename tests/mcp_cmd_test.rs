@@ -1,13 +1,12 @@
-/// Integration tests for `ati mcp add/list/remove` CLI commands.
+/// Integration tests for `ati provider add-mcp/list/remove` CLI commands.
 ///
 /// Tests:
 /// - HTTP transport manifest generation
 /// - Stdio transport manifest generation
 /// - Auth fields (bearer, header)
 /// - Environment variables from --env KEY=VALUE
-/// - List shows MCP providers
-/// - Remove deletes MCP manifest
-/// - Remove refuses non-MCP manifests
+/// - List shows providers
+/// - Remove deletes provider manifest (any type)
 /// - Validation: --url required for http, --command required for stdio
 
 use std::process::Command;
@@ -33,7 +32,7 @@ fn test_mcp_add_http() {
 
     let output = Command::new(ati_bin())
         .args([
-            "mcp", "add", "serpapi",
+            "provider", "add-mcp", "serpapi",
             "--transport", "http",
             "--url", "https://mcp.serpapi.com/mcp",
         ])
@@ -79,7 +78,7 @@ fn test_mcp_add_stdio() {
 
     let output = Command::new(ati_bin())
         .args([
-            "mcp", "add", "github",
+            "provider", "add-mcp", "github",
             "--transport", "stdio",
             "--command", "npx",
             "--args", "-y",
@@ -123,7 +122,7 @@ fn test_mcp_add_with_auth() {
 
     let output = Command::new(ati_bin())
         .args([
-            "mcp", "add", "parallel",
+            "provider", "add-mcp", "parallel",
             "--transport", "http",
             "--url", "https://search-mcp.parallel.ai/mcp",
             "--auth", "bearer",
@@ -165,7 +164,7 @@ fn test_mcp_add_with_env() {
 
     let output = Command::new(ati_bin())
         .args([
-            "mcp", "add", "github",
+            "provider", "add-mcp", "github",
             "--transport", "stdio",
             "--command", "npx",
             "--args", "-y",
@@ -204,7 +203,7 @@ fn test_mcp_list() {
     // Add two MCP providers
     Command::new(ati_bin())
         .args([
-            "mcp", "add", "serpapi",
+            "provider", "add-mcp", "serpapi",
             "--transport", "http",
             "--url", "https://mcp.serpapi.com/mcp",
         ])
@@ -214,7 +213,7 @@ fn test_mcp_list() {
 
     Command::new(ati_bin())
         .args([
-            "mcp", "add", "github",
+            "provider", "add-mcp", "github",
             "--transport", "stdio",
             "--command", "npx",
             "--args", "-y",
@@ -226,7 +225,7 @@ fn test_mcp_list() {
 
     // List
     let output = Command::new(ati_bin())
-        .args(["mcp", "list"])
+        .args(["provider", "list"])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
         .expect("list");
@@ -254,7 +253,7 @@ fn test_mcp_remove() {
     // Add
     Command::new(ati_bin())
         .args([
-            "mcp", "add", "serpapi",
+            "provider", "add-mcp", "serpapi",
             "--transport", "http",
             "--url", "https://mcp.serpapi.com/mcp",
         ])
@@ -266,7 +265,7 @@ fn test_mcp_remove() {
 
     // Remove
     let output = Command::new(ati_bin())
-        .args(["mcp", "remove", "serpapi"])
+        .args(["provider", "remove", "serpapi"])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
         .expect("remove serpapi");
@@ -283,11 +282,11 @@ fn test_mcp_remove() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: remove refuses non-MCP manifest
+// Test: remove works for any provider type (not just MCP)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_mcp_remove_refuses_non_mcp() {
+fn test_provider_remove_works_for_any_type() {
     let dir = create_ati_dir();
 
     // Write a non-MCP (HTTP) manifest
@@ -310,23 +309,24 @@ method = "GET"
     )
     .unwrap();
 
+    assert!(dir.path().join("manifests/example.toml").exists());
+
     let output = Command::new(ati_bin())
-        .args(["mcp", "remove", "example"])
+        .args(["provider", "remove", "example"])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
         .expect("remove example");
 
     assert!(
-        !output.status.success(),
-        "Should fail for non-MCP manifest"
+        output.status.success(),
+        "Should succeed for any provider type. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // File should be deleted
     assert!(
-        stderr.contains("non-MCP"),
-        "Error should mention non-MCP. stderr: {stderr}"
+        !dir.path().join("manifests/example.toml").exists(),
+        "Manifest should be deleted"
     );
-    // File should still exist
-    assert!(dir.path().join("manifests/example.toml").exists());
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +339,7 @@ fn test_mcp_add_requires_url_for_http() {
 
     let output = Command::new(ati_bin())
         .args([
-            "mcp", "add", "broken",
+            "provider", "add-mcp", "broken",
             "--transport", "http",
         ])
         .env("ATI_DIR", dir.path().to_str().unwrap())
@@ -367,7 +367,7 @@ fn test_mcp_add_requires_command_for_stdio() {
 
     let output = Command::new(ati_bin())
         .args([
-            "mcp", "add", "broken",
+            "provider", "add-mcp", "broken",
             "--transport", "stdio",
         ])
         .env("ATI_DIR", dir.path().to_str().unwrap())

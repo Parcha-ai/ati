@@ -24,8 +24,11 @@ pub enum OutputFormat {
                    Keys are encrypted and never exposed to the agent or environment."
 )]
 pub struct Cli {
-    #[arg(long, value_enum, default_value = "text", global = true)]
+    #[arg(long, value_enum, default_value = "text", global = true, env = "ATI_OUTPUT")]
     pub output: OutputFormat,
+
+    #[arg(short = 'J', long = "json", global = true, help = "Shorthand for --output json")]
+    pub json: bool,
 
     #[arg(long, global = true, help = "Enable verbose/debug output")]
     pub verbose: bool,
@@ -37,7 +40,10 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Execute a tool by name
-    Call {
+    #[command(
+        after_help = "Examples:\n  ati run web_search --query \"rust async\"\n  ati run github__search_repositories --query \"ati\" -J\n  ati run get_stock_quote --symbol AAPL --output json"
+    )]
+    Run {
         /// Tool name (e.g. web_search)
         tool_name: String,
         /// Tool arguments as --key value pairs
@@ -47,11 +53,11 @@ pub enum Commands {
 
     /// List, inspect, and discover tools
     #[command(subcommand)]
-    Tools(ToolsCommands),
+    Tool(ToolCommands),
 
     /// Manage skill files (methodology docs for agents)
     #[command(subcommand)]
-    Skills(SkillsCommands),
+    Skill(SkillCommands),
 
     /// LLM-powered tool discovery — ask what tool to use
     #[command(name = "assist")]
@@ -60,13 +66,13 @@ pub enum Commands {
         query: String,
     },
 
-    /// OpenAPI spec management — inspect and import API specs
-    #[command(subcommand)]
-    Openapi(OpenapiCommands),
-
-    /// MCP provider management — add, list, remove MCP manifests
-    #[command(subcommand)]
-    Mcp(McpCommands),
+    /// Unified provider management — MCP, OpenAPI, and HTTP providers
+    #[command(
+        subcommand,
+        name = "provider",
+        after_help = "Examples:\n  ati provider list\n  ati provider add-mcp serpapi --transport http --url https://mcp.serpapi.com/mcp\n  ati provider import-openapi https://api.example.com/openapi.json --name example\n  ati provider remove old_provider"
+    )]
+    Provider(ProviderCommands),
 
     /// Authentication and scope information
     #[command(subcommand)]
@@ -88,7 +94,7 @@ pub enum Commands {
 
     /// Manage API keys in ~/.ati/credentials
     #[command(subcommand)]
-    Keys(KeysCommands),
+    Key(KeyCommands),
 
     /// Run ATI as a proxy server (holds keys, serves sandbox agents)
     Proxy {
@@ -105,13 +111,10 @@ pub enum Commands {
         #[arg(long)]
         env_keys: bool,
     },
-
-    /// Print version information
-    Version,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum ToolsCommands {
+pub enum ToolCommands {
     /// List available tools (filtered by your scopes)
     List {
         /// Filter by provider name
@@ -123,8 +126,6 @@ pub enum ToolsCommands {
         /// Tool name
         name: String,
     },
-    /// List loaded providers
-    Providers,
     /// Search tools by name, description, or tags
     Search {
         /// Search query (fuzzy matches on name, description, tags, category)
@@ -133,7 +134,7 @@ pub enum ToolsCommands {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum SkillsCommands {
+pub enum SkillCommands {
     /// List available skills (with optional filters)
     List {
         /// Filter by category binding
@@ -214,38 +215,10 @@ pub enum SkillsCommands {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum OpenapiCommands {
-    /// Inspect an OpenAPI spec — show operations, auth, base URL
-    Inspect {
-        /// Path or URL to the OpenAPI spec (JSON or YAML)
-        spec: String,
-        /// Only show operations with these tags
-        #[arg(long)]
-        include_tags: Vec<String>,
-    },
-    /// Import an OpenAPI spec — download to ~/.ati/specs/ and generate manifest
-    Import {
-        /// Path or URL to the OpenAPI spec (JSON or YAML)
-        spec: String,
-        /// Provider name for the generated manifest
-        #[arg(long)]
-        name: String,
-        /// Keyring key name for the API key (default: {name}_api_key)
-        #[arg(long)]
-        auth_key: Option<String>,
-        /// Only include operations with these tags
-        #[arg(long)]
-        include_tags: Vec<String>,
-        /// Preview the generated manifest without saving
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub enum McpCommands {
+pub enum ProviderCommands {
     /// Add an MCP provider — generates a TOML manifest
-    Add {
+    #[command(name = "add-mcp")]
+    AddMcp {
         /// Provider name (used as manifest filename and tool prefix)
         name: String,
         /// Transport type: http or stdio
@@ -279,17 +252,54 @@ pub enum McpCommands {
         #[arg(long)]
         category: Option<String>,
     },
-    /// List configured MCP providers
+
+    /// Import an OpenAPI spec — download to ~/.ati/specs/ and generate manifest
+    #[command(name = "import-openapi")]
+    ImportOpenapi {
+        /// Path or URL to the OpenAPI spec (JSON or YAML)
+        spec: String,
+        /// Provider name for the generated manifest
+        #[arg(long)]
+        name: String,
+        /// Keyring key name for the API key (default: {name}_api_key)
+        #[arg(long)]
+        auth_key: Option<String>,
+        /// Only include operations with these tags
+        #[arg(long)]
+        include_tags: Vec<String>,
+        /// Preview the generated manifest without saving
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Inspect an OpenAPI spec — show operations, auth, base URL
+    #[command(name = "inspect-openapi")]
+    InspectOpenapi {
+        /// Path or URL to the OpenAPI spec (JSON or YAML)
+        spec: String,
+        /// Only show operations with these tags
+        #[arg(long)]
+        include_tags: Vec<String>,
+    },
+
+    /// List all configured providers (HTTP, MCP, OpenAPI)
     List,
-    /// Remove an MCP provider manifest
+
+    /// Remove a provider manifest
     Remove {
         /// Provider name to remove
+        name: String,
+    },
+
+    /// Show provider details
+    Info {
+        /// Provider name
         name: String,
     },
 }
 
 #[derive(Subcommand, Debug)]
-pub enum KeysCommands {
+pub enum KeyCommands {
     /// Store an API key
     Set {
         /// Key name (e.g. myapi_api_key)
@@ -364,19 +374,23 @@ pub enum TokenCommands {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Resolve -J shorthand: if --json flag is set, override output to JSON
+    if cli.json {
+        cli.output = OutputFormat::Json;
+    }
 
     let result = match &cli.command {
-        Commands::Call { tool_name, args } => cli::call::execute(&cli, tool_name, args).await,
-        Commands::Tools(subcmd) => cli::tools::execute(&cli, subcmd).await,
-        Commands::Skills(subcmd) => cli::skills::execute(&cli, subcmd).await,
+        Commands::Run { tool_name, args } => cli::call::execute(&cli, tool_name, args).await,
+        Commands::Tool(subcmd) => cli::tools::execute(&cli, subcmd).await,
+        Commands::Skill(subcmd) => cli::skills::execute(&cli, subcmd).await,
         Commands::Assist { query } => cli::help::execute(&cli, query).await,
-        Commands::Openapi(subcmd) => cli::openapi::execute(subcmd).await,
-        Commands::Mcp(subcmd) => cli::mcp::execute(subcmd),
+        Commands::Provider(subcmd) => cli::provider::execute(&cli, subcmd).await,
         Commands::Auth(subcmd) => cli::auth::execute(&cli, subcmd).await,
         Commands::Token(subcmd) => cli::token::execute(subcmd).map_err(|e| e as Box<dyn std::error::Error>),
         Commands::Init { proxy, es256 } => cli::init::execute(*proxy, *es256),
-        Commands::Keys(subcmd) => cli::keys::execute(subcmd),
+        Commands::Key(subcmd) => cli::keys::execute(subcmd),
         Commands::Proxy { port, bind, ati_dir, env_keys } => {
             let dir = ati_dir
                 .as_deref()
@@ -384,22 +398,24 @@ async fn main() {
                 .unwrap_or_else(cli::common::ati_dir);
             proxy::server::run(*port, bind.clone(), dir, cli.verbose, *env_keys).await
         }
-        Commands::Version => {
-            println!("ati {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
     };
 
     if let Err(e) = result {
-        eprintln!("Error: {e}");
-        if cli.verbose {
-            // Print the full error chain
-            let mut source = std::error::Error::source(&*e);
-            while let Some(cause) = source {
-                eprintln!("  caused by: {cause}");
-                source = std::error::Error::source(cause);
+        let is_json = matches!(cli.output, OutputFormat::Json);
+        if is_json {
+            let error_json = core::error::format_structured_error(e.as_ref(), cli.verbose);
+            eprintln!("{error_json}");
+        } else {
+            eprintln!("Error: {e}");
+            if cli.verbose {
+                let mut source = std::error::Error::source(e.as_ref());
+                while let Some(cause) = source {
+                    eprintln!("  caused by: {cause}");
+                    source = std::error::Error::source(cause);
+                }
             }
         }
-        process::exit(1);
+        let exit_code = core::error::exit_code_for_error(e.as_ref());
+        process::exit(exit_code);
     }
 }

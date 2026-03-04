@@ -8,7 +8,7 @@ tool wrappers needed. Shows ATI's unified interface across different provider ty
 - arXiv (HTTP provider) — hand-written TOML manifest
 - Hacker News (HTTP provider) — hand-written TOML manifest
 
-Same `ati call` interface for all three. The agent doesn't care which backend.
+Same `ati run` interface for all three. The agent doesn't care which backend.
 
 Usage:
     python openapi_agent.py
@@ -53,18 +53,18 @@ Tools auto-discovered from an OAS 3.0 spec, names like `crossref__get_works`.
 ati assist "find academic papers"
 
 # Discover tools by keyword
-ati tools search "arxiv"
-ati tools search "crossref"
-ati tools search "hackernews"
+ati tool search "arxiv"
+ati tool search "crossref"
+ati tool search "hackernews"
 
 # Inspect a tool's schema
-ati tools info academic_search_arxiv
-ati tools info crossref__get_works
+ati tool info academic_search_arxiv
+ati tool info crossref__get_works
 
 # Call a tool
-ati call academic_search_arxiv --search_query "quantum error correction" --max_results 5
-ati call crossref__get_works --query "quantum computing" --rows 5
-ati call hackernews_top_stories
+ati run academic_search_arxiv --search_query "quantum error correction" --max_results 5
+ati run crossref__get_works --query "quantum computing" --rows 5
+ati run hackernews_top_stories
 ```
 
 ATI_DIR is set to `{ATI_DIR}` — the ati binary will find its manifests there.

@@ -145,7 +145,7 @@ async fn test_proxy_help_returns_llm_recommendations() {
         .and(path("/chat/completions"))
         .and(header("Authorization", "Bearer test-cerebras-key-123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(mock_llm_response(
-            "1. **get_stock_quote** — Get real-time stock quote\n   ```\n   ati call get_stock_quote --symbol AAPL\n   ```",
+            "1. **get_stock_quote** — Get real-time stock quote\n   ```\n   ati run get_stock_quote --symbol AAPL\n   ```",
         )))
         .expect(1)
         .mount(&llm_mock)
@@ -349,7 +349,7 @@ async fn test_assist_local_mode_calls_llm() {
         .and(path("/chat/completions"))
         .and(header("Authorization", "Bearer test-cerebras-key-123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(mock_llm_response(
-            "1. **get_stock_quote** — Get real-time stock quote\n   ```\n   ati call get_stock_quote --symbol GOOG\n   ```",
+            "1. **get_stock_quote** — Get real-time stock quote\n   ```\n   ati run get_stock_quote --symbol GOOG\n   ```",
         )))
         .expect(1)
         .mount(&llm_mock)

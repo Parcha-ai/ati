@@ -5,7 +5,7 @@ use crate::core::jwt;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::scope::ScopeConfig;
 use crate::core::skill::{self, SkillRegistry};
-use crate::{Cli, OutputFormat, SkillsCommands};
+use crate::{Cli, OutputFormat, SkillCommands};
 
 fn skills_dir() -> PathBuf {
     common::ati_dir().join("skills")
@@ -34,19 +34,19 @@ fn load_scopes_from_env() -> ScopeConfig {
     }
 }
 
-/// Execute: ati skills <subcommand>
+/// Execute: ati skill <subcommand>
 pub async fn execute(
     cli: &Cli,
-    subcmd: &SkillsCommands,
+    subcmd: &SkillCommands,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Check for proxy mode on read-only commands
     if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
         match subcmd {
-            SkillsCommands::List { .. }
-            | SkillsCommands::Show { .. }
-            | SkillsCommands::Search { .. }
-            | SkillsCommands::Info { .. }
-            | SkillsCommands::Resolve { .. } => {
+            SkillCommands::List { .. }
+            | SkillCommands::Show { .. }
+            | SkillCommands::Search { .. }
+            | SkillCommands::Info { .. }
+            | SkillCommands::Resolve { .. } => {
                 return execute_via_proxy(cli, subcmd, &proxy_url).await;
             }
             // Install, Remove, Init, Validate operate locally
@@ -55,28 +55,28 @@ pub async fn execute(
     }
 
     match subcmd {
-        SkillsCommands::List {
+        SkillCommands::List {
             category,
             provider,
             tool,
         } => list_skills(cli, category.as_deref(), provider.as_deref(), tool.as_deref()),
-        SkillsCommands::Show { name, meta, refs } => show_skill(cli, name, *meta, *refs),
-        SkillsCommands::Search { query } => search_skills(cli, query),
-        SkillsCommands::Info { name } => info_skill(cli, name),
-        SkillsCommands::Install {
+        SkillCommands::Show { name, meta, refs } => show_skill(cli, name, *meta, *refs),
+        SkillCommands::Search { query } => search_skills(cli, query),
+        SkillCommands::Info { name } => info_skill(cli, name),
+        SkillCommands::Install {
             source,
             from_git,
             name,
             all,
         } => install_skill(cli, source, from_git.as_deref(), name.as_deref(), *all),
-        SkillsCommands::Remove { name } => remove_skill(cli, name),
-        SkillsCommands::Init {
+        SkillCommands::Remove { name } => remove_skill(cli, name),
+        SkillCommands::Init {
             name,
             tools,
             provider,
         } => init_skill(cli, name, tools, provider.as_deref()),
-        SkillsCommands::Validate { name, check_tools } => validate_skill(cli, name, *check_tools),
-        SkillsCommands::Resolve { scopes } => resolve_skills(cli, scopes.as_deref()),
+        SkillCommands::Validate { name, check_tools } => validate_skill(cli, name, *check_tools),
+        SkillCommands::Resolve { scopes } => resolve_skills(cli, scopes.as_deref()),
     }
 }
 
@@ -86,7 +86,7 @@ pub async fn execute(
 
 async fn execute_via_proxy(
     cli: &Cli,
-    subcmd: &SkillsCommands,
+    subcmd: &SkillCommands,
     proxy_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder()
@@ -95,7 +95,7 @@ async fn execute_via_proxy(
     let base = proxy_url.trim_end_matches('/');
 
     match subcmd {
-        SkillsCommands::List {
+        SkillCommands::List {
             category,
             provider,
             tool,
@@ -119,7 +119,7 @@ async fn execute_via_proxy(
             let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
             print_proxy_response(cli, &resp);
         }
-        SkillsCommands::Show { name, meta, refs } => {
+        SkillCommands::Show { name, meta, refs } => {
             let mut url = format!("{base}/skills/{name}");
             let mut params = Vec::new();
             if *meta {
@@ -157,17 +157,17 @@ async fn execute_via_proxy(
                 println!("{}", serde_json::to_string_pretty(&resp)?);
             }
         }
-        SkillsCommands::Search { query } => {
+        SkillCommands::Search { query } => {
             let url = format!("{base}/skills?search={}", urlencoding(query));
             let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
             print_proxy_response(cli, &resp);
         }
-        SkillsCommands::Info { name } => {
+        SkillCommands::Info { name } => {
             let url = format!("{base}/skills/{name}?meta=true");
             let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
-        SkillsCommands::Resolve { scopes } => {
+        SkillCommands::Resolve { scopes } => {
             let body = if let Some(path) = scopes {
                 let content = std::fs::read_to_string(path)?;
                 serde_json::from_str::<serde_json::Value>(&content)?
@@ -293,7 +293,7 @@ fn show_skill(
 
     let skill = registry
         .get_skill(name)
-        .ok_or_else(|| format!("Skill '{name}' not found. Run 'ati skills list' to see available skills."))?;
+        .ok_or_else(|| format!("Skill '{name}' not found. Run 'ati skill list' to see available skills."))?;
 
     if meta_only {
         match cli.output {

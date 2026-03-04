@@ -925,11 +925,11 @@ const HELP_SYSTEM_PROMPT: &str = r#"You are a tool recommendation assistant for 
 
 {skills_section}
 
-Given the user's query, recommend the most relevant tools and provide exact `ati call` commands with the right arguments. If a methodology skill is relevant, mention it and suggest `ati skills show <name>` to read the full guide. Be concise and practical. Format each recommendation as:
+Given the user's query, recommend the most relevant tools and provide exact `ati run` commands with the right arguments. If a methodology skill is relevant, mention it and suggest `ati skill show <name>` to read the full guide. Be concise and practical. Format each recommendation as:
 
 1. **tool_name** — description
    ```
-   ati call tool_name --arg1 value1 --arg2 value2
+   ati run tool_name --arg1 value1 --arg2 value2
    ```
 
 Only recommend tools from the list above. If no tool matches, say so clearly."#;

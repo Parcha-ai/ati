@@ -42,8 +42,8 @@ fn init_directory(
 
     eprintln!();
     eprintln!("Next steps:");
-    eprintln!("  ati keys set <name> <value>     Add an API key");
-    eprintln!("  ati openapi import <url>        Import an API spec");
+    eprintln!("  ati key set <name> <value>            Add an API key");
+    eprintln!("  ati provider import-openapi <url>     Import an API spec");
 
     Ok(())
 }

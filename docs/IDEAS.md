@@ -35,10 +35,10 @@ For tools needing complex multi-step logic (scraping + pagination, OAuth, retry)
 
 ## 4. Token Usage Optimization
 
-- `ati call --filter "only companies in California"` — post-process with fast LLM
-- `ati call --jsonpath "$.results[?(@.score > 0.8)]"` — JSONPath client-side filtering
+- `ati run --filter "only companies in California"` — post-process with fast LLM
+- `ati run --jsonpath "$.results[?(@.score > 0.8)]"` — JSONPath client-side filtering
 - Track cumulative token usage per session: `ati usage`
-- Budget enforcement: `ati call --max-tokens 5000`
+- Budget enforcement: `ati run --max-tokens 5000`
 
 ## 5. Tool Composition / Pipelines
 
@@ -50,7 +50,7 @@ ati pipe "web_search --query 'Acme Corp' | parcha_scrape --url {$.results[0].url
 
 ## 6. Offline Mode / Caching
 
-- `ati call --cache 1h web_search --query "test"` — cache results
+- `ati run --cache 1h web_search --query "test"` — cache results
 - Useful when agent retries or explores variations
 - Cache in `~/.ati/cache/` with TTL-based eviction
 

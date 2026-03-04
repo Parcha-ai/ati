@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# E2E test for the ATI proxy server (ati proxy) + client (ati call with ATI_PROXY_URL).
+# E2E test for the ATI proxy server (ati proxy) + client (ati run with ATI_PROXY_URL).
 #
 # This test:
 # 1. Sets up a temporary ATI directory with a manifest for a mock upstream API
 # 2. Starts a mock upstream API (Python)
 # 3. Starts `ati proxy` pointing at that ATI directory
-# 4. Runs `ati call` with ATI_PROXY_URL pointing at the proxy
+# 4. Runs `ati run` with ATI_PROXY_URL pointing at the proxy
 # 5. Verifies the full round-trip: client → proxy → upstream → proxy → client
 #
 # Prerequisites: cargo build
@@ -221,7 +221,7 @@ fi
 # --- Test 2: Client → Proxy → Upstream round-trip (GET) ---
 echo ""
 echo "=== Test 2: Full round-trip via proxy (GET tool) ==="
-OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/nonexistent "$ATI_BIN" --output json call mock_search --query "hello world" 2>&1)
+OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/nonexistent "$ATI_BIN" --output json run mock_search --query "hello world" 2>&1)
 echo "$OUTPUT"
 
 if echo "$OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('auth_verified') == True; print('PASS: Auth verified through proxy')"; then
@@ -239,7 +239,7 @@ fi
 # --- Test 3: Client → Proxy → Upstream round-trip (POST tool) ---
 echo ""
 echo "=== Test 3: Full round-trip via proxy (POST tool) ==="
-OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/nonexistent "$ATI_BIN" --output json call mock_create --title "test document" 2>&1)
+OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/nonexistent "$ATI_BIN" --output json run mock_create --title "test document" 2>&1)
 echo "$OUTPUT"
 
 if echo "$OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('created') == True; print('PASS: POST tool works through proxy')"; then
@@ -256,7 +256,7 @@ fi
 # --- Test 4: Unknown tool returns 404 ---
 echo ""
 echo "=== Test 4: Unknown tool returns error ==="
-OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/nonexistent "$ATI_BIN" call nonexistent_tool --foo bar 2>&1 || true)
+OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/nonexistent "$ATI_BIN" run nonexistent_tool --foo bar 2>&1 || true)
 echo "$OUTPUT"
 
 if echo "$OUTPUT" | grep -qi "unknown tool\|error"; then

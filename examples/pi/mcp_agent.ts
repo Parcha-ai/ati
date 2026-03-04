@@ -42,17 +42,17 @@ documentation for any GitHub repository.
 ati assist "research a github repository"
 
 # Discover tools (find what's available)
-ati tools search "deepwiki"
+ati tool search "deepwiki"
 
 # Inspect a tool's input schema before calling it
-ati tools info deepwiki__ask_question
+ati tool info deepwiki__ask_question
 
 # Call a tool
-ati call deepwiki__ask_question --repoName "owner/repo" --question "How does X work?"
+ati run deepwiki__ask_question --repoName "owner/repo" --question "How does X work?"
 \`\`\`
 
-MCP tool names follow the pattern \`deepwiki__<tool_name>\`. Use \`ati tools search\` \
-to discover them, \`ati tools info\` to see their schemas, then \`ati call\` to execute.
+MCP tool names follow the pattern \`deepwiki__<tool_name>\`. Use \`ati tool search\` \
+to discover them, \`ati tool info\` to see their schemas, then \`ati run\` to execute.
 
 ATI_DIR is set to \`${ATI_DIR}\` — the ati binary will find its manifests there.
 

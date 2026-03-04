@@ -100,7 +100,7 @@ fn load_scopes_from_env(verbose: bool) -> ScopeConfig {
     }
 }
 
-/// Execute: ati call <tool_name> [--arg val]...
+/// Execute: ati run <tool_name> [--arg val]...
 ///
 /// Auto-detects mode:
 /// - If ATI_PROXY_URL is set → proxy mode (forwards to external server)
@@ -159,7 +159,7 @@ pub(crate) fn load_keyring(ati_dir: &Path, verbose: bool) -> Keyring {
     }
 
     if verbose {
-        eprintln!("No keys found. Run `ati keys set <name> <value>`.");
+        eprintln!("No keys found. Run `ati key set <name> <value>`.");
     }
     Keyring::empty()
 }
@@ -206,7 +206,7 @@ async fn execute_local(
 
     let (provider, tool) = registry.get_tool(tool_name).ok_or_else(|| {
         format!(
-            "Unknown tool: '{tool_name}'. Run 'ati tools list' to see available tools."
+            "Unknown tool: '{tool_name}'. Run 'ati tool list' to see available tools."
         )
     })?;
 

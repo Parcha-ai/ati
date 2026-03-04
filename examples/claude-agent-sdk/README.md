@@ -61,7 +61,7 @@ Works out of the box with `ANTHROPIC_API_KEY` (uses Haiku):
 
 ```bash
 ati assist "find academic papers about climate change"
-# Returns recommended tools with exact `ati call` commands
+# Returns recommended tools with exact `ati run` commands
 ```
 
 For **10x faster** recommendations, add a free [Cerebras API key](https://cloud.cerebras.ai/):
@@ -77,9 +77,9 @@ Claude Agent (SDK)
   │
   └─ Bash tool
        │
-       ├─ ati tools search <query>     →  discover available tools
-       ├─ ati tools info <name>        →  inspect tool schema
-       └─ ati call <tool> --key val    →  execute tool
+       ├─ ati tool search <query>      →  discover available tools
+       ├─ ati tool info <name>         →  inspect tool schema
+       └─ ati run <tool> --key val     →  execute tool
              │
              ├─ MCP provider    →  JSON-RPC to remote MCP server (DeepWiki)
              ├─ OpenAPI provider →  auto-classified HTTP request (Crossref)
@@ -94,7 +94,7 @@ The agent gets `Bash` and a system prompt. That's it. No `@tool` decorators, no 
 
 `mcp_agent.py` — the agent researches GitHub repos through [DeepWiki](https://deepwiki.com), a remote MCP server. ATI handles the Streamable HTTP + SSE transport transparently.
 
-The agent discovers tools like `deepwiki__ask_question` at runtime and calls them through `ati call`.
+The agent discovers tools like `deepwiki__ask_question` at runtime and calls them through `ati run`.
 
 ## Example 2: OpenAPI + HTTP Providers (Crossref, arXiv, HN)
 
@@ -104,7 +104,7 @@ The agent discovers tools like `deepwiki__ask_question` at runtime and calls the
 - **arXiv** (HTTP) — hand-written TOML manifest
 - **Hacker News** (HTTP) — hand-written TOML manifest
 
-Same `ati call` interface for all three. The agent doesn't know the difference.
+Same `ati run` interface for all three. The agent doesn't know the difference.
 
 ## Also See
 

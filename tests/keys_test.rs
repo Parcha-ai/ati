@@ -1,4 +1,4 @@
-/// Integration tests for `ati keys set/list/remove`.
+/// Integration tests for `ati key set/list/remove`.
 
 use assert_cmd::Command;
 use tempfile::TempDir;
@@ -16,7 +16,7 @@ fn test_keys_set_creates_credentials_file() {
 
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "set", "my_api_key", "sk-test-12345"])
+        .args(["key", "set", "my_api_key", "sk-test-12345"])
         .assert()
         .success()
         .stderr(predicates::str::contains("Saved my_api_key"));
@@ -45,14 +45,14 @@ fn test_keys_list_shows_masked_values() {
     // Set a key first
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "set", "my_api_key", "sk-test-12345"])
+        .args(["key", "set", "my_api_key", "sk-test-12345"])
         .assert()
         .success();
 
     // List should show masked value
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "list"])
+        .args(["key", "list"])
         .assert()
         .success()
         .stdout(predicates::str::contains("my_api_key"))
@@ -67,7 +67,7 @@ fn test_keys_list_empty() {
 
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "list"])
+        .args(["key", "list"])
         .assert()
         .success()
         .stdout(predicates::str::contains("No keys stored"));
@@ -81,20 +81,20 @@ fn test_keys_remove() {
     // Set two keys
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "set", "key_a", "value_a"])
+        .args(["key", "set", "key_a", "value_a"])
         .assert()
         .success();
 
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "set", "key_b", "value_b"])
+        .args(["key", "set", "key_b", "value_b"])
         .assert()
         .success();
 
     // Remove one
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "remove", "key_a"])
+        .args(["key", "remove", "key_a"])
         .assert()
         .success()
         .stderr(predicates::str::contains("Removed key_a"));
@@ -117,7 +117,7 @@ fn test_keys_remove_nonexistent() {
 
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "remove", "nonexistent"])
+        .args(["key", "remove", "nonexistent"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("not found"));
@@ -130,13 +130,13 @@ fn test_keys_set_overwrites_existing() {
 
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "set", "my_key", "old_value"])
+        .args(["key", "set", "my_key", "old_value"])
         .assert()
         .success();
 
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "set", "my_key", "new_value"])
+        .args(["key", "set", "my_key", "new_value"])
         .assert()
         .success();
 
@@ -155,14 +155,14 @@ fn test_keys_set_without_init_creates_dir() {
     // Should auto-create the directory
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["keys", "set", "auto_key", "auto_val"])
+        .args(["key", "set", "auto_key", "auto_val"])
         .assert()
         .success();
 
     assert!(ati_dir.join("credentials").is_file());
 }
 
-/// Test the keyring credential cascade in `ati call`:
+/// Test the keyring credential cascade in `ati run`:
 /// credentials file should be picked up when keyring.enc is absent.
 #[test]
 fn test_call_uses_credentials_cascade() {
@@ -194,11 +194,11 @@ description = "Test tool"
     )
     .unwrap();
 
-    // ati call should work (will fail on actual HTTP but should find the tool via cascade)
+    // ati run should work (will fail on actual HTTP but should find the tool via cascade)
     // We just test verbose mode prints "credentials (plaintext)"
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args(["--verbose", "call", "test_tool"])
+        .args(["--verbose", "run", "test_tool"])
         .assert()
         .stderr(predicates::str::contains("credentials (plaintext)"));
 }

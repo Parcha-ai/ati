@@ -62,9 +62,9 @@ ADK Agent (google-adk)
   |
   +-- run_shell() function tool (~8 lines)
        |
-       +-- ati tools search <query>     ->  discover available tools
-       +-- ati tools info <name>        ->  inspect tool schema
-       +-- ati call <tool> --key val    ->  execute tool
+       +-- ati tool search <query>      ->  discover available tools
+       +-- ati tool info <name>         ->  inspect tool schema
+       +-- ati run <tool> --key val     ->  execute tool
              |
              +-- MCP provider    ->  JSON-RPC to remote MCP server (DeepWiki)
              +-- OpenAPI provider ->  auto-classified HTTP request (Crossref)

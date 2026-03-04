@@ -151,8 +151,8 @@ echo "--- Phase 1: Skills CRUD ---"
 
 # Test 1: Init a new skill
 echo ""
-echo "Test: ati skills init"
-OUTPUT=$("$ATI_BIN" skills init test-skill --tools http_get_test,http_post_test --provider test_http_provider 2>&1)
+echo "Test: ati skill init"
+OUTPUT=$("$ATI_BIN" skill init test-skill --tools http_get_test,http_post_test --provider test_http_provider 2>&1)
 if echo "$OUTPUT" | grep -q "Scaffolded skill 'test-skill'"; then
     pass "skills init creates skill directory"
 else
@@ -281,8 +281,8 @@ pass "Created skills for HTTP, OpenAPI, MCP, and dependency"
 
 # Test 3: List skills
 echo ""
-echo "Test: ati skills list"
-OUTPUT=$("$ATI_BIN" skills list 2>&1)
+echo "Test: ati skill list"
+OUTPUT=$("$ATI_BIN" skill list 2>&1)
 SKILL_COUNT=$(echo "$OUTPUT" | grep -c "v1.0.0" || true)
 if [[ "$SKILL_COUNT" -ge 4 ]]; then
     pass "skills list shows all $SKILL_COUNT skills"
@@ -292,7 +292,7 @@ fi
 
 # Test 4: List with JSON output
 echo ""
-echo "Test: ati skills list --output json"
+echo "Test: ati skill list --output json"
 OUTPUT=$("$ATI_BIN" --output json skills list 2>&1)
 if echo "$OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d)>=4" 2>/dev/null; then
     pass "skills list JSON output is valid with >=4 skills"
@@ -302,8 +302,8 @@ fi
 
 # Test 5: Filter by category
 echo ""
-echo "Test: ati skills list --category testing"
-OUTPUT=$("$ATI_BIN" skills list --category testing 2>&1)
+echo "Test: ati skill list --category testing"
+OUTPUT=$("$ATI_BIN" skill list --category testing 2>&1)
 if echo "$OUTPUT" | grep -q "test-skill"; then
     pass "skills list --category filters correctly"
 else
@@ -312,8 +312,8 @@ fi
 
 # Test 6: Filter by provider
 echo ""
-echo "Test: ati skills list --provider petstore"
-OUTPUT=$("$ATI_BIN" skills list --provider petstore 2>&1)
+echo "Test: ati skill list --provider petstore"
+OUTPUT=$("$ATI_BIN" skill list --provider petstore 2>&1)
 if echo "$OUTPUT" | grep -q "petstore-skill" && ! echo "$OUTPUT" | grep -q "mcp-test-skill"; then
     pass "skills list --provider filters correctly"
 else
@@ -322,8 +322,8 @@ fi
 
 # Test 7: Filter by tool
 echo ""
-echo "Test: ati skills list --tool http_get_test"
-OUTPUT=$("$ATI_BIN" skills list --tool http_get_test 2>&1)
+echo "Test: ati skill list --tool http_get_test"
+OUTPUT=$("$ATI_BIN" skill list --tool http_get_test 2>&1)
 if echo "$OUTPUT" | grep -q "test-skill" && ! echo "$OUTPUT" | grep -q "petstore-skill"; then
     pass "skills list --tool filters correctly"
 else
@@ -332,8 +332,8 @@ fi
 
 # Test 8: Show skill content
 echo ""
-echo "Test: ati skills show"
-OUTPUT=$("$ATI_BIN" skills show test-skill 2>&1)
+echo "Test: ati skill show"
+OUTPUT=$("$ATI_BIN" skill show test-skill 2>&1)
 if echo "$OUTPUT" | grep -q "Test HTTP Skill" && echo "$OUTPUT" | grep -q "http_get_test"; then
     pass "skills show displays SKILL.md content"
 else
@@ -342,8 +342,8 @@ fi
 
 # Test 9: Show skill metadata only
 echo ""
-echo "Test: ati skills show --meta"
-OUTPUT=$("$ATI_BIN" skills show test-skill --meta 2>&1)
+echo "Test: ati skill show --meta"
+OUTPUT=$("$ATI_BIN" skill show test-skill --meta 2>&1)
 if echo "$OUTPUT" | grep -q "Version:" && echo "$OUTPUT" | grep -q "Tools:" && echo "$OUTPUT" | grep -q "http_get_test"; then
     pass "skills show --meta displays metadata"
 else
@@ -352,8 +352,8 @@ fi
 
 # Test 10: Info (alias for show --meta)
 echo ""
-echo "Test: ati skills info"
-OUTPUT=$("$ATI_BIN" skills info petstore-skill 2>&1)
+echo "Test: ati skill info"
+OUTPUT=$("$ATI_BIN" skill info petstore-skill 2>&1)
 if echo "$OUTPUT" | grep -q "petstore-skill" && echo "$OUTPUT" | grep -q "petstore__findPetsByStatus"; then
     pass "skills info shows metadata"
 else
@@ -362,15 +362,15 @@ fi
 
 # Test 11: Search skills
 echo ""
-echo "Test: ati skills search"
-OUTPUT=$("$ATI_BIN" skills search "pet openapi" 2>&1)
+echo "Test: ati skill search"
+OUTPUT=$("$ATI_BIN" skill search "pet openapi" 2>&1)
 if echo "$OUTPUT" | grep -q "petstore-skill"; then
     pass "skills search finds by keywords"
 else
     fail "skills search" "$OUTPUT"
 fi
 
-OUTPUT=$("$ATI_BIN" skills search "mcp echo" 2>&1)
+OUTPUT=$("$ATI_BIN" skill search "mcp echo" 2>&1)
 if echo "$OUTPUT" | grep -q "mcp-test-skill"; then
     pass "skills search finds MCP skill"
 else
@@ -379,8 +379,8 @@ fi
 
 # Test 12: Validate skill
 echo ""
-echo "Test: ati skills validate"
-OUTPUT=$("$ATI_BIN" skills validate test-skill 2>&1)
+echo "Test: ati skill validate"
+OUTPUT=$("$ATI_BIN" skill validate test-skill 2>&1)
 if echo "$OUTPUT" | grep -q "Skill: test-skill" && echo "$OUTPUT" | grep -q "SKILL.md:"; then
     pass "skills validate basic check"
 else
@@ -389,8 +389,8 @@ fi
 
 # Test 13: Validate with --check-tools (tools exist in manifests)
 echo ""
-echo "Test: ati skills validate --check-tools"
-OUTPUT=$("$ATI_BIN" skills validate test-skill --check-tools 2>&1)
+echo "Test: ati skill validate --check-tools"
+OUTPUT=$("$ATI_BIN" skill validate test-skill --check-tools 2>&1)
 if echo "$OUTPUT" | grep -q "Valid tool bindings" && echo "$OUTPUT" | grep -q "http_get_test"; then
     pass "skills validate --check-tools finds valid tools"
 else
@@ -404,7 +404,7 @@ fi
 
 # Test 14: Resolve skills for scopes
 echo ""
-echo "Test: ati skills resolve"
+echo "Test: ati skill resolve"
 
 # Create a test scopes file
 cat > "$TEST_DIR/test-scopes.json" << 'EOF'
@@ -415,7 +415,7 @@ cat > "$TEST_DIR/test-scopes.json" << 'EOF'
 }
 EOF
 
-OUTPUT=$("$ATI_BIN" skills resolve --scopes "$TEST_DIR/test-scopes.json" 2>&1)
+OUTPUT=$("$ATI_BIN" skill resolve --scopes "$TEST_DIR/test-scopes.json" 2>&1)
 if echo "$OUTPUT" | grep -q "test-skill" && echo "$OUTPUT" | grep -q "petstore-skill"; then
     pass "skills resolve loads skills by tool binding"
 else
@@ -431,7 +431,7 @@ cat > "$TEST_DIR/skill-scopes.json" << 'EOF'
 }
 EOF
 
-OUTPUT=$("$ATI_BIN" skills resolve --scopes "$TEST_DIR/skill-scopes.json" 2>&1)
+OUTPUT=$("$ATI_BIN" skill resolve --scopes "$TEST_DIR/skill-scopes.json" 2>&1)
 if echo "$OUTPUT" | grep -q "mcp-test-skill"; then
     pass "skills resolve loads explicit skill scopes"
 else
@@ -447,7 +447,7 @@ cat > "$TEST_DIR/dep-scopes.json" << 'EOF'
 }
 EOF
 
-OUTPUT=$("$ATI_BIN" skills resolve --scopes "$TEST_DIR/dep-scopes.json" 2>&1)
+OUTPUT=$("$ATI_BIN" skill resolve --scopes "$TEST_DIR/dep-scopes.json" 2>&1)
 if echo "$OUTPUT" | grep -q "dependent-skill" && echo "$OUTPUT" | grep -q "test-skill"; then
     pass "skills resolve loads transitive dependencies"
 else
@@ -470,7 +470,7 @@ cat > "$TEST_DIR/external-skill/SKILL.md" << 'EOF'
 Installed from outside.
 EOF
 
-OUTPUT=$("$ATI_BIN" skills install "$TEST_DIR/external-skill" 2>&1)
+OUTPUT=$("$ATI_BIN" skill install "$TEST_DIR/external-skill" 2>&1)
 if echo "$OUTPUT" | grep -q "Installed 'external-skill'"; then
     pass "skills install from local dir"
 else
@@ -478,7 +478,7 @@ else
 fi
 
 # Verify it shows up in list
-OUTPUT=$("$ATI_BIN" skills list 2>&1)
+OUTPUT=$("$ATI_BIN" skill list 2>&1)
 if echo "$OUTPUT" | grep -q "external-skill"; then
     pass "installed skill appears in list"
 else
@@ -486,7 +486,7 @@ else
 fi
 
 # Test 18: Remove skill
-OUTPUT=$("$ATI_BIN" skills remove external-skill 2>&1)
+OUTPUT=$("$ATI_BIN" skill remove external-skill 2>&1)
 if echo "$OUTPUT" | grep -q "Removed skill 'external-skill'"; then
     pass "skills remove deletes skill"
 else
@@ -494,7 +494,7 @@ else
 fi
 
 # Verify it's gone
-OUTPUT=$("$ATI_BIN" skills list 2>&1)
+OUTPUT=$("$ATI_BIN" skill list 2>&1)
 if ! echo "$OUTPUT" | grep -q "external-skill"; then
     pass "removed skill no longer in list"
 else
@@ -522,7 +522,7 @@ cat > "$TEST_DIR/batch-skills/batch-b/SKILL.md" << 'EOF'
 # Batch B
 EOF
 
-OUTPUT=$("$ATI_BIN" skills install "$TEST_DIR/batch-skills" --all 2>&1)
+OUTPUT=$("$ATI_BIN" skill install "$TEST_DIR/batch-skills" --all 2>&1)
 if echo "$OUTPUT" | grep -q "Installed 2 skill(s)"; then
     pass "skills install --all batch installs"
 else
@@ -646,7 +646,7 @@ fi
 # Test 29: Proxy mode from CLI (ATI_PROXY_URL)
 echo ""
 echo "Test: CLI proxy mode (ATI_PROXY_URL)"
-OUTPUT=$(ATI_PROXY_URL=http://localhost:18090 "$ATI_BIN" skills list 2>&1)
+OUTPUT=$(ATI_PROXY_URL=http://localhost:18090 "$ATI_BIN" skill list 2>&1)
 if echo "$OUTPUT" | grep -q "test-skill"; then
     pass "CLI proxy mode: skills list via proxy"
 else
@@ -669,14 +669,14 @@ cat > "$SKILLS_DIR/legacy-skill/SKILL.md" << 'EOF'
 This skill has no skill.toml — backward compat test.
 EOF
 
-OUTPUT=$("$ATI_BIN" skills list 2>&1)
+OUTPUT=$("$ATI_BIN" skill list 2>&1)
 if echo "$OUTPUT" | grep -q "legacy-skill"; then
     pass "backward compat: SKILL.md-only skill loads"
 else
     fail "backward compat" "$OUTPUT"
 fi
 
-OUTPUT=$("$ATI_BIN" skills show legacy-skill 2>&1)
+OUTPUT=$("$ATI_BIN" skill show legacy-skill 2>&1)
 if echo "$OUTPUT" | grep -q "Legacy Skill"; then
     pass "backward compat: SKILL.md-only skill shows content"
 else

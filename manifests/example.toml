@@ -10,7 +10,7 @@
 
 # --- Provider Section (required, exactly one per file) ---
 [provider]
-# Unique provider name (used in ati tools list, ati tools providers)
+# Unique provider name (used in ati tool list, ati provider list)
 name = "example_provider"
 
 # Human-readable description of what this provider offers
@@ -43,7 +43,7 @@ auth_key_name = "example_api_key"
 # Examples: "apiKey", "key", "token"
 # auth_query_name = "api_key"
 
-# If true, this provider is hidden from `ati tools list` output.
+# If true, this provider is hidden from `ati tool list` output.
 # Used for internal providers like the LLM for `ati help`.
 # Default: false
 internal = false
@@ -57,10 +57,10 @@ handler = "http"
 # --- Tool Definitions (one or more [[tools]] sections per file) ---
 
 [[tools]]
-# Unique tool name — this is what users type in `ati call <name>`
+# Unique tool name — this is what users type in `ati run <name>`
 name = "example_search"
 
-# Human-readable description shown in `ati tools list` and `ati tools info`
+# Human-readable description shown in `ati tool list` and `ati tool info`
 description = "Search the Example API for items matching a query"
 
 # API endpoint path (appended to provider.base_url)
@@ -78,7 +78,7 @@ scope = "tool:example_search"
 
 # --- Input Schema (JSON Schema format) ---
 # Defines the arguments the tool accepts.
-# Used for validation, documentation, and `ati tools info` display.
+# Used for validation, documentation, and `ati tool info` display.
 
 [tools.input_schema]
 type = "object"

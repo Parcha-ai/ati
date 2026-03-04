@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # E2E test for ATI proxy mode.
-# Starts a tiny mock proxy server, runs ati call through it, verifies the round-trip.
+# Starts a tiny mock proxy server, runs ati run through it, verifies the round-trip.
 #
 # Prerequisites: cargo build (ati binary must exist)
 # Usage: bash scripts/test_proxy_e2e.sh
@@ -55,7 +55,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/help':
             query = request.get('query', '')
             response = {
-                'content': f'Proxy help response for: {query}\n\nTry: ati call web_search --query \"your query\"',
+                'content': f'Proxy help response for: {query}\n\nTry: ati run web_search --query \"your query\"',
                 'error': None
             }
         else:
@@ -81,10 +81,10 @@ PROXY_PID=$!
 # Wait for server to start
 sleep 0.5
 
-# --- Test 1: ati call via proxy ---
+# --- Test 1: ati run via proxy ---
 echo ""
-echo "=== Test 1: ati call via proxy ==="
-OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/ati-e2e-nonexistent "$ATI_BIN" --output json call web_search --query "test query" 2>&1)
+echo "=== Test 1: ati run via proxy ==="
+OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/ati-e2e-nonexistent "$ATI_BIN" --output json run web_search --query "test query" 2>&1)
 echo "$OUTPUT"
 
 if echo "$OUTPUT" | grep -q "proxy_mode"; then
@@ -117,7 +117,7 @@ fi
 # --- Test 3: without ATI_PROXY_URL, falls back to local mode ---
 echo ""
 echo "=== Test 3: local mode fallback ==="
-OUTPUT=$(ATI_DIR=/tmp/ati-e2e-nonexistent "$ATI_BIN" call web_search --query "test" 2>&1 || true)
+OUTPUT=$(ATI_DIR=/tmp/ati-e2e-nonexistent "$ATI_BIN" run web_search --query "test" 2>&1 || true)
 
 if echo "$OUTPUT" | grep -qi "manifest\|directory\|no manifests"; then
     echo "PASS: Local mode attempted (manifest error expected)"

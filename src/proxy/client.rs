@@ -1,6 +1,6 @@
 /// Proxy client — forwards tool calls to an external ATI proxy server.
 ///
-/// When ATI_PROXY_URL is set, `ati call <tool>` sends tool_name + args
+/// When ATI_PROXY_URL is set, `ati run <tool>` sends tool_name + args
 /// to the proxy. Authentication is via JWT in the Authorization header
 /// (ATI_SESSION_TOKEN env var).
 

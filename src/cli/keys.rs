@@ -3,12 +3,12 @@ use std::path::Path;
 
 use super::common;
 
-/// Execute: ati keys <subcommand>
-pub fn execute(subcmd: &crate::KeysCommands) -> Result<(), Box<dyn std::error::Error>> {
+/// Execute: ati key <subcommand>
+pub fn execute(subcmd: &crate::KeyCommands) -> Result<(), Box<dyn std::error::Error>> {
     match subcmd {
-        crate::KeysCommands::Set { name, value } => set_key(name, value),
-        crate::KeysCommands::List => list_keys(),
-        crate::KeysCommands::Remove { name } => remove_key(name),
+        crate::KeyCommands::Set { name, value } => set_key(name, value),
+        crate::KeyCommands::List => list_keys(),
+        crate::KeyCommands::Remove { name } => remove_key(name),
     }
 }
 
@@ -62,7 +62,7 @@ fn list_keys() -> Result<(), Box<dyn std::error::Error>> {
     let keys = load_credentials(&path)?;
 
     if keys.is_empty() {
-        println!("No keys stored. Run `ati keys set <name> <value>` to add one.");
+        println!("No keys stored. Run `ati key set <name> <value>` to add one.");
         return Ok(());
     }
 

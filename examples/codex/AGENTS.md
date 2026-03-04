@@ -11,20 +11,20 @@ and OpenAPI-backed services — through a single CLI.
 ati assist "research a github repository"
 
 # Discover tools by keyword
-ati tools search "deepwiki"
-ati tools search "arxiv"
-ati tools search "crossref"
-ati tools search "hackernews"
+ati tool search "deepwiki"
+ati tool search "arxiv"
+ati tool search "crossref"
+ati tool search "hackernews"
 
 # Inspect a tool's input schema before calling it
-ati tools info deepwiki__ask_question
-ati tools info academic_search_arxiv
+ati tool info deepwiki__ask_question
+ati tool info academic_search_arxiv
 
 # Call a tool
-ati call deepwiki__ask_question --repoName "owner/repo" --question "How does X work?"
-ati call academic_search_arxiv --search_query "quantum computing" --max_results 5
-ati call crossref__get_works --query "machine learning" --rows 5
-ati call hackernews_top_stories
+ati run deepwiki__ask_question --repoName "owner/repo" --question "How does X work?"
+ati run academic_search_arxiv --search_query "quantum computing" --max_results 5
+ati run crossref__get_works --query "machine learning" --rows 5
+ati run hackernews_top_stories
 ```
 
 ## Available Providers
@@ -39,9 +39,9 @@ ati call hackernews_top_stories
 
 ## Workflow
 
-1. Use `ati tools search` or `ati assist` to discover relevant tools
-2. Use `ati tools info <tool>` to inspect the input schema
-3. Use `ati call <tool> --key value` to execute
+1. Use `ati tool search` or `ati assist` to discover relevant tools
+2. Use `ati tool info <tool>` to inspect the input schema
+3. Use `ati run <tool> --key value` to execute
 
 Be thorough: explore available tools first, then dive into specifics.
 Synthesize your findings into a clear, well-organized summary.

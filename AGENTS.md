@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) and other AI coding 
 
 ## What ATI Is
 
-ATI (Agent Tools Interface) is a single compiled Rust binary that gives AI agents secure, scoped access to external tools — HTTP APIs, MCP servers, and OpenAPI-backed services — without exposing API keys. Agents call `ati call <tool> --arg value` and ATI handles auth injection, protocol bridging, scope enforcement, and response formatting.
+ATI (Agent Tools Interface) is a single compiled Rust binary that gives AI agents secure, scoped access to external tools — HTTP APIs, MCP servers, and OpenAPI-backed services — without exposing API keys. Agents call `ati run <tool> --arg value` and ATI handles auth injection, protocol bridging, scope enforcement, and response formatting.
 
 Two execution modes, auto-detected by the `ATI_PROXY_URL` environment variable:
 - **Local mode** (default): ATI decrypts `keyring.enc` with a one-shot session key, calls APIs directly, keys held in mlock'd memory
@@ -39,7 +39,7 @@ bash scripts/test_proxy_server_e2e.sh                  # full proxy→upstream r
 
 ```
 main.rs (clap)
-  Commands::Call → cli/call.rs
+  Commands::Run → cli/call.rs
     ├─ ATI_PROXY_URL set? → proxy/client.rs POST /call
     └─ Local:
          ManifestRegistry::load(manifests/) → get_tool(name) → check scopes → load keyring
@@ -50,11 +50,11 @@ main.rs (clap)
 ```
 
 Other commands:
-- `ati tools {list,info,search,providers}` → `cli/tools.rs` — fuzzy search with scoring across name/description/tags/category/hints
-- `ati mcp {add,list,remove}` → `cli/mcp.rs` — generate/manage MCP provider manifests from CLI flags
-- `ati assist <query>` → `cli/help.rs` — builds tool+skill context, calls LLM, returns recommendations with exact `ati call` commands
-- `ati skills {list,show,search,info,install,remove,init,validate,resolve}` → `cli/skills.rs`
-- `ati openapi {inspect,import}` → `cli/openapi.rs` — download spec, auto-detect auth, generate manifest
+- `ati tool {list,info,search}` → `cli/tools.rs` — fuzzy search with scoring across name/description/tags/category/hints
+- `ati provider {add-mcp,import-openapi,inspect-openapi,list,remove,info}` → `cli/provider.rs` — unified provider management
+- `ati assist <query>` → `cli/help.rs` — builds tool+skill context, calls LLM, returns recommendations with exact `ati run` commands
+- `ati skill {list,show,search,info,install,remove,init,validate,resolve}` → `cli/skills.rs`
+- `ati key {set,list,remove}` → `cli/keys.rs` — credential management
 - `ati token {keygen,issue,inspect,validate}` → `cli/token.rs` — JWT key management and token lifecycle
 - `ati proxy --port 8090` → `proxy/server.rs` — axum server with `/call`, `/mcp`, `/help`, `/skills`, `/health`
 
@@ -89,7 +89,7 @@ Other commands:
 
 ### MCP Tool Naming
 
-MCP-discovered tools are namespaced as `<provider>__<tool_name>` (double underscore). When dispatching a call, the provider prefix is stripped before sending to the MCP server. Example: `ati call github__search_repositories` → MCP `tools/call` with name `search_repositories`.
+MCP-discovered tools are namespaced as `<provider>__<tool_name>` (double underscore). When dispatching a call, the provider prefix is stripped before sending to the MCP server. Example: `ati run github__search_repositories` → MCP `tools/call` with name `search_repositories`.
 
 ### OpenAPI Parameter Classification
 
@@ -132,6 +132,7 @@ Proxy auth: JWT Bearer token via `ATI_SESSION_TOKEN` env var on all client reque
 
 | Variable | Purpose |
 |----------|---------|
+| `ATI_OUTPUT` | Default output format: `json`, `table`, or `text` (default: `text`) |
 | `ATI_PROXY_URL` | If set, enables proxy mode (e.g., `http://proxy-host:8090`) |
 | `ATI_SESSION_TOKEN` | JWT Bearer token for proxy client auth (carries scopes) |
 | `ATI_DIR` | Override ATI directory (default: `~/.ati`) |
@@ -195,11 +196,11 @@ openapi_max_operations = 50        # cap tools from large specs
 
 OpenAPI providers support filtering (`openapi_include_tags`, `openapi_exclude_tags`, `openapi_include_operations`, `openapi_exclude_operations`) and per-operation overrides (`[provider.openapi_overrides.<operationId>]`).
 
-Internal providers (`internal = true`) are hidden from `ati tools list` — used for the LLM backing `ati assist`.
+Internal providers (`internal = true`) are hidden from `ati tool list` — used for the LLM backing `ati assist`.
 
 ## Specs Directory
 
-`specs/` contains pre-downloaded OpenAPI 3.0 JSON files referenced by `openapi_spec` fields in manifests. The `ati openapi import` command downloads and normalizes specs into this directory.
+`specs/` contains pre-downloaded OpenAPI 3.0 JSON files referenced by `openapi_spec` fields in manifests. The `ati provider import-openapi` command downloads and normalizes specs into this directory.
 
 ## Testing Patterns
 
