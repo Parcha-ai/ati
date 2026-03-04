@@ -284,9 +284,9 @@ pub enum ProviderCommands {
     ImportOpenapi {
         /// Path or URL to the OpenAPI spec (JSON or YAML)
         spec: String,
-        /// Provider name for the generated manifest
+        /// Provider name (derived from spec URL/path if omitted)
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         /// Keyring key name for the API key (default: {name}_api_key)
         #[arg(long)]
         auth_key: Option<String>,

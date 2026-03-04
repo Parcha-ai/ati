@@ -18,24 +18,46 @@ ClinicalTrials.gov publishes an OpenAPI spec. One command turns it into tools yo
 # Initialize ATI
 ati init
 
-# Import the spec — ATI downloads it, discovers all operations, generates the manifest
-ati provider import-openapi https://clinicaltrials.gov/api/v2/openapi.json \
-  --name clinicaltrials
+# Import the spec — ATI derives the provider name from the URL
+ati provider import-openapi https://clinicaltrials.gov/api/v2/openapi.json
+# → Saved manifest to ~/.ati/manifests/clinicaltrials.toml
+# → Imported 1 operations from "ClinicalTrials.gov API"
 
 # See what tools were discovered
 ati tool list --provider clinicaltrials
+# ┌───────────────────────────────┬────────────────┬───────────────────────────────┐
+# │ DESCRIPTION                   ┆ PROVIDER       ┆ TOOL                          │
+# ╞═══════════════════════════════╪════════════════╪═══════════════════════════════╡
+# │ Search clinical trial studies ┆ clinicaltrials ┆ clinicaltrials__searchStudies │
+# └───────────────────────────────┴────────────────┴───────────────────────────────┘
 ```
 
-That's it. Every operation in the spec is now a tool. No TOML to write, no code to generate.
+That's it. Every operation in the spec is now a tool. No `--name`, no TOML to write, no code to generate.
 
 ### Explore what you just added
 
 ```bash
 # Inspect a specific tool — see its parameters, types, required fields
-ati tool info clinicaltrials_searchStudies
+ati tool info clinicaltrials__searchStudies
+# Tool:        clinicaltrials__searchStudies
+# Provider:    clinicaltrials (ClinicalTrials.gov API)
+# Handler:     openapi
+# Endpoint:    GET https://clinicaltrials.gov/api/v2/studies
+# Description: Search clinical trial studies
+#
+# Input Schema:
+#   --query.term (string) **required**: Search term
+#   --filter.overallStatus (string): Filter by overall study status
+#   --filter.phase (string): Filter by study phase
+#   --pageSize (integer, default: 10): Results per page
 
 # Ask the LLM for help — scoped to this provider
 ati assist clinicaltrials "find phase 3 cancer trials"
+# ati run clinicaltrials__searchStudies --query.term "cancer" --filter.phase "Phase 3"
+#
+# Optional parameters you can add:
+#   --filter.overallStatus "Recruiting": Show only actively recruiting trials
+#   --pageSize 50: Increase results per page
 ```
 
 `ati assist` reads the tool schemas and returns exact `ati run` commands you can copy-paste.
@@ -43,11 +65,11 @@ ati assist clinicaltrials "find phase 3 cancer trials"
 ### Run it
 
 ```bash
-# Execute the command assist recommended
-ati run clinicaltrials_searchStudies \
-  --query.term "cancer immunotherapy" \
-  --filter.overallStatus "RECRUITING" \
-  --pageSize 5
+ati run clinicaltrials__searchStudies \
+  --query.term "cancer immunotherapy" --pageSize 3
+# nextPageToken: ZVNj7o2Elu8o3lpoXsGvtK7umpOQJJxuYfas0A
+# studies: [{protocolSection: {identificationModule: {nctId: "NCT06742801",
+#   briefTitle: "Avelumab Immunotherapy in Oral Premalignant Lesions" ...
 ```
 
 The agent doesn't write HTTP requests. It doesn't parse JSON responses. It calls `ati run` and gets structured text back.
@@ -85,11 +107,11 @@ Point ATI at an OpenAPI 3.0 spec URL or file. It downloads the spec, discovers e
 # Preview what's in a spec before importing
 ati provider inspect-openapi https://petstore3.swagger.io/api/v3/openapi.json
 
-# Import it
-ati provider import-openapi https://api.example.com/openapi.json --name myapi
+# Import it — name derived from the URL (or pass --name to override)
+ati provider import-openapi https://api.example.com/openapi.json
 
 # If the API needs auth, ATI tells you what key to set
-ati key set myapi_api_key sk-your-key-here
+ati key set example_api_key sk-your-key-here
 ```
 
 Supports tag/operation filtering (`--include-tags`, `--exclude-tags`) and an operation cap (`openapi_max_operations`) for large APIs.
@@ -231,20 +253,22 @@ Fuzzy search across tool names, descriptions, providers, categories, tags, and h
 ### Inspect — Full Schema
 
 ```bash
-$ ati tool info clinicaltrials_searchStudies
-Tool:        clinicaltrials_searchStudies
-Provider:    clinicaltrials
+$ ati tool info clinicaltrials__searchStudies
+Tool:        clinicaltrials__searchStudies
+Provider:    clinicaltrials (ClinicalTrials.gov API)
 Handler:     openapi
-Description: Search for clinical studies
-Category:    medical
+Endpoint:    GET https://clinicaltrials.gov/api/v2/studies
+Description: Search clinical trial studies
+Tags:        Clinical Trials
 
 Input Schema:
   --query.term (string) **required**: Search term
-  --filter.overallStatus (string): RECRUITING, COMPLETED, ...
-  --pageSize (integer): Results per page
+  --filter.overallStatus (string): Filter by overall study status
+  --filter.phase (string): Filter by study phase
+  --pageSize (integer, default: 10): Results per page
 
 Usage:
-  ati run clinicaltrials_searchStudies --query.term "cancer" --pageSize 10
+  ati run clinicaltrials__searchStudies --query.term "cancer" --pageSize 10
 ```
 
 ### Assist — LLM-Powered Recommendations
@@ -484,7 +508,7 @@ OPTIONS:
 ### Provider Management
 
 ```bash
-ati provider import-openapi <spec> --name NAME [--include-tags T1,T2] [--dry-run]
+ati provider import-openapi <spec> [--name NAME] [--include-tags T1,T2] [--dry-run]
 ati provider inspect-openapi <spec> [--include-tags T1,T2]
 ati provider add-mcp <name> --transport stdio|http [--command CMD] [--url URL] [--env 'KEY=${ref}']
 ati provider add-cli <name> --command CMD [--default-args ARG] [--env 'KEY=${ref}'] [--env 'KEY=@{ref}']

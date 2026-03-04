@@ -71,7 +71,13 @@ pub async fn execute(
             auth_key,
             include_tags,
             dry_run,
-        } => import_openapi(spec, name, auth_key.as_deref(), include_tags, *dry_run),
+        } => {
+            let resolved_name = match name {
+                Some(n) => n.clone(),
+                None => derive_provider_name(spec),
+            };
+            import_openapi(spec, &resolved_name, auth_key.as_deref(), include_tags, *dry_run)
+        }
         ProviderCommands::InspectOpenapi { spec, include_tags } => {
             inspect_openapi(spec, include_tags)
         }
@@ -337,6 +343,76 @@ fn add_cli(
     }
 
     Ok(())
+}
+
+// ─── derive-provider-name ───────────────────────────────────────────────────
+
+/// Derive a provider name from a spec URL or file path.
+///
+/// - URL: parse host, take the domain minus TLD
+///   `clinicaltrials.gov` → `clinicaltrials`, `api.finnhub.io` → `finnhub`
+/// - File path: stem without extension
+///   `finnhub.json` → `finnhub`
+/// - Sanitize: lowercase, non-alphanumeric → `_`, trim leading/trailing `_`
+fn derive_provider_name(spec: &str) -> String {
+    let raw = if spec.starts_with("http://") || spec.starts_with("https://") {
+        // Extract host from URL: strip scheme, take up to first '/' or ':'
+        let after_scheme = spec
+            .strip_prefix("https://")
+            .or_else(|| spec.strip_prefix("http://"))
+            .unwrap_or(spec);
+        let host = after_scheme
+            .split('/')
+            .next()
+            .unwrap_or(after_scheme)
+            .split(':')
+            .next()
+            .unwrap_or(after_scheme);
+
+        // Split host into parts, remove common prefixes and TLD
+        let parts: Vec<&str> = host.split('.').collect();
+        match parts.len() {
+            0 | 1 => host.to_string(),
+            _ => {
+                let skip_prefixes = ["api", "www", "mcp", "rest"];
+                let skip_tlds = [
+                    "com", "org", "net", "io", "dev", "ai", "co", "gov", "edu",
+                ];
+                let meaningful: Vec<&str> = parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, p)| {
+                        let is_first = *i == 0;
+                        let is_last = *i == parts.len() - 1;
+                        let is_prefix = is_first && skip_prefixes.contains(p);
+                        let is_tld = is_last && skip_tlds.contains(p);
+                        !is_prefix && !is_tld
+                    })
+                    .map(|(_, p)| *p)
+                    .collect();
+                if meaningful.is_empty() {
+                    parts[0].to_string()
+                } else {
+                    meaningful.join("_")
+                }
+            }
+        }
+    } else {
+        // File path: use stem
+        std::path::Path::new(spec)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    };
+
+    // Sanitize: lowercase, non-alphanumeric → _, trim _
+    let sanitized: String = raw
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    sanitized.trim_matches('_').to_string()
 }
 
 // ─── import-openapi ─────────────────────────────────────────────────────────
@@ -1336,5 +1412,71 @@ fn read_spec_content(spec_ref: &str) -> Result<String, Box<dyn std::error::Error
         Ok(response.text()?)
     } else {
         Ok(std::fs::read_to_string(spec_ref)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_derive_provider_name_url_with_tld() {
+        assert_eq!(
+            derive_provider_name("https://clinicaltrials.gov/api/v2/openapi.json"),
+            "clinicaltrials"
+        );
+    }
+
+    #[test]
+    fn test_derive_provider_name_url_api_prefix() {
+        assert_eq!(
+            derive_provider_name("https://api.finnhub.io/openapi.json"),
+            "finnhub"
+        );
+    }
+
+    #[test]
+    fn test_derive_provider_name_url_www_prefix() {
+        assert_eq!(
+            derive_provider_name("https://www.example.com/spec.json"),
+            "example"
+        );
+    }
+
+    #[test]
+    fn test_derive_provider_name_url_multi_part() {
+        assert_eq!(
+            derive_provider_name("https://api.data.census.gov/spec.json"),
+            "data_census"
+        );
+    }
+
+    #[test]
+    fn test_derive_provider_name_file_path() {
+        assert_eq!(derive_provider_name("finnhub.json"), "finnhub");
+    }
+
+    #[test]
+    fn test_derive_provider_name_file_path_nested() {
+        assert_eq!(
+            derive_provider_name("/path/to/my-spec.yaml"),
+            "my_spec"
+        );
+    }
+
+    #[test]
+    fn test_derive_provider_name_url_with_port() {
+        assert_eq!(
+            derive_provider_name("http://localhost:8080/openapi.json"),
+            "localhost"
+        );
+    }
+
+    #[test]
+    fn test_derive_provider_name_simple_domain() {
+        assert_eq!(
+            derive_provider_name("https://petstore3.swagger.io/api/v3/openapi.json"),
+            "petstore3_swagger"
+        );
     }
 }
