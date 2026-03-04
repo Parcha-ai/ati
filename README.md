@@ -15,9 +15,6 @@ ATI gives AI agents secure access to APIs, MCP servers, OpenAPI services, and lo
 ClinicalTrials.gov publishes an OpenAPI spec. One command turns it into tools your agent can use:
 
 ```bash
-# Initialize ATI
-ati init
-
 # Import the spec — ATI derives the provider name from the URL
 ati provider import-openapi https://clinicaltrials.gov/api/v2/openapi.json
 # → Saved manifest to ~/.ati/manifests/clinicaltrials.toml
@@ -117,24 +114,9 @@ MCP tools are namespaced as `<provider>__<tool_name>`. ATI handles JSON-RPC fram
 
 The examples above show a human typing commands. But ATI is designed so agents do all of this themselves — init, discover, store secrets, search across providers, and execute — with zero human intervention.
 
-### 1. Agent bootstraps its environment
+### 1. Agent discovers APIs and MCP servers
 
-```bash
-ati init
-# Initialized /home/ubuntu/.ati/
-#   manifests/
-#   specs/
-#   skills/
-#   config.toml
-#
-# Next steps:
-#   ati key set <name> <value>            Add an API key
-#   ati provider import-openapi <url>     Import an API spec
-```
-
-### 2. Agent discovers APIs and MCP servers
-
-The agent can import any OpenAPI spec by URL — name auto-derived — and connect to MCP servers. No human has to write config files.
+The agent can import any OpenAPI spec by URL — name auto-derived — and connect to MCP servers. No human has to write config files. ATI auto-creates `~/.ati/` on first use.
 
 ```bash
 # Import APIs from their specs
@@ -241,7 +223,7 @@ ati run ca_person_sanctions_search --search_term "Name"      # ✗ denied
 
 ---
 
-## Four Provider Types
+## Five Provider Types
 
 Every provider type produces the same interface: `ati run <tool> --arg value`. The agent doesn't know or care what's behind it.
 
@@ -284,6 +266,36 @@ ati key set github_token ghp_your_token_here
 ati run github__search_repositories --query "rust mcp"
 ati run github__read_file --owner anthropics --repo claude-code --path README.md
 ```
+
+### Skills — Install a skill, get tools automatically
+
+A skill is a SKILL.md that teaches agents how to use an API — endpoints, auth patterns, parameters, workflows. On `ati skill install`, ATI reads the SKILL.md and uses a fast LLM call (Cerebras) to extract a full provider manifest automatically. No hand-written TOML, no OpenAPI spec needed. The SKILL.md is the only source of truth.
+
+```bash
+# Install a skill — ATI reads SKILL.md, generates the manifest via Cerebras
+ati skill install ./fal-generate/
+Generating manifest for 'fal' from SKILL.md...
+Generated manifest for 'fal' at ~/.ati/manifests/fal.toml
+  Hint: run `ati key set fal_api_key <your-key>` to configure credentials.
+Installed 'fal-generate' to ~/.ati/skills/fal-generate
+
+# Tools extracted from the SKILL.md are immediately available
+ati tool list
+┌─────────────────────────────────────────────────────────────────────────┬──────────┬─────────────┐
+│ DESCRIPTION                                                             ┆ PROVIDER ┆ TOOL        │
+╞═════════════════════════════════════════════════════════════════════════╪══════════╪═════════════╡
+│ Submit a generation job to fal.ai queue. Returns request_id for polling. ┆ fal      ┆ fal__submit │
+│ Check status of a queued fal.ai job.                                     ┆ fal      ┆ fal__status │
+│ Get the result of a completed fal.ai job. Returns generated media URLs.  ┆ fal      ┆ fal__result │
+│ Cancel a queued fal.ai job.                                              ┆ fal      ┆ fal__cancel │
+└─────────────────────────────────────────────────────────────────────────┴──────────┴─────────────┘
+
+# Set the key and cook
+ati key set fal_api_key sk-your-key-here
+ati assist "generate a portrait photo"
+```
+
+The skill creator writes the SKILL.md — that's it. ATI + Cerebras extracts everything: base URL, auth type, endpoints, parameters, HTTP methods. The generated manifest is cached in `~/.ati/manifests/` so subsequent loads are instant. If the Cerebras call isn't available, a bundled `provider.toml` fallback is used if the skill ships one.
 
 ### Local CLIs — Wrap any command with credential injection
 
@@ -556,13 +568,115 @@ Tools provide **data access**. Skills provide **workflow**.
 
 Skills auto-activate based on the agent's tool scope. If an agent has access to `ca_person_sanctions_search`, ATI automatically loads the `compliance-screening` skill because its `tools` binding includes that tool. Resolution walks: tool → provider → category → `depends_on` transitively.
 
+When an agent calls `ati assist`, skills are automatically loaded into the LLM's context — the agent gets methodology-aware recommendations, not just raw command syntax.
+
 ```bash
 ati skill list                              # List all skills
 ati skill search "sanctions"                # Search by keyword
 ati skill show compliance-screening         # Read the methodology
+ati skill read --tool fal__submit           # Dump all skills for a tool (agent-optimized)
 ati skill init my-skill --tools T1,T2       # Scaffold a new skill
-ati skill install ./my-skill/               # Install
+ati skill install ./my-skill/               # Install from local dir
+ati skill install https://github.com/org/repo#skill-name  # Install from git URL
 ati skill resolve                           # See what resolves for current scopes
+```
+
+### End-to-End Example: Image → Voice → Lip-Sync Video
+
+This is a real workflow an agent ran using ATI — three fal.ai models chained together, guided by skills. The agent generated an image, synthesized speech, and produced a lip-synced talking head video.
+
+**The result:** [fal-lipsync.mp4](docs/assets/fal-lipsync.mp4)
+
+<img src="docs/assets/fal-streamer.jpg" width="280" align="right" style="margin-left: 16px" />
+
+#### Step 1 — Generate an image with Flux
+
+```bash
+ati run fal__submit \
+  --endpoint_id "fal-ai/flux/dev" \
+  --prompt "Gen Z female tech streamer, colorful RGB lighting, confident smile" \
+  --image_size "portrait_4_3"
+# request_id: 1d491d8e-5c22-417b-a62b-471aa7f380e3
+# status: IN_QUEUE
+
+ati run fal__result --endpoint_id "fal-ai/flux" \
+  --request_id "1d491d8e-5c22-417b-a62b-471aa7f380e3"
+# images: [{url: "https://v3b.fal.media/files/.../streamer.jpg"}]
+```
+
+#### Step 2 — Generate speech with ElevenLabs (via fal)
+
+```bash
+ati run fal__submit \
+  --endpoint_id "fal-ai/elevenlabs/tts/eleven-v3" \
+  --text "Check out ATI — one binary, every tool your agent needs." \
+  --voice_id "cjVigY5qzO86Huf0OWal"
+# request_id: f9b24972-9ea9-47bd-9e6c-1fc8f48c70c5
+
+ati run fal__result --endpoint_id "fal-ai/elevenlabs" \
+  --request_id "f9b24972-9ea9-47bd-9e6c-1fc8f48c70c5"
+# audio: {url: "https://v3b.fal.media/files/.../output.mp3"}
+```
+
+#### Step 3 — Lip-sync with VEED Fabric
+
+```bash
+ati run fal__submit \
+  --endpoint_id "veed/fabric-1.0" \
+  --image_url "https://v3b.fal.media/files/.../streamer.jpg" \
+  --audio_url "https://v3b.fal.media/files/.../output.mp3" \
+  --resolution "720p"
+# request_id: 1c7bdab9-3572-45fe-829d-c5c87071e7d9
+
+ati run fal__result --endpoint_id "veed/fabric-1.0" \
+  --request_id "1c7bdab9-3572-45fe-829d-c5c87071e7d9"
+# video: {url: "https://v3b.fal.media/files/.../lipsync.mp4"}
+```
+
+The agent didn't know any of this workflow. It asked `ati assist`:
+
+```bash
+ati assist fal "I want to create a lip-synced talking head video"
+# To create a lip-synced talking head video, you'll use the VEED Fabric 1.0
+# model on fal.ai. This requires:
+# - A face image URL (portrait/headshot)
+# - An audio URL (speech)
+#
+# Step 1: Generate speech with ElevenLabs TTS...
+# Step 2: Submit the lip-sync job to veed/fabric-1.0...
+# Step 3: Poll status and get result...
+#
+# Best Practices:
+#   Face Image: Front-facing, good lighting, neutral expression
+#   Audio: Clean speech, no background noise
+#   Duration: Keep under 60 seconds per segment
+```
+
+`ati assist` loaded skills for `fal-generate`, `elevenlabs-tts-api`, and `veed-fabric-lip-sync` — giving the agent model-specific best practices, not just raw command syntax.
+
+### Declaring Skills in Manifests
+
+Providers can declare associated skills in their manifest. When an agent imports a provider, it can install the skills in one command:
+
+```toml
+# ~/.ati/manifests/fal.toml
+[provider]
+name = "fal"
+base_url = "https://queue.fal.run"
+skills = [
+  "https://github.com/org/ati-skills#fal-generate",
+  "https://github.com/org/ati-skills#veed-fabric-lip-sync",
+]
+```
+
+```bash
+# See what skills are declared
+ati provider info fal
+# Skills: 2 declared (1 installed, 1 not installed)
+#   Install: ati provider install-skills fal
+
+# Install all declared skills
+ati provider install-skills fal
 ```
 
 ---
@@ -693,7 +807,7 @@ cargo build                                            # Debug
 cargo build --release                                  # Release
 cargo build --release --target x86_64-unknown-linux-musl  # Static binary (no glibc)
 
-cargo test                                             # 399 tests
+cargo test                                             # 419 tests
 bash scripts/test_skills_e2e.sh                        # Skill e2e tests
 cargo test --test mcp_live_test -- --ignored           # Live MCP tests (needs API keys)
 ```
