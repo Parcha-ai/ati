@@ -158,6 +158,14 @@ impl McpClient {
 
                 // Resolve env vars: "${key_name}" → keyring value
                 let mut env_map: HashMap<String, String> = HashMap::new();
+                // Selectively pass through essential env vars (don't leak secrets)
+                if let Ok(path) = std::env::var("PATH") {
+                    env_map.insert("PATH".to_string(), path);
+                }
+                if let Ok(home) = std::env::var("HOME") {
+                    env_map.insert("HOME".to_string(), home);
+                }
+                // Add provider-specific env vars (resolved from keyring)
                 for (k, v) in &provider.mcp_env {
                     let resolved = resolve_env_value(v, keyring);
                     env_map.insert(k.clone(), resolved);
@@ -168,6 +176,7 @@ impl McpClient {
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
+                    .env_clear()
                     .envs(&env_map)
                     .spawn()
                     .map_err(|e| McpError::Transport(format!("Failed to spawn MCP server '{command}': {e}")))?;
@@ -191,9 +200,12 @@ impl McpClient {
                     .timeout(std::time::Duration::from_secs(300))
                     .build()?;
 
+                // Resolve ${key_name} placeholders in the URL from keyring
+                let resolved_url = resolve_env_value(url, keyring);
+
                 Transport::Http(HttpTransport {
                     client,
-                    url: url.to_string(),
+                    url: resolved_url,
                     session_id: None,
                     auth_header,
                 })
@@ -255,14 +267,23 @@ impl McpClient {
 
         let mut all_tools = Vec::new();
         let mut cursor: Option<String> = None;
+        const MAX_PAGES: usize = 100;
+        const MAX_TOOLS: usize = 10_000;
 
-        loop {
+        for _page in 0..MAX_PAGES {
             let params = cursor.as_ref().map(|c| serde_json::json!({"cursor": c}));
             let result = self.send_request("tools/list", params).await?;
 
             if let Some(tools_val) = result.get("tools") {
                 let tools: Vec<McpToolDef> = serde_json::from_value(tools_val.clone())?;
                 all_tools.extend(tools);
+            }
+
+            // Safety: cap total tools to prevent memory exhaustion
+            if all_tools.len() > MAX_TOOLS {
+                eprintln!("[mcp] Warning: tool count exceeds {MAX_TOOLS}, truncating");
+                all_tools.truncate(MAX_TOOLS);
+                break;
             }
 
             // Check for pagination
@@ -542,10 +563,22 @@ async fn send_http_request(
 ///
 /// Each `data:` line contains a JSON-RPC message. The `event:` field is optional.
 /// We may receive notifications and server requests before getting our response.
+/// Maximum SSE response body size (50 MB) to prevent OOM from malicious servers.
+const MAX_SSE_BODY_SIZE: usize = 50 * 1024 * 1024;
+
 async fn parse_sse_response(response: reqwest::Response, request_id: u64) -> Result<Value, McpError> {
-    let full_body = response.text().await.map_err(|e| {
+    // Enforce size limit on SSE stream body
+    let bytes = response.bytes().await.map_err(|e| {
         McpError::SseParse(format!("Failed to read SSE stream: {e}"))
     })?;
+    if bytes.len() > MAX_SSE_BODY_SIZE {
+        return Err(McpError::SseParse(format!(
+            "SSE response body exceeds maximum size ({} bytes > {} bytes)",
+            bytes.len(),
+            MAX_SSE_BODY_SIZE,
+        )));
+    }
+    let full_body = String::from_utf8_lossy(&bytes).into_owned();
 
     // Parse SSE events
     let mut current_data = String::new();
@@ -642,14 +675,26 @@ fn extract_jsonrpc_result(msg: &Value, _request_id: u64) -> Result<Value, McpErr
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve "${key_name}" placeholders in env var values from the keyring.
+/// Resolve "${key_name}" placeholders in values from the keyring.
+/// Supports both whole-string (`${key}`) and inline (`prefix/${key}/suffix`) patterns.
 fn resolve_env_value(value: &str, keyring: &Keyring) -> String {
-    if value.starts_with("${") && value.ends_with('}') {
-        let key_name = &value[2..value.len() - 1];
-        keyring.get(key_name).unwrap_or(value).to_string()
-    } else {
-        value.to_string()
+    let mut result = value.to_string();
+    // Find all ${...} patterns and replace them
+    while let Some(start) = result.find("${") {
+        let rest = &result[start + 2..];
+        if let Some(end) = rest.find('}') {
+            let key_name = &rest[..end];
+            let replacement = keyring.get(key_name).unwrap_or("");
+            if replacement.is_empty() && keyring.get(key_name).is_none() {
+                // Key not found — leave the placeholder as-is to avoid breaking the string
+                break;
+            }
+            result = format!("{}{}{}", &result[..start], replacement, &rest[end + 1..]);
+        } else {
+            break; // No closing brace — stop
+        }
     }
+    result
 }
 
 /// Build an Authorization header value from the provider's auth config.
@@ -765,6 +810,35 @@ mod tests {
         assert_eq!(resolve_env_value("${missing_key}", &keyring), "${missing_key}");
         // Plain value — no resolution
         assert_eq!(resolve_env_value("plain_value", &keyring), "plain_value");
+    }
+
+    #[test]
+    fn test_resolve_env_value_inline() {
+        // Build a keyring with a test key via load_credentials
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("creds");
+        std::fs::write(&path, r#"{"my_key":"SECRET123"}"#).unwrap();
+        let keyring = Keyring::load_credentials(&path).unwrap();
+
+        // Whole-string
+        assert_eq!(resolve_env_value("${my_key}", &keyring), "SECRET123");
+        // Inline
+        assert_eq!(
+            resolve_env_value("https://example.com/${my_key}/path", &keyring),
+            "https://example.com/SECRET123/path"
+        );
+        // Multiple placeholders
+        assert_eq!(
+            resolve_env_value("${my_key}--${my_key}", &keyring),
+            "SECRET123--SECRET123"
+        );
+        // Missing key stays as-is
+        assert_eq!(
+            resolve_env_value("https://example.com/${unknown}/path", &keyring),
+            "https://example.com/${unknown}/path"
+        );
+        // No placeholder
+        assert_eq!(resolve_env_value("no_placeholder", &keyring), "no_placeholder");
     }
 
     #[test]
