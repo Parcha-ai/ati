@@ -19,19 +19,18 @@ fn init_directory(
         std::fs::create_dir_all(ati_dir.join(dir))?;
     }
 
-    // Create config.toml if it doesn't exist
+    // Write config.toml — always overwrite when --proxy is specified (explicit user action),
+    // only create default if it doesn't exist yet.
     let config_path = ati_dir.join("config.toml");
-    if !config_path.exists() {
-        let config_content = if proxy {
-            if es256 {
-                generate_es256_config(ati_dir)?
-            } else {
-                generate_hs256_config()?
-            }
+    if proxy {
+        let config_content = if es256 {
+            generate_es256_config(ati_dir)?
         } else {
-            default_config()
+            generate_hs256_config()?
         };
         std::fs::write(&config_path, config_content)?;
+    } else if !config_path.exists() {
+        std::fs::write(&config_path, default_config())?;
     }
 
     eprintln!("Initialized {}/", ati_dir.display());

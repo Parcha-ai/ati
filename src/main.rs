@@ -169,11 +169,11 @@ pub enum SkillCommands {
         /// Skill name
         name: String,
     },
-    /// Install a skill from a local directory or git
+    /// Install a skill from a local directory, git URL, or HTTPS URL
     Install {
-        /// Path to skill directory (or multi-skill directory with --all)
+        /// Path or URL to skill (git URL, or local directory)
         source: String,
-        /// Clone from a git repository URL
+        /// Clone from a git repository URL (deprecated: URLs are auto-detected)
         #[arg(long)]
         from_git: Option<String>,
         /// Override skill name
@@ -206,6 +206,17 @@ pub enum SkillCommands {
         /// Also verify tool references exist in manifests
         #[arg(long)]
         check_tools: bool,
+    },
+    /// Read skill content for agent consumption (no decoration)
+    Read {
+        /// Skill name (omit if using --tool)
+        name: Option<String>,
+        /// Read all skills bound to this tool
+        #[arg(long)]
+        tool: Option<String>,
+        /// Inline reference file contents after SKILL.md
+        #[arg(long)]
+        with_refs: bool,
     },
     /// Show what skills auto-load for current scopes
     Resolve {
@@ -371,6 +382,13 @@ pub enum ProviderCommands {
         ttl: u64,
     },
 
+    /// Install skills declared in a provider's manifest
+    #[command(name = "install-skills")]
+    InstallSkills {
+        /// Provider name
+        name: String,
+    },
+
     /// Remove a cached (ephemeral) provider
     Unload {
         /// Provider name to unload
@@ -460,6 +478,8 @@ async fn main() {
     if cli.json {
         cli.output = OutputFormat::Json;
     }
+
+    cli::common::ensure_ati_dir();
 
     let result = match &cli.command {
         Commands::Run { tool_name, args } => cli::call::execute(&cli, tool_name, args).await,
