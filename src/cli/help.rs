@@ -68,9 +68,10 @@ async fn execute_local(
         _ => ScopeConfig::unrestricted(),
     };
 
-    // Build tool context from in-scope tools
+    // Build tool context from in-scope tools, pre-filtered by query relevance
     let all_tools = registry.list_public_tools();
     let scoped_tools = scope::filter_tools_by_scope(all_tools, &scopes);
+    let scoped_tools = prefilter_tools_by_query(&scoped_tools, query, 50);
     let tools_context = build_tool_context(&scoped_tools);
 
     // Load skills and resolve by scopes
@@ -227,6 +228,45 @@ async fn execute_via_proxy(
     let content = proxy_client::call_help(proxy_url, query).await?;
     println!("{content}");
     Ok(())
+}
+
+/// Pre-filter tools by fuzzy matching against the query.
+/// Returns up to `limit` tools, sorted by relevance score (best first).
+/// If fewer than `limit` tools match (score > 0), all tools are returned up to the limit.
+fn prefilter_tools_by_query<'a>(
+    tools: &[(&'a crate::core::manifest::Provider, &'a crate::core::manifest::Tool)],
+    query: &str,
+    limit: usize,
+) -> Vec<(&'a crate::core::manifest::Provider, &'a crate::core::manifest::Tool)> {
+    let query_lower = query.to_lowercase();
+    let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+
+    let mut scored: Vec<(f64, &crate::core::manifest::Provider, &crate::core::manifest::Tool)> =
+        tools
+            .iter()
+            .map(|(p, t)| {
+                let score = crate::cli::tools::score_tool_match(p, t, &query_terms);
+                (score, *p, *t)
+            })
+            .collect();
+
+    // Sort by score descending
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // If we have enough scored matches, take only those; otherwise pad with unscored
+    let matched_count = scored.iter().filter(|(s, _, _)| *s > 0.0).count();
+    if matched_count >= limit {
+        scored
+            .into_iter()
+            .filter(|(s, _, _)| *s > 0.0)
+            .take(limit)
+            .map(|(_, p, t)| (p, t))
+            .collect()
+    } else {
+        // Take all scored matches + fill remaining slots from unscored (preserving original order)
+        scored.truncate(limit);
+        scored.into_iter().map(|(_, p, t)| (p, t)).collect()
+    }
 }
 
 /// Scan LLM output for tool names mentioned, append ground-truth usage reference.

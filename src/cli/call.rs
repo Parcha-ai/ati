@@ -47,6 +47,51 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
     Ok(map)
 }
 
+/// Normalize arg keys to match the tool's schema property names.
+/// Handles: case mismatch (repo_name → repoName), hyphen/underscore (repo-name → repo_name),
+/// and camelCase↔snake_case (repo_name ↔ repoName).
+fn normalize_arg_keys(
+    args: &HashMap<String, Value>,
+    tool: &crate::core::manifest::Tool,
+) -> HashMap<String, Value> {
+    let schema_keys: Vec<String> = tool
+        .input_schema
+        .as_ref()
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.as_object())
+        .map(|obj| obj.keys().cloned().collect())
+        .unwrap_or_default();
+
+    if schema_keys.is_empty() {
+        return args.clone();
+    }
+
+    let mut normalized = HashMap::new();
+    for (key, value) in args {
+        // Exact match — use as-is
+        if schema_keys.contains(key) {
+            normalized.insert(key.clone(), value.clone());
+            continue;
+        }
+        // Normalize: lowercase, strip hyphens and underscores → "reponame" matches both "repo_name" and "repoName"
+        let key_flat = key.to_lowercase().replace(['-', '_'], "");
+        let mut matched = false;
+        for schema_key in &schema_keys {
+            let schema_flat = schema_key.to_lowercase().replace(['-', '_'], "");
+            if key_flat == schema_flat {
+                normalized.insert(schema_key.clone(), value.clone());
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            // No match — pass through as-is (server will reject if invalid)
+            normalized.insert(key.clone(), value.clone());
+        }
+    }
+    normalized
+}
+
 /// Load scopes from ATI_SESSION_TOKEN JWT, or return unrestricted if not set.
 fn load_scopes_from_env(verbose: bool) -> ScopeConfig {
     match std::env::var("ATI_SESSION_TOKEN") {
@@ -229,6 +274,9 @@ async fn execute_local(
         eprintln!("Endpoint: {} {}", tool.method, tool.endpoint);
     }
 
+    // Normalize arg keys to match schema property names (case-insensitive, underscore/hyphen)
+    let args = normalize_arg_keys(args, tool);
+
     // Load scopes from JWT
     let scopes = load_scopes_from_env(cli.verbose);
 
@@ -239,11 +287,11 @@ async fn execute_local(
     // Execute — dispatch based on handler type
     let result = match provider.handler.as_str() {
         "mcp" => {
-            let value = mcp_client::execute(provider, tool_name, args, &keyring).await?;
+            let value = mcp_client::execute(provider, tool_name, &args, &keyring).await?;
             output::format_output(&value, &cli.output)
         }
         _ => {
-            generic::execute(provider, tool, args, &keyring, &cli.output).await?
+            generic::execute(provider, tool, &args, &keyring, &cli.output).await?
         }
     };
 

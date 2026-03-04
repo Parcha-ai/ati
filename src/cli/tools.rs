@@ -288,7 +288,7 @@ fn search_tools(
 
 /// Score how well a tool matches the search query terms.
 /// Returns 0.0 for no match, higher scores for better matches.
-fn score_tool_match(
+pub(crate) fn score_tool_match(
     provider: &crate::core::manifest::Provider,
     tool: &crate::core::manifest::Tool,
     query_terms: &[&str],
