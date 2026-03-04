@@ -81,14 +81,32 @@ The agent doesn't write HTTP requests. It doesn't parse JSON responses. It calls
 ati provider add-mcp deepwiki --transport http \
   --url "https://mcp.deepwiki.com/mcp" \
   --description "AI-powered docs for any GitHub repo"
+# → Saved manifest to ~/.ati/manifests/deepwiki.toml
 
 # See the auto-discovered tools
 ati tool list --provider deepwiki
+# ┌─────────────────────────────────────────────────────┬──────────┬───────────────────────────────┐
+# │ DESCRIPTION                                         ┆ PROVIDER ┆ TOOL                          │
+# ╞═════════════════════════════════════════════════════╪══════════╪═══════════════════════════════╡
+# │ Get a list of documentation topics for a GitHub ... ┆ deepwiki ┆ deepwiki__read_wiki_structure │
+# │ View documentation about a GitHub repository.       ┆ deepwiki ┆ deepwiki__read_wiki_contents  │
+# │ Ask any question about a GitHub repository ...      ┆ deepwiki ┆ deepwiki__ask_question        │
+# └─────────────────────────────────────────────────────┴──────────┴───────────────────────────────┘
 
 # Ask a question about any repo
 ati run deepwiki__ask_question \
   --repoName "anthropics/claude-code" \
   --question "How does tool dispatch work?"
+# Tool dispatch in Claude Code involves a dynamic system that handles both
+# built-in and external Model Context Protocol (MCP) tools.
+#
+# 1. **Tool Name Check**: The system first checks if the tool name starts
+#    with `mcp__`. If not, it's routed to the built-in tool pipeline.
+# 2. **MCP Tool Resolution**: Server and tool names are extracted from the
+#    `mcp__<servername>__<toolname>` format, the server is connected, and
+#    the tool is invoked using a `call_tool` RPC.
+# 3. **Output Handling**: Text output is returned; images are handled
+#    during streaming.
 ```
 
 MCP tools are namespaced as `<provider>__<tool_name>`. ATI handles JSON-RPC framing, session management, and auth injection.
