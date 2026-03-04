@@ -113,6 +113,134 @@ MCP tools are namespaced as `<provider>__<tool_name>`. ATI handles JSON-RPC fram
 
 ---
 
+## Built by Agents, for Agents
+
+The examples above show a human typing commands. But ATI is designed so agents do all of this themselves — init, discover, store secrets, search across providers, and execute — with zero human intervention.
+
+### 1. Agent bootstraps its environment
+
+```bash
+ati init
+# Initialized /home/ubuntu/.ati/
+#   manifests/
+#   specs/
+#   skills/
+#   config.toml
+#
+# Next steps:
+#   ati key set <name> <value>            Add an API key
+#   ati provider import-openapi <url>     Import an API spec
+```
+
+### 2. Agent discovers APIs and MCP servers
+
+The agent can import any OpenAPI spec by URL — name auto-derived — and connect to MCP servers. No human has to write config files.
+
+```bash
+# Import APIs from their specs
+ati provider import-openapi https://clinicaltrials.gov/api/v2/openapi.json
+ati provider import-openapi https://finnhub.io/api/v1/openapi.json
+
+# Connect MCP servers
+ati provider add-mcp deepwiki --transport http \
+  --url "https://mcp.deepwiki.com/mcp"
+ati provider add-mcp linear --transport http \
+  --url "https://mcp.linear.app/mcp" \
+  --auth bearer --auth-key linear_api_key
+```
+
+### 3. Agent stores secrets
+
+```bash
+ati key set finnhub_api_key sk-your-key
+ati key set linear_api_key lin_api_abc123
+
+ati key list
+# cerebras_api_key               csk-...tj3k
+# finnhub_api_key                sk-...r-key
+# github_token                   ghs-...O6RE
+# linear_api_key                 lin-...c123
+```
+
+Keys are masked on output. The agent never sees raw values after storing them.
+
+### 4. Agent searches across everything
+
+This is the key part. The agent now has dozens of providers and hundreds of tools. It doesn't need to know which provider has what — it just asks.
+
+```bash
+ati assist "do we have a tool to search for stock prices?"
+# Yes, you have several tools for searching stock prices:
+#
+# 1. financial_datasets__getStockPriceSnapshot
+#    Get the latest stock price snapshot for a given ticker.
+#    ati run financial_datasets__getStockPriceSnapshot --ticker AAPL
+#
+# 2. financial_datasets__getStockPrices
+#    Get historical stock prices with customizable date ranges.
+#    ati run financial_datasets__getStockPrices --ticker AAPL --start_date 2024-01-01
+#
+# 3. finnhub__quote
+#    Get real-time quote data for US stocks.
+#    ati run finnhub__quote --symbol AAPL
+
+ati tool search "sanctions"
+# PROVIDER          TOOL                            DESCRIPTION
+# complyadvantage   ca_business_sanctions_search    Search sanctions lists for businesses
+# complyadvantage   ca_person_sanctions_search      Search sanctions lists for individuals
+```
+
+`ati assist` returns copy-pasteable `ati run` commands. `ati tool search` is instant and offline. The agent picks the right tool and runs it — no human in the loop.
+
+### 5. It works with CLIs too
+
+Wrap any CLI. The agent calls `ati run`, ATI spawns the subprocess with credentials injected. The agent never sees the raw token.
+
+```bash
+ati provider add-cli gh --command gh \
+  --env 'GH_TOKEN=${github_token}'
+
+# Agent asks how to use it
+ati assist gh "how do I create a pull request?"
+# ati run gh -- pr create --title "Fix login bug" --body "Resolves #123"
+# ati run gh -- pr create --draft --title "WIP: New feature"
+# ati run gh -- pr create --base main --head feature/new-auth
+
+# Agent runs it
+ati run gh -- repo view anthropics/claude-code --json name,stargazerCount
+# name: claude-code
+# stargazerCount: 73682
+```
+
+### 6. Security scales with your threat model
+
+Three tiers — same `ati run` interface, different credential exposure:
+
+| | Dev Mode | Local Mode | Proxy Mode |
+|--|----------|-----------|------------|
+| **Credentials** | Plaintext file | Encrypted keyring | Not in sandbox |
+| **Key exposure** | Readable on disk | mlock'd memory | Never enters sandbox |
+| **Setup** | `ati key set` | Keyring + session key | `ATI_PROXY_URL` |
+| **Use case** | Local dev | Sandboxed agents | Untrusted sandboxes |
+
+In proxy mode, the agent's sandbox has zero credentials. All calls route through `ati proxy`, which holds the keys, validates JWTs, and enforces per-tool scopes:
+
+```bash
+# Orchestrator issues a scoped token
+ati token issue --sub agent-7 \
+  --scope "tool:clinicaltrials__* tool:finnhub__* help" --ttl 3600
+
+# Agent's sandbox — only has the binary and a JWT
+export ATI_PROXY_URL=http://proxy:8090
+export ATI_SESSION_TOKEN=eyJhbG...
+
+# Same commands, routed through proxy, scoped to allowed tools
+ati run clinicaltrials__searchStudies --query.term "cancer"  # ✓ allowed
+ati run ca_person_sanctions_search --search_term "Name"      # ✗ denied
+```
+
+---
+
 ## Four Provider Types
 
 Every provider type produces the same interface: `ati run <tool> --arg value`. The agent doesn't know or care what's behind it.
