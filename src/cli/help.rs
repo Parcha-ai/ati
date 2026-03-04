@@ -13,14 +13,7 @@ const HELP_SYSTEM_PROMPT: &str = r#"You are a tool recommendation assistant for 
 
 {skills_section}
 
-Given the user's query, recommend the most relevant tools and provide exact `ati run` commands with the right arguments. If a methodology skill is relevant, mention it and suggest `ati skill show <name>` to read the full guide. Be concise and practical. Format each recommendation as:
-
-1. **tool_name** — description
-   ```
-   ati run tool_name --arg1 value1 --arg2 value2
-   ```
-
-Only recommend tools from the list above. If no tool matches, say so clearly."#;
+Given the user's query, recommend the most relevant tools (1-4) and explain when to use each one. Use the FULL tool name including provider prefix (e.g. `parallel_search__web_search_preview`). Show a realistic example command with `ati run`. If a methodology skill is relevant, mention `ati skill show <name>`. Be concise. Only recommend tools from the list above."#;
 
 /// Execute: ati help "natural language query"
 ///
@@ -168,6 +161,7 @@ async fn execute_local(
             .unwrap_or("No response from LLM");
 
         println!("{content}");
+        print_tool_reference(content, &scoped_tools);
     } else if let Ok(anthropic_key) = std::env::var("ANTHROPIC_API_KEY") {
         // Fallback: use Anthropic Messages API with ANTHROPIC_API_KEY
         let model = std::env::var("ATI_ASSIST_MODEL")
@@ -209,6 +203,7 @@ async fn execute_local(
             .unwrap_or("No response from LLM");
 
         println!("{content}");
+        print_tool_reference(content, &scoped_tools);
     } else {
         return Err(
             "No LLM configured for ati assist. Set ANTHROPIC_API_KEY or configure a keyring with an LLM provider.".into()
@@ -234,6 +229,114 @@ async fn execute_via_proxy(
     Ok(())
 }
 
+/// Scan LLM output for tool names mentioned, append ground-truth usage reference.
+fn print_tool_reference(
+    llm_output: &str,
+    scoped_tools: &[(&crate::core::manifest::Provider, &crate::core::manifest::Tool)],
+) {
+    let mut mentioned = Vec::new();
+    for (_, tool) in scoped_tools {
+        if llm_output.contains(&tool.name) {
+            mentioned.push(tool);
+        }
+    }
+    if mentioned.is_empty() {
+        return;
+    }
+
+    // Deduplicate (a tool name might appear as both short and prefixed form)
+    mentioned.sort_by_key(|t| &t.name);
+    mentioned.dedup_by_key(|t| &t.name);
+
+    println!("\n---\n**Quick Reference** (from schema)\n");
+    for tool in &mentioned {
+        println!("**`{}`**", tool.name);
+        if let Some(usage) = build_usage_card(tool) {
+            println!("```");
+            println!("{usage}");
+            println!("```");
+        }
+        if let Some(params) = build_param_table(tool) {
+            println!("{params}");
+        }
+        println!();
+    }
+}
+
+/// Generate an exact `ati run` command from the tool's input schema.
+fn build_usage_card(tool: &crate::core::manifest::Tool) -> Option<String> {
+    let schema = tool.input_schema.as_ref()?;
+    let props = schema.get("properties")?.as_object()?;
+    let required: Vec<String> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut parts = vec![format!("ati run {}", tool.name)];
+    for (key, val) in props {
+        let is_required = required.iter().any(|r| r == key);
+        let type_str = val.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+        let placeholder = match type_str {
+            "array" => format!("'[\"value1\", \"value2\"]'"),
+            "integer" | "number" => "<number>".to_string(),
+            "boolean" => "true".to_string(),
+            _ => format!("<{key}>"),
+        };
+        if is_required {
+            parts.push(format!("--{key} {placeholder}"));
+        }
+    }
+    Some(parts.join(" \\\n  "))
+}
+
+/// Generate a param table from the tool's input schema.
+fn build_param_table(tool: &crate::core::manifest::Tool) -> Option<String> {
+    let schema = tool.input_schema.as_ref()?;
+    let props = schema.get("properties")?.as_object()?;
+    let required: Vec<String> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut lines = Vec::new();
+    // Required params first, then optional
+    let mut params: Vec<_> = props.iter().collect();
+    params.sort_by_key(|(k, _)| !required.contains(&k.to_string()));
+
+    for (key, val) in &params {
+        let is_required = required.iter().any(|r| r == *key);
+        let type_str = val.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+        let desc = val
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        // Truncate long descriptions to first sentence
+        let short_desc = desc
+            .split('\n')
+            .next()
+            .unwrap_or(desc)
+            .chars()
+            .take(120)
+            .collect::<String>();
+        let req = if is_required { " **(required)**" } else { "" };
+        lines.push(format!("  `--{key}` ({type_str}){req}: {short_desc}"));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n"))
+}
+
 /// Build tool context string from scoped tools for the LLM system prompt.
 /// Includes category and tags for better semantic matching in `ati assist`.
 fn build_tool_context(
@@ -256,6 +359,17 @@ fn build_tool_context(
             summary.push_str(&format!("\n  Tags: {}", tool.tags.join(", ")));
         }
         if let Some(schema) = &tool.input_schema {
+            // Collect required field names
+            let required: Vec<String> = schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             if let Some(props) = schema.get("properties") {
                 if let Some(obj) = props.as_object() {
                     let params: Vec<String> = obj
@@ -268,7 +382,12 @@ fn build_tool_context(
                         .map(|(k, v)| {
                             let type_str = v.get("type").and_then(|t| t.as_str()).unwrap_or("string");
                             let desc = v.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                            format!("    --{k} ({type_str}): {desc}")
+                            let req_label = if required.iter().any(|r| r == k) {
+                                " [REQUIRED]"
+                            } else {
+                                ""
+                            };
+                            format!("    --{k} ({type_str}{req_label}): {desc}")
                         })
                         .collect();
                     if !params.is_empty() {
