@@ -235,7 +235,6 @@ fn substitute_path_params(
     let mut result = endpoint.to_string();
     for (key, value) in path_args {
         if value.contains("..")
-            || value.contains('/')
             || value.contains('\\')
             || value.contains('?')
             || value.contains('#')
@@ -258,7 +257,7 @@ fn percent_encode_path_segment(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len());
     for byte in s.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
                 encoded.push(byte as char);
             }
             _ => {
@@ -595,10 +594,11 @@ mod tests {
     }
 
     #[test]
-    fn test_substitute_path_params_rejects_slash() {
+    fn test_substitute_path_params_allows_slash() {
         let mut args = HashMap::new();
-        args.insert("id".to_string(), "foo/bar".to_string());
-        assert!(substitute_path_params("/resource/{id}", &args).is_err());
+        args.insert("id".to_string(), "fal-ai/flux/dev".to_string());
+        let result = substitute_path_params("/resource/{id}", &args).unwrap();
+        assert_eq!(result, "/resource/fal-ai/flux/dev");
     }
 
     #[test]
