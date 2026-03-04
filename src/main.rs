@@ -64,6 +64,10 @@ pub enum Commands {
     #[command(subcommand)]
     Openapi(OpenapiCommands),
 
+    /// MCP provider management — add, list, remove MCP manifests
+    #[command(subcommand)]
+    Mcp(McpCommands),
+
     /// Authentication and scope information
     #[command(subcommand)]
     Auth(AuthCommands),
@@ -239,6 +243,52 @@ pub enum OpenapiCommands {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum McpCommands {
+    /// Add an MCP provider — generates a TOML manifest
+    Add {
+        /// Provider name (used as manifest filename and tool prefix)
+        name: String,
+        /// Transport type: http or stdio
+        #[arg(long)]
+        transport: String,
+        /// MCP server URL (required for http transport)
+        #[arg(long)]
+        url: Option<String>,
+        /// Command to run (required for stdio transport)
+        #[arg(long)]
+        command: Option<String>,
+        /// Arguments for the stdio command (repeatable)
+        #[arg(long, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Environment variables for stdio as KEY=VALUE (repeatable)
+        #[arg(long)]
+        env: Vec<String>,
+        /// Auth type: none, bearer, header (default: none)
+        #[arg(long)]
+        auth: Option<String>,
+        /// Keyring key name for auth (required for bearer/header auth)
+        #[arg(long)]
+        auth_key: Option<String>,
+        /// Custom header name for header auth
+        #[arg(long)]
+        auth_header: Option<String>,
+        /// Provider description (default: "{name} MCP provider")
+        #[arg(long)]
+        description: Option<String>,
+        /// Provider category
+        #[arg(long)]
+        category: Option<String>,
+    },
+    /// List configured MCP providers
+    List,
+    /// Remove an MCP provider manifest
+    Remove {
+        /// Provider name to remove
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum KeysCommands {
     /// Store an API key
     Set {
@@ -322,6 +372,7 @@ async fn main() {
         Commands::Skills(subcmd) => cli::skills::execute(&cli, subcmd).await,
         Commands::Assist { query } => cli::help::execute(&cli, query).await,
         Commands::Openapi(subcmd) => cli::openapi::execute(subcmd).await,
+        Commands::Mcp(subcmd) => cli::mcp::execute(subcmd),
         Commands::Auth(subcmd) => cli::auth::execute(&cli, subcmd).await,
         Commands::Token(subcmd) => cli::token::execute(subcmd).map_err(|e| e as Box<dyn std::error::Error>),
         Commands::Init { proxy, es256 } => cli::init::execute(*proxy, *es256),

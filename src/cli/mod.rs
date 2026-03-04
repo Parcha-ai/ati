@@ -4,6 +4,7 @@ pub mod common;
 pub mod help;
 pub mod init;
 pub mod keys;
+pub mod mcp;
 pub mod openapi;
 pub mod skills;
 pub mod token;
