@@ -125,8 +125,12 @@ struct HttpTransport {
     url: String,
     /// Session ID from Mcp-Session-Id header (set after initialize).
     session_id: Option<String>,
+    /// Auth header name (default: "Authorization"). Custom for APIs using e.g. "x-api-key".
+    auth_header_name: String,
     /// Auth header value (e.g., "Bearer <token>") injected on every request.
     auth_header: Option<String>,
+    /// Extra headers from provider config.
+    extra_headers: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,11 +207,16 @@ impl McpClient {
                 // Resolve ${key_name} placeholders in the URL from keyring
                 let resolved_url = resolve_env_value(url, keyring);
 
+                let auth_header_name = provider.auth_header_name.clone()
+                    .unwrap_or_else(|| "Authorization".to_string());
+
                 Transport::Http(HttpTransport {
                     client,
                     url: resolved_url,
                     session_id: None,
+                    auth_header_name,
                     auth_header,
+                    extra_headers: provider.extra_headers.clone(),
                 })
             }
             other => {
@@ -400,7 +409,10 @@ impl McpClient {
                     req = req.header("Mcp-Session-Id", session_id.as_str());
                 }
                 if let Some(auth) = &http.auth_header {
-                    req = req.header("Authorization", auth.as_str());
+                    req = req.header(http.auth_header_name.as_str(), auth.as_str());
+                }
+                for (name, value) in &http.extra_headers {
+                    req = req.header(name.as_str(), value.as_str());
                 }
 
                 let resp = req.send().await?;
@@ -510,9 +522,14 @@ async fn send_http_request(
         req = req.header("Mcp-Session-Id", session_id.as_str());
     }
 
-    // Inject auth
+    // Inject auth (using custom header name if configured, e.g. "x-api-key")
     if let Some(auth) = &http.auth_header {
-        req = req.header("Authorization", auth.as_str());
+        req = req.header(http.auth_header_name.as_str(), auth.as_str());
+    }
+
+    // Inject extra headers from provider config
+    for (name, value) in &http.extra_headers {
+        req = req.header(name.as_str(), value.as_str());
     }
 
     let response = req.send().await.map_err(|e| {
