@@ -296,6 +296,60 @@ pub enum ProviderCommands {
         /// Provider name
         name: String,
     },
+
+    /// Load a provider ephemerally — fetch spec, detect auth, cache for immediate use
+    #[command(
+        after_help = "Examples:\n  ati provider load https://petstore3.swagger.io/api/v3/openapi.json --name petstore\n  ati provider load --mcp --transport http --url https://mcp.serpapi.com/mcp --name serpapi\n  ati provider load spec.json --name myapi --save"
+    )]
+    Load {
+        /// Path or URL to OpenAPI spec (omit for --mcp mode)
+        spec: Option<String>,
+        /// Provider name
+        #[arg(long)]
+        name: String,
+        /// Load as MCP provider instead of OpenAPI
+        #[arg(long)]
+        mcp: bool,
+        /// MCP transport: http or stdio
+        #[arg(long)]
+        transport: Option<String>,
+        /// MCP server URL (required for http transport)
+        #[arg(long)]
+        url: Option<String>,
+        /// Command to run (required for stdio transport)
+        #[arg(long)]
+        command: Option<String>,
+        /// Arguments for the stdio command (repeatable)
+        #[arg(long, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Environment variables as KEY=VALUE (repeatable, use ${keyring_ref} for secrets)
+        #[arg(long)]
+        env: Vec<String>,
+        /// Auth type override (auto-detected for OpenAPI)
+        #[arg(long)]
+        auth: Option<String>,
+        /// Keyring key name for auth
+        #[arg(long)]
+        auth_key: Option<String>,
+        /// Custom header name for auth (e.g., x-api-key)
+        #[arg(long)]
+        auth_header: Option<String>,
+        /// Custom query parameter name for auth
+        #[arg(long)]
+        auth_query: Option<String>,
+        /// Save permanently (write TOML manifest) instead of caching
+        #[arg(long)]
+        save: bool,
+        /// Cache TTL in seconds (default: 3600 = 1 hour)
+        #[arg(long, default_value = "3600")]
+        ttl: u64,
+    },
+
+    /// Remove a cached (ephemeral) provider
+    Unload {
+        /// Provider name to unload
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

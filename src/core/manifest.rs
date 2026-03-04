@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -228,6 +229,125 @@ pub struct Manifest {
     pub tools: Vec<Tool>,
 }
 
+/// A cached (ephemeral) provider, persisted as JSON in `$ATI_DIR/cache/providers/<name>.json`.
+/// Used by `ati provider load` to make providers available across process invocations
+/// without writing permanent TOML manifests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedProvider {
+    pub name: String,
+    /// "openapi" or "mcp"
+    pub provider_type: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub auth_type: String,
+    #[serde(default)]
+    pub auth_key_name: Option<String>,
+    #[serde(default)]
+    pub auth_header_name: Option<String>,
+    #[serde(default)]
+    pub auth_query_name: Option<String>,
+    // OpenAPI fields
+    #[serde(default)]
+    pub spec_content: Option<String>,
+    // MCP fields
+    #[serde(default)]
+    pub mcp_transport: Option<String>,
+    #[serde(default)]
+    pub mcp_url: Option<String>,
+    #[serde(default)]
+    pub mcp_command: Option<String>,
+    #[serde(default)]
+    pub mcp_args: Vec<String>,
+    #[serde(default)]
+    pub mcp_env: HashMap<String, String>,
+    // MCP/HTTP auth
+    #[serde(default)]
+    pub auth: Option<String>,
+    // Cache metadata
+    pub created_at: String,
+    pub ttl_seconds: u64,
+}
+
+impl CachedProvider {
+    /// Returns true if this cached provider has expired.
+    pub fn is_expired(&self) -> bool {
+        let created = match DateTime::parse_from_rfc3339(&self.created_at) {
+            Ok(dt) => dt.with_timezone(&Utc),
+            Err(_) => return true, // Can't parse → treat as expired
+        };
+        let now = Utc::now();
+        let elapsed = now.signed_duration_since(created);
+        elapsed.num_seconds() as u64 > self.ttl_seconds
+    }
+
+    /// Returns the expiry time as an ISO timestamp.
+    pub fn expires_at(&self) -> Option<String> {
+        let created = DateTime::parse_from_rfc3339(&self.created_at).ok()?;
+        let expires = created + chrono::Duration::seconds(self.ttl_seconds as i64);
+        Some(expires.to_rfc3339())
+    }
+
+    /// Returns remaining TTL in seconds (0 if expired).
+    pub fn remaining_seconds(&self) -> u64 {
+        let created = match DateTime::parse_from_rfc3339(&self.created_at) {
+            Ok(dt) => dt.with_timezone(&Utc),
+            Err(_) => return 0,
+        };
+        let now = Utc::now();
+        let elapsed = now.signed_duration_since(created).num_seconds() as u64;
+        self.ttl_seconds.saturating_sub(elapsed)
+    }
+
+    /// Build a Provider struct from this cached entry.
+    pub fn to_provider(&self) -> Provider {
+        let auth_type = match self.auth_type.as_str() {
+            "bearer" => AuthType::Bearer,
+            "header" => AuthType::Header,
+            "query" => AuthType::Query,
+            "basic" => AuthType::Basic,
+            "oauth2" => AuthType::Oauth2,
+            _ => AuthType::None,
+        };
+
+        let handler = match self.provider_type.as_str() {
+            "mcp" => "mcp".to_string(),
+            "openapi" => "openapi".to_string(),
+            _ => "http".to_string(),
+        };
+
+        Provider {
+            name: self.name.clone(),
+            description: format!("{} (cached)", self.name),
+            base_url: self.base_url.clone(),
+            auth_type,
+            auth_key_name: self.auth_key_name.clone(),
+            auth_header_name: self.auth_header_name.clone(),
+            auth_query_name: self.auth_query_name.clone(),
+            auth_value_prefix: None,
+            extra_headers: HashMap::new(),
+            oauth2_token_url: None,
+            auth_secret_name: None,
+            oauth2_basic_auth: false,
+            internal: false,
+            handler,
+            mcp_transport: self.mcp_transport.clone(),
+            mcp_command: self.mcp_command.clone(),
+            mcp_args: self.mcp_args.clone(),
+            mcp_url: self.mcp_url.clone(),
+            mcp_env: self.mcp_env.clone(),
+            openapi_spec: None,
+            openapi_include_tags: Vec::new(),
+            openapi_exclude_tags: Vec::new(),
+            openapi_include_operations: Vec::new(),
+            openapi_exclude_operations: Vec::new(),
+            openapi_max_operations: None,
+            openapi_overrides: HashMap::new(),
+            category: None,
+        }
+    }
+}
+
 /// A tool discovered from an MCP server via tools/list.
 /// Converted into a Tool for the registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +414,80 @@ impl ManifestRegistry {
                 tool_index.insert(tool.name.clone(), (mi, ti));
             }
             manifests.push(manifest);
+        }
+
+        // Load cached providers from cache/providers/*.json
+        // Cache dir is sibling of manifests dir: e.g., ~/.ati/cache/providers/
+        if let Some(parent) = dir.parent() {
+            let cache_dir = parent.join("cache").join("providers");
+            if cache_dir.is_dir() {
+                let cache_pattern = cache_dir.join("*.json");
+                if let Ok(cache_entries) = glob::glob(cache_pattern.to_str().unwrap_or("")) {
+                    for entry in cache_entries {
+                        let path = match entry {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        let content = match std::fs::read_to_string(&path) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        let cached: CachedProvider = match serde_json::from_str(&content) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+
+                        // Skip and delete expired entries
+                        if cached.is_expired() {
+                            let _ = std::fs::remove_file(&path);
+                            continue;
+                        }
+
+                        // Skip if a permanent manifest with same provider name already exists
+                        if manifests.iter().any(|m| m.provider.name == cached.name) {
+                            continue;
+                        }
+
+                        let provider = cached.to_provider();
+
+                        let mut cached_tools = Vec::new();
+                        if cached.provider_type == "openapi" {
+                            if let Some(spec_content) = &cached.spec_content {
+                                if let Ok(spec) = crate::core::openapi::parse_spec(spec_content) {
+                                    let filters = crate::core::openapi::OpenApiFilters {
+                                        include_tags: vec![],
+                                        exclude_tags: vec![],
+                                        include_operations: vec![],
+                                        exclude_operations: vec![],
+                                        max_operations: None,
+                                    };
+                                    let defs = crate::core::openapi::extract_tools(&spec, &filters);
+                                    cached_tools = defs
+                                        .into_iter()
+                                        .map(|def| {
+                                            crate::core::openapi::to_ati_tool(
+                                                def,
+                                                &cached.name,
+                                                &HashMap::new(),
+                                            )
+                                        })
+                                        .collect();
+                                }
+                            }
+                        }
+                        // MCP providers have empty tools — lazy discovery at run time
+
+                        let mi = manifests.len();
+                        for (ti, tool) in cached_tools.iter().enumerate() {
+                            tool_index.insert(tool.name.clone(), (mi, ti));
+                        }
+                        manifests.push(Manifest {
+                            provider,
+                            tools: cached_tools,
+                        });
+                    }
+                }
+            }
         }
 
         Ok(ManifestRegistry {

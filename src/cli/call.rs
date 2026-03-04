@@ -205,9 +205,23 @@ async fn execute_local(
     }
 
     let (provider, tool) = registry.get_tool(tool_name).ok_or_else(|| {
-        format!(
-            "Unknown tool: '{tool_name}'. Run 'ati tool list' to see available tools."
-        )
+        // After MCP discovery, the registry has real tool names.
+        // If exact match fails, check for prefix matches and suggest.
+        let prefix = tool_name.split("__").next().unwrap_or("");
+        let suggestions: Vec<String> = registry
+            .list_public_tools()
+            .iter()
+            .filter(|(p, _)| p.name == prefix)
+            .map(|(_, t)| t.name.clone())
+            .collect();
+        if suggestions.is_empty() {
+            format!("Unknown tool: '{tool_name}'. Run 'ati tool list' to see available tools.")
+        } else {
+            format!(
+                "Unknown tool: '{tool_name}'. Did you mean one of:\n{}\nRun 'ati tool info <name>' to see parameters.",
+                suggestions.iter().map(|s| format!("  - {s}")).collect::<Vec<_>>().join("\n")
+            )
+        }
     })?;
 
     if cli.verbose {

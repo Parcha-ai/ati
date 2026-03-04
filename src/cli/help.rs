@@ -1,6 +1,5 @@
 use super::common;
 use crate::core::jwt;
-use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::scope::{self, ScopeConfig};
 use crate::core::skill::{self, SkillRegistry};
@@ -55,7 +54,11 @@ async fn execute_local(
 
     // Load manifests
     let manifests_dir = ati_dir.join("manifests");
-    let registry = ManifestRegistry::load(&manifests_dir)?;
+    let mut registry = ManifestRegistry::load(&manifests_dir)?;
+
+    // Discover MCP tools so assist sees them
+    let keyring = crate::cli::call::load_keyring(&ati_dir, cli.verbose);
+    crate::cli::tools::discover_mcp_tools(&mut registry, &keyring, cli.verbose).await;
 
     // Load scopes from JWT
     let scopes = match std::env::var("ATI_SESSION_TOKEN") {
@@ -102,19 +105,13 @@ async fn execute_local(
         eprintln!("Skills in context: {}", resolved_skills.len());
     }
 
-    // Priority: CEREBRAS_API_KEY (10x faster) → keyring → ANTHROPIC_API_KEY (no extra setup)
+    // Priority: CEREBRAS_API_KEY (10x faster) → keyring (credentials + keyring.enc) → ANTHROPIC_API_KEY
     let cerebras_key = std::env::var("CEREBRAS_API_KEY").ok();
 
-    let keyring_path = ati_dir.join("keyring.enc");
     let keyring_api_key = if cerebras_key.is_none() {
         registry
             .get_tool("_chat_completion")
             .and_then(|(provider, _)| {
-                let keyring = if keyring_path.exists() {
-                    Keyring::load(&keyring_path).ok()?
-                } else {
-                    return None;
-                };
                 provider
                     .auth_key_name
                     .as_deref()

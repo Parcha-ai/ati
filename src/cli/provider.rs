@@ -8,10 +8,14 @@
 /// `ati provider info <name>` — show provider details
 
 use super::common;
-use crate::core::manifest::ManifestRegistry;
+use crate::cli::call::load_keyring;
+use crate::core::keyring::Keyring;
+use crate::core::manifest::{CachedProvider, ManifestRegistry};
+use crate::core::mcp_client::McpClient;
 use crate::core::openapi::{self, OpenApiFilters};
 use crate::output;
 use crate::{Cli, OutputFormat, ProviderCommands};
+use chrono::Utc;
 use std::collections::HashMap;
 
 pub async fn execute(
@@ -57,6 +61,42 @@ pub async fn execute(
         ProviderCommands::List => list_providers(cli),
         ProviderCommands::Remove { name } => remove_provider(name),
         ProviderCommands::Info { name } => provider_info(cli, name),
+        ProviderCommands::Load {
+            spec,
+            name,
+            mcp,
+            transport,
+            url,
+            command,
+            args,
+            env,
+            auth,
+            auth_key,
+            auth_header,
+            auth_query,
+            save,
+            ttl,
+        } => {
+            load_provider(
+                cli,
+                spec.as_deref(),
+                name,
+                *mcp,
+                transport.as_deref(),
+                url.as_deref(),
+                command.as_deref(),
+                args,
+                env,
+                auth.as_deref(),
+                auth_key.as_deref(),
+                auth_header.as_deref(),
+                auth_query.as_deref(),
+                *save,
+                *ttl,
+            )
+            .await
+        }
+        ProviderCommands::Unload { name } => unload_provider(name),
     }
 }
 
@@ -400,103 +440,162 @@ fn list_providers(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = common::ati_dir();
     let manifests_dir = ati_dir.join("manifests");
 
-    if !manifests_dir.exists() {
-        println!("No manifests directory found at {}", manifests_dir.display());
-        return Ok(());
-    }
-
     // Collect all providers from manifests
     let mut providers: Vec<serde_json::Value> = Vec::new();
 
-    let mut entries: Vec<_> = std::fs::read_dir(&manifests_dir)?
-        .filter_map(|e| e.ok())
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
+    if manifests_dir.exists() {
+        let mut entries: Vec<_> = std::fs::read_dir(&manifests_dir)?
+            .filter_map(|e| e.ok())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
 
-    for entry in entries {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-            continue;
-        }
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let parsed: toml::Value = match toml::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let provider = match parsed.get("provider") {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let name = provider
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("?");
-        let description = provider
-            .get("description")
-            .and_then(|d| d.as_str())
-            .unwrap_or("");
-        let handler = provider
-            .get("handler")
-            .and_then(|h| h.as_str())
-            .unwrap_or("http");
-        let internal = provider
-            .get("internal")
-            .and_then(|i| i.as_bool())
-            .unwrap_or(false);
-        let auth_type = provider
-            .get("auth_type")
-            .and_then(|a| a.as_str())
-            .unwrap_or("none");
-
-        // Skip internal providers in non-JSON output
-        if internal && !matches!(cli.output, OutputFormat::Json) {
-            continue;
-        }
-
-        // Count tools (for HTTP providers with [[tools]] sections)
-        let tool_count = parsed
-            .get("tools")
-            .and_then(|t| t.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0);
-
-        let handler_type = match handler {
-            "mcp" => {
-                let transport = provider
-                    .get("mcp_transport")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("stdio");
-                format!("mcp/{transport}")
+        for entry in entries {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
             }
-            "openapi" => "openapi".to_string(),
-            _ => "http".to_string(),
-        };
 
-        let tool_label = if handler == "mcp" || handler == "openapi" {
-            "auto".to_string()
-        } else {
-            tool_count.to_string()
-        };
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
 
-        providers.push(serde_json::json!({
-            "name": name,
-            "type": handler_type,
-            "description": description,
-            "auth": auth_type,
-            "tools": tool_label,
-            "internal": internal,
-        }));
+            let parsed: toml::Value = match toml::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let provider = match parsed.get("provider") {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let name = provider
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("?");
+            let description = provider
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
+            let handler = provider
+                .get("handler")
+                .and_then(|h| h.as_str())
+                .unwrap_or("http");
+            let internal = provider
+                .get("internal")
+                .and_then(|i| i.as_bool())
+                .unwrap_or(false);
+            let auth_type = provider
+                .get("auth_type")
+                .and_then(|a| a.as_str())
+                .unwrap_or("none");
+
+            // Skip internal providers in non-JSON output
+            if internal && !matches!(cli.output, OutputFormat::Json) {
+                continue;
+            }
+
+            // Count tools (for HTTP providers with [[tools]] sections)
+            let tool_count = parsed
+                .get("tools")
+                .and_then(|t| t.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+
+            let handler_type = match handler {
+                "mcp" => {
+                    let transport = provider
+                        .get("mcp_transport")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("stdio");
+                    format!("mcp/{transport}")
+                }
+                "openapi" => "openapi".to_string(),
+                _ => "http".to_string(),
+            };
+
+            let tool_label = if handler == "mcp" || handler == "openapi" {
+                "auto".to_string()
+            } else {
+                tool_count.to_string()
+            };
+
+            providers.push(serde_json::json!({
+                "name": name,
+                "type": handler_type,
+                "description": description,
+                "auth": auth_type,
+                "tools": tool_label,
+                "internal": internal,
+                "source": "permanent",
+            }));
+        }
+    }
+
+    // Also include cached providers
+    let cache_dir = ati_dir.join("cache").join("providers");
+    if cache_dir.is_dir() {
+        let mut cache_entries: Vec<_> = std::fs::read_dir(&cache_dir)?
+            .filter_map(|e| e.ok())
+            .collect();
+        cache_entries.sort_by_key(|e| e.file_name());
+
+        for entry in cache_entries {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let cached: CachedProvider = match serde_json::from_str(&content) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Skip expired (and clean up)
+            if cached.is_expired() {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+
+            // Skip if a permanent provider with same name already listed
+            if providers.iter().any(|p| p["name"].as_str() == Some(&cached.name)) {
+                continue;
+            }
+
+            let remaining = cached.remaining_seconds();
+            let remaining_label = format_remaining(remaining);
+
+            let handler_type = match cached.provider_type.as_str() {
+                "mcp" => {
+                    let transport = cached.mcp_transport.as_deref().unwrap_or("stdio");
+                    format!("mcp/{transport}")
+                }
+                _ => "openapi".to_string(),
+            };
+
+            let tool_label = "auto".to_string();
+
+            providers.push(serde_json::json!({
+                "name": cached.name,
+                "type": handler_type,
+                "description": format!("(cached, {})", remaining_label),
+                "auth": cached.auth_type,
+                "tools": tool_label,
+                "internal": false,
+                "source": "cached",
+                "remaining_seconds": remaining,
+            }));
+        }
     }
 
     if providers.is_empty() {
-        println!("No providers configured. Run `ati provider add-mcp` or `ati provider import-openapi`.");
+        println!("No providers configured. Run `ati provider load`, `ati provider add-mcp`, or `ati provider import-openapi`.");
         return Ok(());
     }
 
@@ -594,7 +693,472 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+// ─── load ────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn load_provider(
+    cli: &Cli,
+    spec: Option<&str>,
+    name: &str,
+    mcp: bool,
+    transport: Option<&str>,
+    url: Option<&str>,
+    command: Option<&str>,
+    args: &[String],
+    env: &[String],
+    auth: Option<&str>,
+    auth_key: Option<&str>,
+    auth_header: Option<&str>,
+    auth_query: Option<&str>,
+    save: bool,
+    ttl: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if mcp {
+        load_mcp_provider(cli, name, transport, url, command, args, env, auth, auth_key, auth_header, auth_query, save, ttl).await
+    } else {
+        load_openapi_provider(cli, spec, name, auth, auth_key, auth_header, auth_query, save, ttl).await
+    }
+}
+
+/// Load an OpenAPI provider: fetch spec, detect auth, cache or save.
+async fn load_openapi_provider(
+    cli: &Cli,
+    spec: Option<&str>,
+    name: &str,
+    auth_override: Option<&str>,
+    auth_key: Option<&str>,
+    auth_header_override: Option<&str>,
+    auth_query_override: Option<&str>,
+    save: bool,
+    ttl: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let spec_path = spec.ok_or("OpenAPI mode requires a spec path or URL. Use --mcp for MCP providers.")?;
+
+    // If --save, delegate to existing import_openapi
+    if save {
+        return import_openapi(
+            spec_path,
+            name,
+            auth_key,
+            &[],
+            false,
+        );
+    }
+
+    // Fetch/read the spec content
+    let content = read_spec_content(spec_path)?;
+    let parsed_spec = openapi::parse_spec(&content)?;
+
+    // Detect auth from spec
+    let (detected_auth_type, auth_extra) = openapi::detect_auth(&parsed_spec);
+    let auth_type = auth_override.unwrap_or(&detected_auth_type);
+
+    // Determine base URL
+    let base_url = openapi::spec_base_url(&parsed_spec).unwrap_or_default();
+
+    // Count tools
+    let filters = OpenApiFilters {
+        include_tags: vec![],
+        exclude_tags: vec![],
+        include_operations: vec![],
+        exclude_operations: vec![],
+        max_operations: None,
+    };
+    let tools = openapi::extract_tools(&parsed_spec, &filters);
+    let tools_count = tools.len();
+
+    // Determine key name
+    let default_key_name = format!("{name}_api_key");
+    let key_name = auth_key.unwrap_or(&default_key_name);
+
+    // Check keyring for existing key
+    let ati_dir = common::ati_dir();
+    let keyring = load_keyring(&ati_dir, cli.verbose);
+    let key_resolved = auth_type == "none" || keyring.contains(key_name);
+
+    // Write cache
+    let now = Utc::now();
+    let cached = CachedProvider {
+        name: name.to_string(),
+        provider_type: "openapi".to_string(),
+        base_url: base_url.clone(),
+        auth_type: auth_type.to_string(),
+        auth_key_name: if auth_type != "none" {
+            Some(key_name.to_string())
+        } else {
+            None
+        },
+        auth_header_name: auth_header_override.map(|s| s.to_string()).or_else(|| auth_extra.get("auth_header_name").cloned()),
+        auth_query_name: auth_query_override.map(|s| s.to_string()).or_else(|| auth_extra.get("auth_query_name").cloned()),
+        spec_content: Some(content),
+        mcp_transport: None,
+        mcp_url: None,
+        mcp_command: None,
+        mcp_args: vec![],
+        mcp_env: HashMap::new(),
+        auth: None,
+        created_at: now.to_rfc3339(),
+        ttl_seconds: ttl,
+    };
+
+    let cache_dir = ati_dir.join("cache").join("providers");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = cache_dir.join(format!("{name}.json"));
+    let cache_json = serde_json::to_string_pretty(&cached)?;
+    std::fs::write(&cache_path, &cache_json)?;
+
+    // Build status
+    let status = if key_resolved { "ready" } else { "needs_auth" };
+
+    // Auth description for output
+    let auth_description = match auth_type {
+        "bearer" => "HTTP Bearer token (Authorization header)".to_string(),
+        "header" => {
+            let hdr = auth_extra
+                .get("auth_header_name")
+                .map(|s| s.as_str())
+                .unwrap_or("X-Api-Key");
+            format!("API key via header ({hdr})")
+        }
+        "query" => {
+            let qn = auth_extra
+                .get("auth_query_name")
+                .map(|s| s.as_str())
+                .unwrap_or("api_key");
+            format!("API key via query parameter ({qn})")
+        }
+        "basic" => "HTTP Basic authentication".to_string(),
+        "oauth2" => "OAuth2 client credentials".to_string(),
+        _ => "No authentication required".to_string(),
+    };
+
+    let mut setup_commands = Vec::new();
+    if !key_resolved {
+        setup_commands.push(format!("ati key set {key_name} <your-api-key>"));
+    }
+
+    match cli.output {
+        OutputFormat::Json => {
+            let mut result = serde_json::json!({
+                "status": status,
+                "name": name,
+                "provider_type": "openapi",
+                "base_url": base_url,
+                "tools_count": tools_count,
+                "auth": {
+                    "type": auth_type,
+                    "key_name": if auth_type != "none" { Some(key_name) } else { None },
+                    "description": auth_description,
+                    "resolved": key_resolved,
+                },
+                "setup_commands": setup_commands,
+                "cached_until": cached.expires_at(),
+            });
+            // Add auth extra fields
+            if let Some(hdr) = auth_extra.get("auth_header_name") {
+                result["auth"]["header_name"] = serde_json::json!(hdr);
+            }
+            if let Some(qn) = auth_extra.get("auth_query_name") {
+                result["auth"]["query_name"] = serde_json::json!(qn);
+            }
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        OutputFormat::Table | OutputFormat::Text => {
+            let ttl_label = format_ttl(ttl);
+            eprintln!(
+                "Loaded {} ({} tools, cached {}) — status: {}",
+                name, tools_count, ttl_label, status
+            );
+            if !key_resolved {
+                eprintln!("  Auth: {} (key: {})", auth_description, key_name);
+                eprintln!("  Run: ati key set {} <your-api-key>", key_name);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load an MCP provider: validate config, cache or save, then probe for tools.
+async fn load_mcp_provider(
+    cli: &Cli,
+    name: &str,
+    transport: Option<&str>,
+    url: Option<&str>,
+    command: Option<&str>,
+    args: &[String],
+    env: &[String],
+    auth: Option<&str>,
+    auth_key: Option<&str>,
+    auth_header: Option<&str>,
+    auth_query: Option<&str>,
+    save: bool,
+    ttl: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let transport = transport.unwrap_or("stdio");
+
+    // Validate transport-specific requirements
+    match transport {
+        "http" => {
+            if url.is_none() {
+                return Err("--url is required for HTTP transport".into());
+            }
+        }
+        "stdio" => {
+            if command.is_none() {
+                return Err("--command is required for stdio transport".into());
+            }
+        }
+        other => {
+            return Err(format!("Unknown transport: {other} (expected http or stdio)").into());
+        }
+    }
+
+    // If --save, delegate to existing add_mcp
+    if save {
+        let auth_str = auth.unwrap_or("none");
+        return add_mcp(
+            name,
+            transport,
+            url,
+            command,
+            args,
+            env,
+            auth_str,
+            auth_key,
+            None,
+            None,
+            None,
+        );
+    }
+
+    // Parse env vars and detect keyring refs
+    let mut mcp_env = HashMap::new();
+    let mut env_vars_status: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut missing_keys = Vec::new();
+
+    let ati_dir = common::ati_dir();
+    let keyring = load_keyring(&ati_dir, cli.verbose);
+
+    for entry in env {
+        let (k, v) = entry
+            .split_once('=')
+            .ok_or_else(|| format!("Invalid --env format: {entry} (expected KEY=VALUE)"))?;
+        mcp_env.insert(k.to_string(), v.to_string());
+
+        // Check for ${keyring_ref} patterns
+        if let Some(key_ref) = v.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+            let resolved = keyring.contains(key_ref);
+            env_vars_status.insert(
+                k.to_string(),
+                serde_json::json!({
+                    "keyring_ref": key_ref,
+                    "resolved": resolved,
+                }),
+            );
+            if !resolved {
+                missing_keys.push(key_ref.to_string());
+            }
+        }
+    }
+
+    // Auth key check
+    let auth_type = auth.unwrap_or("none");
+    let default_key_name = format!("{name}_api_key");
+    let key_name = auth_key.unwrap_or(&default_key_name);
+    let auth_key_resolved = auth_type == "none" || keyring.contains(key_name);
+    if !auth_key_resolved {
+        missing_keys.push(key_name.to_string());
+    }
+
+    // Write cache
+    let now = Utc::now();
+    let cached = CachedProvider {
+        name: name.to_string(),
+        provider_type: "mcp".to_string(),
+        base_url: String::new(),
+        auth_type: auth_type.to_string(),
+        auth_key_name: if auth_type != "none" {
+            Some(key_name.to_string())
+        } else {
+            None
+        },
+        auth_header_name: auth_header.map(|s| s.to_string()),
+        auth_query_name: auth_query.map(|s| s.to_string()),
+        spec_content: None,
+        mcp_transport: Some(transport.to_string()),
+        mcp_url: url.map(|s| s.to_string()),
+        mcp_command: command.map(|s| s.to_string()),
+        mcp_args: args.to_vec(),
+        mcp_env: mcp_env.clone(),
+        auth: Some(auth_type.to_string()),
+        created_at: now.to_rfc3339(),
+        ttl_seconds: ttl,
+    };
+
+    let cache_dir = ati_dir.join("cache").join("providers");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = cache_dir.join(format!("{name}.json"));
+    let cache_json = serde_json::to_string_pretty(&cached)?;
+    std::fs::write(&cache_path, &cache_json)?;
+
+    // Build status
+    let status = if missing_keys.is_empty() {
+        "ready"
+    } else if !env_vars_status.is_empty() && !auth_key_resolved {
+        "needs_keys"
+    } else if !auth_key_resolved {
+        "needs_auth"
+    } else {
+        "needs_keys"
+    };
+
+    let mut setup_commands: Vec<String> = Vec::new();
+    for key in &missing_keys {
+        setup_commands.push(format!("ati key set {key} <your-{key}>"));
+    }
+
+    // Optional MCP probe: connect → list_tools → disconnect
+    let probe_result = probe_mcp_provider(&cached, &keyring).await;
+
+    match cli.output {
+        OutputFormat::Json => {
+            let mut result = serde_json::json!({
+                "status": status,
+                "name": name,
+                "provider_type": "mcp",
+                "transport": transport,
+            });
+            if let Some(u) = url {
+                result["url"] = serde_json::json!(u);
+            }
+            if let Some(c) = command {
+                result["command"] = serde_json::json!(c);
+            }
+            if auth_type != "none" {
+                result["auth"] = serde_json::json!({
+                    "type": auth_type,
+                    "key_name": key_name,
+                    "resolved": auth_key_resolved,
+                });
+            }
+            if !env_vars_status.is_empty() {
+                result["env_vars"] = serde_json::json!(env_vars_status);
+            }
+            result["setup_commands"] = serde_json::json!(setup_commands);
+            result["cached_until"] = serde_json::json!(cached.expires_at());
+            match &probe_result {
+                Ok(tool_names) => {
+                    result["tools_count"] = serde_json::json!(tool_names.len());
+                    result["tools"] = serde_json::json!(tool_names);
+                    result["probe"] = serde_json::json!("ok");
+                }
+                Err(e) => {
+                    result["probe"] = serde_json::json!("failed");
+                    result["probe_error"] = serde_json::json!(e.to_string());
+                }
+            }
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        OutputFormat::Table | OutputFormat::Text => {
+            let ttl_label = format_ttl(ttl);
+            match &probe_result {
+                Ok(tool_names) => {
+                    eprintln!(
+                        "Loaded {} (mcp/{}, {} tools, cached {}) — status: {}",
+                        name, transport, tool_names.len(), ttl_label, status
+                    );
+                    if !tool_names.is_empty() {
+                        eprintln!("  Tools: {}", tool_names.join(", "));
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Loaded {} (mcp/{}, probe failed: {}, cached {}) — status: {}",
+                        name, transport, e, ttl_label, status
+                    );
+                }
+            }
+            for cmd in &setup_commands {
+                eprintln!("  Run: {cmd}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ─── MCP probe ───────────────────────────────────────────────────────────────
+
+/// Attempt to connect to an MCP server and list its tools.
+/// Returns the list of tool names on success, or an error message.
+async fn probe_mcp_provider(
+    cached: &CachedProvider,
+    keyring: &Keyring,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let provider = cached.to_provider();
+    let client = McpClient::connect(&provider, keyring).await?;
+    let tools = client.list_tools().await?;
+    let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+    client.disconnect().await;
+    Ok(tool_names)
+}
+
+// ─── unload ──────────────────────────────────────────────────────────────────
+
+fn unload_provider(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let ati_dir = common::ati_dir();
+    let cache_path = ati_dir.join("cache").join("providers").join(format!("{name}.json"));
+
+    if !cache_path.exists() {
+        return Err(format!("No cached provider '{name}' found.").into());
+    }
+
+    std::fs::remove_file(&cache_path)?;
+    eprintln!("Unloaded cached provider '{name}'");
+    Ok(())
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+/// Format a TTL in seconds to a human-readable string.
+fn format_ttl(seconds: u64) -> String {
+    if seconds >= 3600 {
+        let hours = seconds / 3600;
+        if hours == 1 {
+            "1h".to_string()
+        } else {
+            format!("{hours}h")
+        }
+    } else {
+        let mins = seconds / 60;
+        if mins == 0 {
+            format!("{seconds}s")
+        } else {
+            format!("{mins}m")
+        }
+    }
+}
+
+/// Format remaining seconds to a human-readable string (e.g., "58m remaining").
+fn format_remaining(seconds: u64) -> String {
+    if seconds >= 3600 {
+        let hours = seconds / 3600;
+        let mins = (seconds % 3600) / 60;
+        if mins > 0 {
+            format!("{hours}h{mins}m remaining")
+        } else {
+            format!("{hours}h remaining")
+        }
+    } else {
+        let mins = seconds / 60;
+        if mins == 0 {
+            format!("{seconds}s remaining")
+        } else {
+            format!("{mins}m remaining")
+        }
+    }
+}
 
 fn read_spec_content(spec_ref: &str) -> Result<String, Box<dyn std::error::Error>> {
     if spec_ref.starts_with("http://") || spec_ref.starts_with("https://") {

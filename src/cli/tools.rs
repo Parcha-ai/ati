@@ -19,7 +19,7 @@ fn load_scopes_from_env() -> ScopeConfig {
 }
 
 /// Discover and register tools from all MCP providers.
-async fn discover_mcp_tools(registry: &mut ManifestRegistry, keyring: &Keyring, verbose: bool) {
+pub(crate) async fn discover_mcp_tools(registry: &mut ManifestRegistry, keyring: &Keyring, verbose: bool) {
     let mcp_providers: Vec<_> = registry
         .list_mcp_providers()
         .into_iter()
