@@ -45,6 +45,7 @@ fn make_cli_provider(
         cli_env,
         cli_timeout_secs: timeout,
         category: None,
+        skills: Vec::new(),
     }
 }
 

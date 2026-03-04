@@ -119,6 +119,7 @@ pub async fn execute(
             )
             .await
         }
+        ProviderCommands::InstallSkills { name } => install_provider_skills(cli, name),
         ProviderCommands::Unload { name } => unload_provider(name),
     }
 }
@@ -846,6 +847,18 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
 
     let auth_str = format!("{:?}", provider.auth_type).to_lowercase();
 
+    // Check declared skills vs installed
+    let skills_declared = provider.skills.len();
+    let mut skills_installed = 0;
+    if skills_declared > 0 {
+        let skills_dir = ati_dir.join("skills");
+        if let Ok(skill_registry) = crate::core::skill::SkillRegistry::load(&skills_dir) {
+            // Check how many skills for this provider are installed
+            let provider_skills = skill_registry.skills_for_provider(&provider.name);
+            skills_installed = provider_skills.len();
+        }
+    }
+
     match cli.output {
         OutputFormat::Json => {
             let mut info = serde_json::json!({
@@ -861,6 +874,11 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
                 info["cli_command"] = serde_json::json!(provider.cli_command);
                 info["cli_default_args"] = serde_json::json!(provider.cli_default_args);
                 info["cli_timeout_secs"] = serde_json::json!(provider.cli_timeout_secs);
+            }
+            if skills_declared > 0 {
+                info["skills_declared"] = serde_json::json!(skills_declared);
+                info["skills_installed"] = serde_json::json!(skills_installed);
+                info["skills"] = serde_json::json!(provider.skills);
             }
             println!("{}", serde_json::to_string_pretty(&info)?);
         }
@@ -893,9 +911,65 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
                     println!("Timeout:     {timeout}s");
                 }
             }
+            if skills_declared > 0 {
+                let not_installed = skills_declared.saturating_sub(skills_installed);
+                println!(
+                    "Skills:      {} declared ({} installed, {} not installed)",
+                    skills_declared, skills_installed, not_installed
+                );
+                println!(
+                    "  Install:   ati provider install-skills {}",
+                    provider.name
+                );
+            }
         }
     }
 
+    Ok(())
+}
+
+// ─── install-skills ──────────────────────────────────────────────────────────
+
+fn install_provider_skills(_cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let ati_dir = common::ati_dir();
+    let manifests_dir = ati_dir.join("manifests");
+    let registry = ManifestRegistry::load(&manifests_dir)?;
+
+    let provider = registry
+        .list_providers()
+        .into_iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| format!("Provider '{name}' not found."))?;
+
+    if provider.skills.is_empty() {
+        println!("Provider '{name}' has no declared skills.");
+        return Ok(());
+    }
+
+    let skills_dir = ati_dir.join("skills");
+    std::fs::create_dir_all(&skills_dir)?;
+
+    let mut installed = 0;
+    let mut failed = 0;
+
+    for skill_url in &provider.skills {
+        println!("Installing skill from: {skill_url}");
+        match crate::cli::skills::install_skill_from_url(skill_url, &skills_dir) {
+            Ok(skill_name) => {
+                println!("  Installed '{skill_name}'");
+                installed += 1;
+            }
+            Err(e) => {
+                eprintln!("  Failed: {e}");
+                failed += 1;
+            }
+        }
+    }
+
+    println!(
+        "\nDone: {installed} installed, {failed} failed (of {} declared).",
+        provider.skills.len()
+    );
     Ok(())
 }
 

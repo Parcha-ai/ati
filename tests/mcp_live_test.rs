@@ -628,6 +628,7 @@ fn test_ati_mcp_client_against_linear() {
         cli_env: HashMap::new(),
         cli_timeout_secs: None,
         category: None,
+        skills: Vec::new(),
     };
 
     // Empty keyring — the McpClient builds auth from keyring, so it won't have the key.
@@ -729,6 +730,7 @@ fn test_ati_mcp_client_against_github_stdio() {
         cli_env: HashMap::new(),
         cli_timeout_secs: None,
         category: None,
+        skills: Vec::new(),
     };
 
     // For stdio, auth is via env vars (not keyring), so empty keyring is fine
@@ -1104,6 +1106,7 @@ fn test_deepwiki_mcp_http_full_flow() {
         cli_env: HashMap::new(),
         cli_timeout_secs: None,
         category: Some("documentation".to_string()),
+        skills: Vec::new(),
     };
 
     let keyring = ati::core::keyring::Keyring::empty();

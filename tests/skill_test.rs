@@ -746,3 +746,286 @@ fn test_build_skill_context_empty() {
     let ctx = skill::build_skill_context(&[]);
     assert!(ctx.is_empty());
 }
+
+// --- Bundled Provider Tests ---
+
+#[test]
+fn test_install_skill_with_bundled_provider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ati_dir = tmp.path();
+    let skills_dir = ati_dir.join("skills");
+    let manifests_dir = ati_dir.join("manifests");
+    fs::create_dir_all(&skills_dir).unwrap();
+
+    // Create a source skill directory with provider.toml
+    let source = tmp.path().join("source-skill");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("skill.toml"),
+        r#"[skill]
+name = "fal-generate"
+version = "1.0.0"
+description = "Generate images with fal.ai"
+tools = ["fal__text_to_image"]
+providers = ["fal"]
+"#,
+    )
+    .unwrap();
+    fs::write(source.join("SKILL.md"), "# Fal Generate\nUse fal.ai.").unwrap();
+    fs::write(
+        source.join("provider.toml"),
+        r#"[provider]
+name = "fal"
+base_url = "https://queue.fal.run"
+auth_type = "bearer"
+auth_key_name = "fal_api_key"
+
+[[tools]]
+name = "text_to_image"
+endpoint = "/fal-ai/flux/dev"
+method = "POST"
+"#,
+    )
+    .unwrap();
+
+    // Use the CLI binary to install the skill
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
+        .args(["skill", "install", source.to_str().unwrap()])
+        .env("ATI_DIR", ati_dir.to_str().unwrap())
+        .output()
+        .expect("failed to run ati skill install");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "install failed: {}{}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify skill was installed
+    assert!(skills_dir.join("source-skill").join("skill.toml").exists());
+    assert!(skills_dir.join("source-skill").join("SKILL.md").exists());
+
+    // Verify provider manifest was installed
+    let manifest_path = manifests_dir.join("fal.toml");
+    assert!(
+        manifest_path.exists(),
+        "Bundled provider manifest should be installed at {}",
+        manifest_path.display()
+    );
+
+    // Verify the content was copied correctly
+    let manifest_content = fs::read_to_string(&manifest_path).unwrap();
+    assert!(manifest_content.contains("name = \"fal\""));
+    assert!(manifest_content.contains("base_url = \"https://queue.fal.run\""));
+
+    // Verify key hint was printed
+    assert!(stdout.contains("ati key set fal_api_key"));
+}
+
+#[test]
+fn test_install_skill_bundled_provider_skip_existing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ati_dir = tmp.path();
+    let skills_dir = ati_dir.join("skills");
+    let manifests_dir = ati_dir.join("manifests");
+    fs::create_dir_all(&skills_dir).unwrap();
+    fs::create_dir_all(&manifests_dir).unwrap();
+
+    // Pre-create existing provider manifest
+    fs::write(
+        manifests_dir.join("fal.toml"),
+        r#"[provider]
+name = "fal"
+base_url = "https://existing.example.com"
+"#,
+    )
+    .unwrap();
+
+    // Create a source skill with bundled provider
+    let source = tmp.path().join("fal-skill");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("skill.toml"),
+        r#"[skill]
+name = "fal-skill"
+description = "Fal skill"
+"#,
+    )
+    .unwrap();
+    fs::write(source.join("SKILL.md"), "# Fal").unwrap();
+    fs::write(
+        source.join("provider.toml"),
+        r#"[provider]
+name = "fal"
+base_url = "https://queue.fal.run"
+auth_type = "bearer"
+auth_key_name = "fal_api_key"
+"#,
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
+        .args(["skill", "install", source.to_str().unwrap()])
+        .env("ATI_DIR", ati_dir.to_str().unwrap())
+        .output()
+        .expect("failed to run ati skill install");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+
+    // Verify the existing manifest was NOT overwritten
+    let content = fs::read_to_string(manifests_dir.join("fal.toml")).unwrap();
+    assert!(
+        content.contains("https://existing.example.com"),
+        "Existing provider manifest should not be overwritten"
+    );
+    assert!(stdout.contains("already installed"));
+}
+
+#[test]
+fn test_install_skill_without_bundled_provider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ati_dir = tmp.path();
+    let skills_dir = ati_dir.join("skills");
+    let manifests_dir = ati_dir.join("manifests");
+    fs::create_dir_all(&skills_dir).unwrap();
+
+    // Create a source skill WITHOUT provider.toml
+    let source = tmp.path().join("plain-skill");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("skill.toml"),
+        r#"[skill]
+name = "plain-skill"
+description = "No provider"
+"#,
+    )
+    .unwrap();
+    fs::write(source.join("SKILL.md"), "# Plain").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
+        .args(["skill", "install", source.to_str().unwrap()])
+        .env("ATI_DIR", ati_dir.to_str().unwrap())
+        .output()
+        .expect("failed to run ati skill install");
+
+    assert!(output.status.success());
+
+    // Manifests dir should not exist (nothing to install)
+    assert!(
+        !manifests_dir.join("plain-skill.toml").exists(),
+        "No manifest should be created for skills without provider.toml"
+    );
+}
+
+// --- Read Skill Tests ---
+
+#[test]
+fn test_read_content_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skills_dir = tmp.path();
+
+    create_skill_dir(
+        skills_dir,
+        "my-methodology",
+        r#"[skill]
+name = "my-methodology"
+description = "A methodology skill"
+tools = ["tool_x"]
+"#,
+        "# My Methodology\n\nStep 1: Do the thing.\nStep 2: Verify it worked.\n",
+    );
+
+    let registry = SkillRegistry::load(skills_dir).unwrap();
+    let content = registry.read_content("my-methodology").unwrap();
+    assert!(content.contains("Step 1: Do the thing."));
+    assert!(content.contains("Step 2: Verify it worked."));
+}
+
+#[test]
+fn test_read_content_with_references() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skills_dir = tmp.path();
+
+    create_skill_dir(
+        skills_dir,
+        "ref-skill",
+        r#"[skill]
+name = "ref-skill"
+description = "Skill with references"
+"#,
+        "# Ref Skill\n\nMain content.",
+    );
+
+    // Add reference files
+    let refs_dir = skills_dir.join("ref-skill").join("references");
+    fs::create_dir_all(&refs_dir).unwrap();
+    fs::write(refs_dir.join("guide.md"), "Reference guide content").unwrap();
+    fs::write(refs_dir.join("examples.md"), "Example content").unwrap();
+
+    let registry = SkillRegistry::load(skills_dir).unwrap();
+
+    let refs = registry.list_references("ref-skill").unwrap();
+    assert_eq!(refs.len(), 2);
+    assert!(refs.contains(&"examples.md".to_string()));
+    assert!(refs.contains(&"guide.md".to_string()));
+
+    let guide = registry.read_reference("ref-skill", "guide.md").unwrap();
+    assert_eq!(guide, "Reference guide content");
+}
+
+#[test]
+fn test_skills_for_tool_multiple() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skills_dir = tmp.path();
+
+    create_skill_dir(
+        skills_dir,
+        "skill-a",
+        r#"[skill]
+name = "skill-a"
+description = "First skill for tool_x"
+tools = ["tool_x", "tool_y"]
+"#,
+        "# Skill A\nContent for A.",
+    );
+
+    create_skill_dir(
+        skills_dir,
+        "skill-b",
+        r#"[skill]
+name = "skill-b"
+description = "Second skill for tool_x"
+tools = ["tool_x"]
+"#,
+        "# Skill B\nContent for B.",
+    );
+
+    create_skill_dir(
+        skills_dir,
+        "skill-c",
+        r#"[skill]
+name = "skill-c"
+description = "Unrelated skill"
+tools = ["tool_z"]
+"#,
+        "# Skill C\nContent for C.",
+    );
+
+    let registry = SkillRegistry::load(skills_dir).unwrap();
+
+    // tool_x should match skill-a and skill-b
+    let tool_x_skills = registry.skills_for_tool("tool_x");
+    assert_eq!(tool_x_skills.len(), 2);
+    let names: Vec<&str> = tool_x_skills.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"skill-a"));
+    assert!(names.contains(&"skill-b"));
+
+    // Read content for each — verify they're distinct
+    let content_a = registry.read_content("skill-a").unwrap();
+    assert!(content_a.contains("Content for A"));
+    let content_b = registry.read_content("skill-b").unwrap();
+    assert!(content_b.contains("Content for B"));
+}

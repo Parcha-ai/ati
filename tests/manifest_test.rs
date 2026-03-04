@@ -367,6 +367,8 @@ struct Provider {
     auth_query_name: Option<String>,
     #[serde(default)]
     internal: bool,
+    #[serde(default)]
+    skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -470,4 +472,57 @@ impl ManifestRegistry {
             (&m.provider, &m.tools[*ti])
         })
     }
+}
+
+#[test]
+fn test_parse_provider_skills_field() {
+    let manifest_str = r#"
+[provider]
+name = "finnhub"
+description = "Finnhub market data"
+base_url = "https://finnhub.io/api/v1"
+auth_type = "header"
+auth_key_name = "finnhub_api_key"
+auth_header_name = "X-Finnhub-Token"
+skills = [
+    "https://github.com/parcha-ai/ati-skills#finnhub-analysis",
+    "https://github.com/example/skills#stock-research",
+]
+
+[[tools]]
+name = "quote"
+description = "Get stock quote"
+endpoint = "/quote"
+method = "GET"
+"#;
+
+    let manifest: Manifest = toml::from_str(manifest_str).unwrap();
+    assert_eq!(manifest.provider.skills.len(), 2);
+    assert_eq!(
+        manifest.provider.skills[0],
+        "https://github.com/parcha-ai/ati-skills#finnhub-analysis"
+    );
+    assert_eq!(
+        manifest.provider.skills[1],
+        "https://github.com/example/skills#stock-research"
+    );
+}
+
+#[test]
+fn test_parse_provider_skills_default_empty() {
+    let manifest_str = r#"
+[provider]
+name = "simple"
+description = "Simple provider"
+base_url = "https://api.example.com"
+auth_type = "none"
+
+[[tools]]
+name = "test"
+description = "Test"
+endpoint = "/test"
+"#;
+
+    let manifest: Manifest = toml::from_str(manifest_str).unwrap();
+    assert!(manifest.provider.skills.is_empty());
 }

@@ -134,6 +134,11 @@ pub struct Provider {
     /// Provider category for discovery (e.g., "finance", "search", "social")
     #[serde(default)]
     pub category: Option<String>,
+
+    /// Associated skill URLs (git repos) that teach agents how to use this provider's tools.
+    /// Each entry is a git URL, optionally with a #fragment for subdirectory.
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 fn default_handler() -> String {
@@ -372,6 +377,7 @@ impl CachedProvider {
             cli_env: self.cli_env.clone(),
             cli_timeout_secs: self.cli_timeout_secs,
             category: None,
+            skills: Vec::new(),
         }
     }
 }
