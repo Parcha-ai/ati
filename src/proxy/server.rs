@@ -1,14 +1,16 @@
 /// ATI proxy server — holds API keys and executes tool calls on behalf of sandbox agents.
 ///
-/// Usage: `ati proxy --port 8080 [--ati-dir ~/.ati]`
+/// Authentication: ES256-signed JWT (or HS256 fallback). The JWT carries identity,
+/// scopes, and expiry. No more static tokens or unsigned scope lists.
 ///
-/// The proxy loads manifests and keyring from its own ATI directory, then listens for
-/// incoming /call and /help requests from sandbox ATI clients.
+/// Usage: `ati proxy --port 8080 [--ati-dir ~/.ati]`
 
 use axum::{
+    body::Body,
     extract::State,
-    http::StatusCode,
-    response::IntoResponse,
+    http::{Request as HttpRequest, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -20,10 +22,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::core::http;
+use crate::core::jwt::{self, JwtConfig, TokenClaims};
 use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::mcp_client;
 use crate::core::response;
+use crate::core::scope::ScopeConfig;
 use crate::core::skill::{self, SkillRegistry};
 use crate::core::xai;
 
@@ -33,9 +37,13 @@ pub struct ProxyState {
     pub skill_registry: SkillRegistry,
     pub keyring: Keyring,
     pub verbose: bool,
+    /// JWT validation config (None = auth disabled / dev mode).
+    pub jwt_config: Option<JwtConfig>,
+    /// Pre-computed JWKS JSON for the /.well-known/jwks.json endpoint.
+    pub jwks_json: Option<Value>,
 }
 
-// --- Request/Response types (match client.rs) ---
+// --- Request/Response types ---
 
 #[derive(Debug, Deserialize)]
 pub struct CallRequest {
@@ -69,6 +77,7 @@ pub struct HealthResponse {
     pub tools: usize,
     pub providers: usize,
     pub skills: usize,
+    pub auth: String,
 }
 
 // --- Skill endpoint types ---
@@ -102,31 +111,87 @@ pub struct SkillResolveRequest {
 
 async fn handle_call(
     State(state): State<Arc<ProxyState>>,
-    Json(req): Json<CallRequest>,
+    req: HttpRequest<Body>,
 ) -> impl IntoResponse {
+    // Extract JWT claims from request extensions (set by auth middleware)
+    let claims = req.extensions().get::<TokenClaims>().cloned();
+
+    // Parse request body
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(CallResponse {
+                    result: Value::Null,
+                    error: Some(format!("Failed to read request body: {e}")),
+                }),
+            );
+        }
+    };
+
+    let call_req: CallRequest = match serde_json::from_slice(&body_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(CallResponse {
+                    result: Value::Null,
+                    error: Some(format!("Invalid request: {e}")),
+                }),
+            );
+        }
+    };
+
     if state.verbose {
-        eprintln!("[proxy] /call tool={} args={:?}", req.tool_name, req.args);
+        eprintln!("[proxy] /call tool={} args={:?}", call_req.tool_name, call_req.args);
     }
 
     // Look up tool in registry
-    let (provider, tool) = match state.registry.get_tool(&req.tool_name) {
+    let (provider, tool) = match state.registry.get_tool(&call_req.tool_name) {
         Some(pt) => pt,
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(CallResponse {
                     result: Value::Null,
-                    error: Some(format!("Unknown tool: '{}'", req.tool_name)),
+                    error: Some(format!("Unknown tool: '{}'", call_req.tool_name)),
                 }),
             );
         }
     };
 
+    // Scope enforcement from JWT claims
+    if let Some(tool_scope) = &tool.scope {
+        let scopes = match &claims {
+            Some(c) => ScopeConfig::from_jwt(c),
+            None if state.jwt_config.is_none() => ScopeConfig::unrestricted(), // Dev mode
+            None => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(CallResponse {
+                        result: Value::Null,
+                        error: Some("Authentication required — no JWT provided".into()),
+                    }),
+                );
+            }
+        };
+
+        if let Err(e) = scopes.check_access(&call_req.tool_name, tool_scope) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(CallResponse {
+                    result: Value::Null,
+                    error: Some(format!("Access denied: {e}")),
+                }),
+            );
+        }
+    }
+
     // Execute tool call — dispatch based on handler type
     match provider.handler.as_str() {
         "mcp" => {
-            // MCP tools: connect to MCP server, call tool, disconnect
-            match mcp_client::execute(provider, &req.tool_name, &req.args, &state.keyring).await {
+            match mcp_client::execute(provider, &call_req.tool_name, &call_req.args, &state.keyring).await {
                 Ok(result) => (
                     StatusCode::OK,
                     Json(CallResponse { result, error: None }),
@@ -141,10 +206,9 @@ async fn handle_call(
             }
         }
         _ => {
-            // HTTP/xai tools: existing dispatch
             let raw_response = match match provider.handler.as_str() {
-                "xai" => xai::execute_xai_tool(provider, tool, &req.args, &state.keyring).await,
-                _ => http::execute_tool(provider, tool, &req.args, &state.keyring).await,
+                "xai" => xai::execute_xai_tool(provider, tool, &call_req.args, &state.keyring).await,
+                _ => http::execute_tool(provider, tool, &call_req.args, &state.keyring).await,
             } {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -158,7 +222,6 @@ async fn handle_call(
                 }
             };
 
-            // Process response (JSONPath extraction if configured)
             let processed = match response::process_response(&raw_response, tool.response.as_ref()) {
                 Ok(p) => p,
                 Err(e) => {
@@ -188,7 +251,6 @@ async fn handle_help(
         eprintln!("[proxy] /help query={}", req.query);
     }
 
-    // Look up the _llm provider
     let (llm_provider, llm_tool) = match state.registry.get_tool("_chat_completion") {
         Some(pt) => pt,
         None => {
@@ -202,7 +264,6 @@ async fn handle_help(
         }
     };
 
-    // Get LLM API key
     let api_key = match llm_provider
         .auth_key_name
         .as_deref()
@@ -220,12 +281,10 @@ async fn handle_help(
         }
     };
 
-    // Build tool context for the system prompt
     let all_tools = state.registry.list_public_tools();
     let tools_context = build_tool_context(&all_tools);
 
-    // Build skill context
-    let scopes = crate::core::scope::ScopeConfig::unrestricted();
+    let scopes = ScopeConfig::unrestricted();
     let resolved_skills =
         skill::resolve_skills(&state.skill_registry, &state.registry, &scopes);
     let skills_section = if resolved_skills.is_empty() {
@@ -241,7 +300,6 @@ async fn handle_help(
         .replace("{tools}", &tools_context)
         .replace("{skills_section}", &skills_section);
 
-    // Build chat completion request
     let request_body = serde_json::json!({
         "model": "zai-glm-4.7",
         "messages": [
@@ -319,26 +377,35 @@ async fn handle_help(
 }
 
 async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
+    let auth = if state.jwt_config.is_some() {
+        "jwt"
+    } else {
+        "disabled"
+    };
+
     Json(HealthResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         tools: state.registry.list_public_tools().len(),
         providers: state.registry.list_providers().len(),
         skills: state.skill_registry.skill_count(),
+        auth: auth.into(),
     })
+}
+
+/// GET /.well-known/jwks.json — serves the public key for JWT validation.
+async fn handle_jwks(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
+    match &state.jwks_json {
+        Some(jwks) => (StatusCode::OK, Json(jwks.clone())),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "JWKS not configured"})),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // POST /mcp — MCP JSON-RPC proxy endpoint
-//
-// The sandbox ATI client sends standard MCP JSON-RPC messages here.
-// The proxy routes them to the correct real MCP backend server, injecting
-// auth credentials. The sandbox never touches secrets.
-//
-// Supported methods:
-//   - initialize     → returns aggregated capabilities from all MCP backends
-//   - tools/list     → returns tools from all MCP providers (cached)
-//   - tools/call     → routes to the correct MCP backend by tool name
 // ---------------------------------------------------------------------------
 
 async fn handle_mcp(
@@ -354,7 +421,6 @@ async fn handle_mcp(
 
     match method {
         "initialize" => {
-            // Return proxy's own capabilities (we support tools)
             let result = serde_json::json!({
                 "protocolVersion": "2025-03-26",
                 "capabilities": {
@@ -369,12 +435,10 @@ async fn handle_mcp(
         }
 
         "notifications/initialized" => {
-            // Client acknowledging init — nothing to do
             (StatusCode::ACCEPTED, Json(Value::Null))
         }
 
         "tools/list" => {
-            // Aggregate tools from all MCP providers in the registry
             let all_tools = state.registry.list_public_tools();
             let mcp_tools: Vec<Value> = all_tools
                 .iter()
@@ -408,7 +472,6 @@ async fn handle_mcp(
                 return jsonrpc_error(id, -32602, "Missing tool name in params.name");
             }
 
-            // Look up tool in registry
             let (provider, _tool) = match state.registry.get_tool(tool_name) {
                 Some(pt) => pt,
                 None => {
@@ -424,11 +487,9 @@ async fn handle_mcp(
                 eprintln!("[proxy] /mcp tools/call name={tool_name} provider={}", provider.name);
             }
 
-            // Dispatch based on handler type
             let result = if provider.is_mcp() {
                 mcp_client::execute(provider, tool_name, &arguments, &state.keyring).await
             } else {
-                // For non-MCP tools, use regular HTTP dispatch and wrap result
                 match match provider.handler.as_str() {
                     "xai" => xai::execute_xai_tool(provider, _tool, &arguments, &state.keyring).await,
                     _ => http::execute_tool(provider, _tool, &arguments, &state.keyring).await,
@@ -440,7 +501,6 @@ async fn handle_mcp(
 
             match result {
                 Ok(value) => {
-                    // Wrap in MCP tools/call response format
                     let text = match &value {
                         Value::String(s) => s.clone(),
                         other => serde_json::to_string_pretty(other).unwrap_or_default(),
@@ -462,13 +522,11 @@ async fn handle_mcp(
         }
 
         _ => {
-            // Unknown method
             jsonrpc_error(id, -32601, &format!("Method not found: '{method}'"))
         }
     }
 }
 
-/// Build a JSON-RPC success response.
 fn jsonrpc_success(id: Option<Value>, result: Value) -> (StatusCode, Json<Value>) {
     (
         StatusCode::OK,
@@ -480,7 +538,6 @@ fn jsonrpc_success(id: Option<Value>, result: Value) -> (StatusCode, Json<Value>
     )
 }
 
-/// Build a JSON-RPC error response.
 fn jsonrpc_error(id: Option<Value>, code: i64, message: &str) -> (StatusCode, Json<Value>) {
     (
         StatusCode::OK,
@@ -496,7 +553,7 @@ fn jsonrpc_error(id: Option<Value>, code: i64, message: &str) -> (StatusCode, Js
 }
 
 // ---------------------------------------------------------------------------
-// GET /skills — list available skills (with optional filters)
+// Skill endpoints
 // ---------------------------------------------------------------------------
 
 async fn handle_skills_list(
@@ -540,10 +597,6 @@ async fn handle_skills_list(
     (StatusCode::OK, Json(Value::Array(json)))
 }
 
-// ---------------------------------------------------------------------------
-// GET /skills/:name — get full skill content + metadata
-// ---------------------------------------------------------------------------
-
 async fn handle_skill_detail(
     State(state): State<Arc<ProxyState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -564,7 +617,6 @@ async fn handle_skill_detail(
     };
 
     if query.meta.unwrap_or(false) {
-        // Return metadata only
         return (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -583,7 +635,6 @@ async fn handle_skill_detail(
         );
     }
 
-    // Return full content
     let content = match state.skill_registry.read_content(&name) {
         Ok(c) => c,
         Err(e) => {
@@ -610,10 +661,6 @@ async fn handle_skill_detail(
     (StatusCode::OK, Json(response))
 }
 
-// ---------------------------------------------------------------------------
-// POST /skills/resolve — given scopes, return which skills auto-load
-// ---------------------------------------------------------------------------
-
 async fn handle_skills_resolve(
     State(state): State<Arc<ProxyState>>,
     Json(req): Json<SkillResolveRequest>,
@@ -622,12 +669,10 @@ async fn handle_skills_resolve(
         eprintln!("[proxy] POST /skills/resolve scopes={:?}", req.scopes);
     }
 
-    let scopes = crate::core::scope::ScopeConfig {
+    let scopes = ScopeConfig {
         scopes: req.scopes,
-        agent_id: String::new(),
-        job_id: String::new(),
+        sub: String::new(),
         expires_at: 0,
-        hmac: None,
     };
 
     let resolved = skill::resolve_skills(&state.skill_registry, &state.registry, &scopes);
@@ -649,7 +694,61 @@ async fn handle_skills_resolve(
     (StatusCode::OK, Json(Value::Array(json)))
 }
 
-// --- Router builder (also used by integration tests) ---
+// --- Auth middleware ---
+
+/// JWT authentication middleware.
+///
+/// - /health and /.well-known/jwks.json → skip auth
+/// - JWT configured → validate Bearer token, attach claims to request extensions
+/// - No JWT configured → allow all (dev mode)
+async fn auth_middleware(
+    State(state): State<Arc<ProxyState>>,
+    mut req: HttpRequest<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let path = req.uri().path();
+
+    // Skip auth for public endpoints
+    if path == "/health" || path == "/.well-known/jwks.json" {
+        return Ok(next.run(req).await);
+    }
+
+    // If no JWT configured, allow all (dev mode)
+    let jwt_config = match &state.jwt_config {
+        Some(c) => c,
+        None => return Ok(next.run(req).await),
+    };
+
+    // Extract Authorization: Bearer <token>
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    let token = match auth_header {
+        Some(header) if header.starts_with("Bearer ") => &header[7..],
+        _ => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    // Validate JWT
+    match jwt::validate(token, jwt_config) {
+        Ok(claims) => {
+            if state.verbose {
+                eprintln!("[proxy] JWT validated: sub={} scopes={}", claims.sub, claims.scope);
+            }
+            req.extensions_mut().insert(claims);
+            Ok(next.run(req).await)
+        }
+        Err(e) => {
+            if state.verbose {
+                eprintln!("[proxy] JWT validation failed: {e}");
+            }
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
+// --- Router builder ---
 
 /// Build the axum Router from a pre-constructed ProxyState.
 pub fn build_router(state: Arc<ProxyState>) -> Router {
@@ -661,6 +760,8 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/skills/resolve", post(handle_skills_resolve))
         .route("/skills/{name}", get(handle_skill_detail))
         .route("/health", get(handle_health))
+        .route("/.well-known/jwks.json", get(handle_jwks))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state)
 }
 
@@ -669,6 +770,7 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
 /// Start the proxy server.
 pub async fn run(
     port: u16,
+    bind_addr: Option<String>,
     ati_dir: PathBuf,
     verbose: bool,
     env_keys: bool,
@@ -680,31 +782,57 @@ pub async fn run(
     let tool_count = registry.list_public_tools().len();
     let provider_count = registry.list_providers().len();
 
-    // Load keyring — either from env vars or encrypted file
+    // Load keyring
     let keyring_source;
     let keyring = if env_keys {
+        // --env-keys: scan ATI_KEY_* environment variables
         let kr = Keyring::from_env();
         let key_names = kr.key_names();
-        eprintln!("  Loaded {} API keys from environment:", key_names.len());
+        eprintln!("  Loaded {} API keys from ATI_KEY_* env vars:", key_names.len());
         for name in &key_names {
             eprintln!("    - {name}");
         }
-        keyring_source = "env-vars";
+        keyring_source = "env-vars (ATI_KEY_*)";
         kr
     } else {
+        // Cascade: keyring.enc (sealed) → keyring.enc (persistent) → credentials → empty
         let keyring_path = ati_dir.join("keyring.enc");
         if keyring_path.exists() {
-            keyring_source = "keyring.enc";
-            Keyring::load(&keyring_path)?
+            if let Ok(kr) = Keyring::load(&keyring_path) {
+                keyring_source = "keyring.enc (sealed key)";
+                kr
+            } else if let Ok(kr) = Keyring::load_local(&keyring_path, &ati_dir) {
+                keyring_source = "keyring.enc (persistent key)";
+                kr
+            } else {
+                eprintln!("Warning: keyring.enc exists but could not be decrypted");
+                keyring_source = "empty (decryption failed)";
+                Keyring::empty()
+            }
         } else {
-            eprintln!("Warning: No keyring.enc found at {} — running without API keys", keyring_path.display());
-            eprintln!("Tools requiring authentication will fail.");
-            keyring_source = "empty (no auth)";
-            Keyring::empty()
+            let creds_path = ati_dir.join("credentials");
+            if creds_path.exists() {
+                match Keyring::load_credentials(&creds_path) {
+                    Ok(kr) => {
+                        keyring_source = "credentials (plaintext)";
+                        kr
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load credentials: {e}");
+                        keyring_source = "empty (credentials error)";
+                        Keyring::empty()
+                    }
+                }
+            } else {
+                eprintln!("Warning: No keyring.enc or credentials found — running without API keys");
+                eprintln!("Tools requiring authentication will fail.");
+                keyring_source = "empty (no auth)";
+                Keyring::empty()
+            }
         }
     };
 
-    // Log MCP and OpenAPI providers before Arc-wrapping the state
+    // Log MCP and OpenAPI providers
     let mcp_providers: Vec<(String, String)> = registry
         .list_mcp_providers()
         .iter()
@@ -728,23 +856,53 @@ pub async fn run(
     });
     let skill_count = skill_registry.skill_count();
 
+    // Load JWT config from environment
+    let jwt_config = match jwt::config_from_env() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Warning: JWT config error: {e}");
+            None
+        }
+    };
+
+    let auth_status = if jwt_config.is_some() {
+        "JWT enabled"
+    } else {
+        "DISABLED (no JWT keys configured)"
+    };
+
+    // Build JWKS for the endpoint
+    let jwks_json = jwt_config.as_ref().and_then(|config| {
+        config.public_key_pem.as_ref().and_then(|pem| {
+            jwt::public_key_to_jwks(pem, config.algorithm, "ati-proxy-1").ok()
+        })
+    });
+
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
         keyring,
         verbose,
+        jwt_config,
+        jwks_json,
     });
 
     let app = build_router(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr: SocketAddr = if let Some(ref bind) = bind_addr {
+        format!("{bind}:{port}").parse()?
+    } else {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    };
+
     eprintln!("ATI proxy server v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("  Listening on http://{addr}");
+    eprintln!("  Auth: {auth_status}");
     eprintln!("  ATI dir: {}", ati_dir.display());
     eprintln!("  Tools: {tool_count}, Providers: {provider_count} ({mcp_count} MCP, {openapi_count} OpenAPI)");
     eprintln!("  Skills: {skill_count}");
     eprintln!("  Keyring: {keyring_source}");
-    eprintln!("  Endpoints: /call, /help, /mcp, /skills, /skills/:name, /skills/resolve, /health");
+    eprintln!("  Endpoints: /call, /help, /mcp, /skills, /skills/:name, /skills/resolve, /health, /.well-known/jwks.json");
     for (name, transport) in &mcp_providers {
         eprintln!("  MCP: {name} ({transport})");
     }

@@ -68,11 +68,32 @@ pub enum Commands {
     #[command(subcommand)]
     Auth(AuthCommands),
 
+    /// JWT token management — keygen, issue, inspect, validate
+    #[command(subcommand)]
+    Token(TokenCommands),
+
+    /// Initialize ~/.ati/ directory structure
+    Init {
+        /// Configure for proxy mode (generates JWT secret)
+        #[arg(long)]
+        proxy: bool,
+        /// Use ES256 key pair instead of HS256 secret (requires --proxy)
+        #[arg(long)]
+        es256: bool,
+    },
+
+    /// Manage API keys in ~/.ati/credentials
+    #[command(subcommand)]
+    Keys(KeysCommands),
+
     /// Run ATI as a proxy server (holds keys, serves sandbox agents)
     Proxy {
         /// Port to listen on
         #[arg(long, default_value = "8090")]
         port: u16,
+        /// Bind address (default: 127.0.0.1; use 0.0.0.0 to listen on all interfaces)
+        #[arg(long)]
+        bind: Option<String>,
         /// ATI directory (manifests, keyring, scopes)
         #[arg(long)]
         ati_dir: Option<String>,
@@ -218,9 +239,77 @@ pub enum OpenapiCommands {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum KeysCommands {
+    /// Store an API key
+    Set {
+        /// Key name (e.g. myapi_api_key)
+        name: String,
+        /// Key value (e.g. sk-xxx)
+        value: String,
+    },
+    /// List stored API keys (values masked)
+    List,
+    /// Remove an API key
+    Remove {
+        /// Key name to remove
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum AuthCommands {
     /// Show current scopes, agent info, and expiry
     Status,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TokenCommands {
+    /// Generate an ES256 key pair (or HS256 secret)
+    Keygen {
+        /// Algorithm: ES256 (default) or HS256
+        #[arg(long, default_value = "ES256")]
+        algorithm: String,
+    },
+    /// Issue (sign) a JWT with given claims
+    Issue {
+        /// Agent identity (JWT sub claim)
+        #[arg(long)]
+        sub: String,
+        /// Space-delimited scopes (JWT scope claim)
+        #[arg(long)]
+        scope: String,
+        /// Time-to-live in seconds (default: 1800 = 30 minutes)
+        #[arg(long, default_value = "1800")]
+        ttl: u64,
+        /// Audience (default: ati-proxy)
+        #[arg(long)]
+        aud: Option<String>,
+        /// Issuer
+        #[arg(long)]
+        iss: Option<String>,
+        /// Path to ES256 private key PEM file
+        #[arg(long)]
+        key: Option<String>,
+        /// HS256 shared secret (hex string)
+        #[arg(long)]
+        secret: Option<String>,
+    },
+    /// Decode a JWT without verification (show claims)
+    Inspect {
+        /// JWT token string
+        token: String,
+    },
+    /// Fully verify a JWT (signature + expiry + audience + issuer)
+    Validate {
+        /// JWT token string
+        token: String,
+        /// Path to ES256 public key PEM file
+        #[arg(long)]
+        key: Option<String>,
+        /// HS256 shared secret (hex string)
+        #[arg(long)]
+        secret: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -234,21 +323,15 @@ async fn main() {
         Commands::Assist { query } => cli::help::execute(&cli, query).await,
         Commands::Openapi(subcmd) => cli::openapi::execute(subcmd).await,
         Commands::Auth(subcmd) => cli::auth::execute(&cli, subcmd).await,
-        Commands::Proxy { port, ati_dir, env_keys } => {
+        Commands::Token(subcmd) => cli::token::execute(subcmd).map_err(|e| e as Box<dyn std::error::Error>),
+        Commands::Init { proxy, es256 } => cli::init::execute(*proxy, *es256),
+        Commands::Keys(subcmd) => cli::keys::execute(subcmd),
+        Commands::Proxy { port, bind, ati_dir, env_keys } => {
             let dir = ati_dir
                 .as_deref()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::env::var("ATI_DIR")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| {
-                            std::env::var("HOME")
-                                .map(|h| std::path::PathBuf::from(h).join(".ati"))
-                                .unwrap_or_else(|_| std::path::PathBuf::from(".ati"))
-                        })
-                });
-            proxy::server::run(*port, dir, cli.verbose, *env_keys).await
+                .unwrap_or_else(cli::common::ati_dir);
+            proxy::server::run(*port, bind.clone(), dir, cli.verbose, *env_keys).await
         }
         Commands::Version => {
             println!("ati {}", env!("CARGO_PKG_VERSION"));

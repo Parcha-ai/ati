@@ -92,49 +92,56 @@ impl Keyring {
         self.keys.keys().map(|s| s.as_str()).collect()
     }
 
-    /// Create a keyring from environment variables.
+    /// Load from a plaintext credentials file (JSON object: {"key_name": "value", ...}).
     ///
-    /// Used in `--env-keys` mode where API keys are in env vars (e.g. host deployments)
-    /// instead of encrypted keyring files.
-    pub fn from_env() -> Self {
-        const KEY_TO_ENV: &[(&str, &str)] = &[
-            // Original providers
-            ("financial_datasets_api_key", "FINANCIAL_DATASETS_API_KEY"),
-            ("parallel_api_key", "PARALLEL_API_KEY"),
-            ("finnhub_api_key", "FINNHUB_API_KEY"),
-            ("fred_api_key", "FRED_API_KEY"),
-            ("serpapi_api_key", "SERPAPI_KEY"),
-            ("epo_api_key", "EPO_API_KEY"),
-            ("middesk_api_key", "MIDDESK_API_KEY"),
-            ("semantic_scholar_api_key", "SEMANTIC_SCHOLAR_API_KEY"),
-            ("courtlistener_api_key", "COURTLISTENER_TOKEN"),
-            ("cerebras_api_key", "CEREBRAS_API_KEY"),
-            // New providers (ATI migration)
-            ("pdl_api_key", "PDL_API_KEY"),
-            ("complyadvantage_api_key", "COMPLYADVANTAGE_API_KEY"),
-            ("xai_api_key", "X_AI_API_KEY"),
-            ("google_places_api_key", "GOOGLE_PLACES_API_KEY"),
-            ("opencorporates_api_key", "OPEN_CORPORATES_API_KEY"),
-            ("pipl_api_key", "PIPL_API_KEY"),
-            ("vesselfinder_api_key", "VESSELFINDER_API_KEY"),
-            ("datalastic_api_key", "DATALASTIC_API_KEY"),
-            ("aviationstack_api_key", "AVIATIONSTACK_API_KEY"),
-            ("aviation_edge_api_key", "AVIATION_EDGE_API_KEY"),
-            ("ebay_api_key", "EBAY_API_KEY"),
-            ("amadeus_api_key", "AMADEUS_API_KEY"),
-            ("amadeus_api_secret", "AMADEUS_API_SECRET"),
-            ("apify_api_key", "APIFY_API_KEY"),
-            ("sovos_api_key", "SOVOS_API_KEY"),
-            ("sovos_api_secret", "SOVOS_API_SECRET"),
-            ("rapidapi_key", "RAPIDAPI_KEY"),
-            ("attom_api_key", "ATTOM_API_KEY"),
-        ];
+    /// Used in local mode where `~/.ati/credentials` stores keys as plaintext JSON
+    /// with 0600 permissions (same approach as AWS CLI, gh, Docker, Stripe).
+    pub fn load_credentials(path: &Path) -> Result<Self, KeyringError> {
+        let data = std::fs::read(path)?;
+        let keys: HashMap<String, String> = serde_json::from_slice(&data)?;
+        Ok(Keyring {
+            keys,
+            _raw_json: Vec::new(),
+        })
+    }
 
+    /// Load keyring.enc using a persistent key stored alongside the ATI directory.
+    ///
+    /// Looks for `<ati_dir>/.keyring-key` (base64-encoded 32-byte key).
+    /// Unlike the sealed key in `/run/ati/.key`, this key is NOT deleted after reading —
+    /// it's for proxy servers with persistent storage.
+    pub fn load_local(keyring_path: &Path, ati_dir: &Path) -> Result<Self, KeyringError> {
+        let persistent_key_path = ati_dir.join(".keyring-key");
+
+        let contents = std::fs::read_to_string(&persistent_key_path)
+            .map_err(|e| KeyringError::Io(e))?;
+
+        let decoded = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            contents.trim(),
+        )
+        .map_err(|_| KeyringError::DecryptionFailed)?;
+
+        if decoded.len() != 32 {
+            return Err(KeyringError::DecryptionFailed);
+        }
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&decoded);
+
+        Self::load_with_key(keyring_path, &key)
+    }
+
+    /// Create a keyring from environment variables with `ATI_KEY_` prefix.
+    ///
+    /// Scans all env vars matching `ATI_KEY_*`, strips the prefix, lowercases the name.
+    /// Example: `ATI_KEY_FINNHUB_API_KEY=abc123` → key name `finnhub_api_key`.
+    pub fn from_env() -> Self {
         let mut keys = HashMap::new();
-        for (key_name, env_var) in KEY_TO_ENV {
-            if let Ok(value) = std::env::var(env_var) {
+        for (name, value) in std::env::vars() {
+            if let Some(key_name) = name.strip_prefix("ATI_KEY_") {
                 if !value.is_empty() {
-                    keys.insert(key_name.to_string(), value);
+                    keys.insert(key_name.to_lowercase(), value);
                 }
             }
         }
@@ -151,6 +158,23 @@ impl Keyring {
             _raw_json: Vec::new(),
         }
     }
+
+    /// Merge another keyring's keys into this one (other's keys take precedence).
+    pub fn merge(&mut self, other: &Keyring) {
+        for (k, v) in &other.keys {
+            self.keys.insert(k.clone(), v.clone());
+        }
+    }
+
+    /// Number of keys in the keyring.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Whether the keyring has no keys.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
 }
 
 impl Drop for Keyring {
@@ -159,11 +183,15 @@ impl Drop for Keyring {
         for value in self.keys.values_mut() {
             value.zeroize();
         }
+        // Save ptr/len before zeroizing — Vec::zeroize() sets len to 0,
+        // which would cause the is_empty() check to skip munlock.
+        let ptr = self._raw_json.as_ptr();
+        let len = self._raw_json.len();
         // Zeroize raw JSON bytes
         self._raw_json.zeroize();
-        // Unlock memory
-        if !self._raw_json.is_empty() {
-            memory::munlock(self._raw_json.as_ptr(), self._raw_json.len());
+        // Unlock memory (using saved len, not post-zeroize len)
+        if len > 0 {
+            memory::munlock(ptr, len);
         }
     }
 }
@@ -249,5 +277,62 @@ mod tests {
         let key = generate_session_key();
         let result = decrypt_keyring(&key, &[0u8; 10]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_credentials() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let creds_path = dir.path().join("credentials");
+        std::fs::write(&creds_path, r#"{"my_api_key":"secret123","other":"val"}"#).unwrap();
+
+        let kr = Keyring::load_credentials(&creds_path).unwrap();
+        assert_eq!(kr.get("my_api_key"), Some("secret123"));
+        assert_eq!(kr.get("other"), Some("val"));
+        assert_eq!(kr.len(), 2);
+        assert!(!kr.is_empty());
+    }
+
+    #[test]
+    fn test_load_credentials_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let creds_path = dir.path().join("credentials");
+        std::fs::write(&creds_path, "{}").unwrap();
+
+        let kr = Keyring::load_credentials(&creds_path).unwrap();
+        assert_eq!(kr.len(), 0);
+        assert!(kr.is_empty());
+    }
+
+    #[test]
+    fn test_from_env_ati_key_prefix() {
+        // Set some ATI_KEY_ env vars for the test
+        std::env::set_var("ATI_KEY_TEST_API_KEY", "test_value_123");
+        std::env::set_var("ATI_KEY_ANOTHER_KEY", "another_val");
+
+        let kr = Keyring::from_env();
+        assert_eq!(kr.get("test_api_key"), Some("test_value_123"));
+        assert_eq!(kr.get("another_key"), Some("another_val"));
+
+        // Clean up
+        std::env::remove_var("ATI_KEY_TEST_API_KEY");
+        std::env::remove_var("ATI_KEY_ANOTHER_KEY");
+    }
+
+    #[test]
+    fn test_merge() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let creds1 = dir.path().join("c1");
+        let creds2 = dir.path().join("c2");
+        std::fs::write(&creds1, r#"{"a":"1","b":"2"}"#).unwrap();
+        std::fs::write(&creds2, r#"{"b":"overridden","c":"3"}"#).unwrap();
+
+        let mut kr1 = Keyring::load_credentials(&creds1).unwrap();
+        let kr2 = Keyring::load_credentials(&creds2).unwrap();
+        kr1.merge(&kr2);
+
+        assert_eq!(kr1.get("a"), Some("1"));
+        assert_eq!(kr1.get("b"), Some("overridden"));
+        assert_eq!(kr1.get("c"), Some("3"));
+        assert_eq!(kr1.len(), 3);
     }
 }

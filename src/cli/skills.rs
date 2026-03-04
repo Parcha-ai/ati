@@ -1,23 +1,14 @@
 use std::path::PathBuf;
 
+use super::common;
+use crate::core::jwt;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::scope::ScopeConfig;
 use crate::core::skill::{self, SkillRegistry};
 use crate::{Cli, OutputFormat, SkillsCommands};
 
-fn ati_dir() -> PathBuf {
-    std::env::var("ATI_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var("HOME")
-                .map(|h| PathBuf::from(h).join(".ati"))
-                .unwrap_or_else(|_| PathBuf::from(".ati"))
-        })
-}
-
 fn skills_dir() -> PathBuf {
-    ati_dir().join("skills")
+    common::ati_dir().join("skills")
 }
 
 fn load_registry() -> Result<SkillRegistry, Box<dyn std::error::Error>> {
@@ -25,7 +16,7 @@ fn load_registry() -> Result<SkillRegistry, Box<dyn std::error::Error>> {
 }
 
 fn load_manifest_registry() -> Result<ManifestRegistry, Box<dyn std::error::Error>> {
-    let manifests_dir = ati_dir().join("manifests");
+    let manifests_dir = common::ati_dir().join("manifests");
     if manifests_dir.is_dir() {
         Ok(ManifestRegistry::load(&manifests_dir)?)
     } else {
@@ -33,14 +24,13 @@ fn load_manifest_registry() -> Result<ManifestRegistry, Box<dyn std::error::Erro
     }
 }
 
-fn load_scopes(custom_path: Option<&str>) -> ScopeConfig {
-    let path = custom_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| ati_dir().join("scopes.json"));
-    if path.exists() {
-        ScopeConfig::load(&path).unwrap_or_else(|_| ScopeConfig::unrestricted())
-    } else {
-        ScopeConfig::unrestricted()
+fn load_scopes_from_env() -> ScopeConfig {
+    match std::env::var("ATI_SESSION_TOKEN") {
+        Ok(token) if !token.is_empty() => match jwt::inspect(&token) {
+            Ok(claims) => ScopeConfig::from_jwt(&claims),
+            Err(_) => ScopeConfig::unrestricted(),
+        },
+        _ => ScopeConfig::unrestricted(),
     }
 }
 
@@ -464,6 +454,7 @@ fn install_from_dir(
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or("Invalid directory name")?;
+                validate_skill_name(skill_name)?;
                 let dest = dest_base.join(skill_name);
                 copy_dir_recursive(&path, &dest)?;
                 println!("Installed '{skill_name}'");
@@ -487,6 +478,8 @@ fn install_from_dir(
             })
             .ok_or("Cannot determine skill name")?;
 
+        validate_skill_name(&skill_name)?;
+
         let dest = dest_base.join(&skill_name);
         std::fs::create_dir_all(&dest)?;
         copy_dir_recursive(source, &dest)?;
@@ -497,6 +490,7 @@ fn install_from_dir(
 }
 
 fn remove_skill(_cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    validate_skill_name(name)?;
     let skill_dir = skills_dir().join(name);
     if !skill_dir.exists() {
         return Err(format!("Skill '{name}' not found.").into());
@@ -512,6 +506,7 @@ fn init_skill(
     tools: &[String],
     provider: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    validate_skill_name(name)?;
     let skill_dir = skills_dir().join(name);
     if skill_dir.exists() {
         return Err(format!(
@@ -600,10 +595,10 @@ fn validate_skill(
     Ok(())
 }
 
-fn resolve_skills(cli: &Cli, scopes_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn resolve_skills(cli: &Cli, _scopes_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let skill_registry = load_registry()?;
     let manifest_registry = load_manifest_registry()?;
-    let scopes = load_scopes(scopes_path);
+    let scopes = load_scopes_from_env();
 
     let resolved = skill::resolve_skills(&skill_registry, &manifest_registry, &scopes);
 
@@ -647,6 +642,25 @@ fn resolve_skills(cli: &Cli, scopes_path: Option<&str>) -> Result<(), Box<dyn st
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Validate that a skill name is safe (no path traversal).
+fn validate_skill_name(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if name.is_empty() {
+        return Err("Skill name cannot be empty".into());
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return Err(format!(
+            "Invalid skill name '{}': contains path traversal characters (/, \\, .., or null bytes)",
+            name
+        )
+        .into());
+    }
+    // Reject names that are just dots
+    if name.chars().all(|c| c == '.') {
+        return Err(format!("Invalid skill name '{}': must not be only dots", name).into());
+    }
+    Ok(())
+}
+
 fn copy_dir_recursive(
     src: &std::path::Path,
     dst: &std::path::Path,
@@ -655,10 +669,17 @@ fn copy_dir_recursive(
 
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let file_type = entry.file_type()?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
-        if src_path.is_dir() {
+        // Skip symlinks to prevent following links outside the source directory
+        if file_type.is_symlink() {
+            eprintln!("Warning: skipping symlink '{}'", src_path.display());
+            continue;
+        }
+
+        if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
@@ -666,4 +687,50 @@ fn copy_dir_recursive(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_skill_name_valid() {
+        assert!(validate_skill_name("my-skill").is_ok());
+        assert!(validate_skill_name("my_skill_v2").is_ok());
+        assert!(validate_skill_name("research-general-overview").is_ok());
+    }
+
+    #[test]
+    fn test_validate_skill_name_empty() {
+        assert!(validate_skill_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_name_dotdot() {
+        assert!(validate_skill_name("../evil").is_err());
+        assert!(validate_skill_name("foo/../bar").is_err());
+        assert!(validate_skill_name("..").is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_name_slash() {
+        assert!(validate_skill_name("foo/bar").is_err());
+        assert!(validate_skill_name("/absolute").is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_name_backslash() {
+        assert!(validate_skill_name("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_name_null() {
+        assert!(validate_skill_name("foo\0bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_name_only_dots() {
+        assert!(validate_skill_name(".").is_err());
+        assert!(validate_skill_name("...").is_err());
+    }
 }

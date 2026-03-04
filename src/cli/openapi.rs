@@ -3,21 +3,9 @@
 /// `ati openapi inspect <spec>` — preview operations in a spec
 /// `ati openapi import <spec>` — download spec and generate TOML manifest
 
-use std::path::PathBuf;
-
+use super::common;
 use crate::core::openapi::{self, OpenApiFilters};
 use crate::OpenapiCommands;
-
-fn ati_dir() -> PathBuf {
-    std::env::var("ATI_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var("HOME")
-                .map(|h| PathBuf::from(h).join(".ati"))
-                .unwrap_or_else(|_| PathBuf::from(".ati"))
-        })
-}
 
 pub async fn execute(
     subcmd: &OpenapiCommands,
@@ -140,39 +128,53 @@ fn import(
     };
     let tools = openapi::extract_tools(&spec, &filters);
 
-    // Build TOML manifest
-    let mut toml_lines = Vec::new();
-    toml_lines.push("[provider]".into());
-    toml_lines.push(format!("name = \"{}\"", name));
-    toml_lines.push(format!(
-        "description = \"{}\"",
-        spec.info.title.replace('"', "\\\"")
-    ));
-    toml_lines.push("handler = \"openapi\"".into());
-    toml_lines.push(format!("base_url = \"{}\"", base_url));
-
-    // Spec file reference (will be stored in ~/.ati/specs/)
+    // Build TOML manifest using serde serialization (prevents TOML injection)
     let spec_filename = format!("{name}.json");
-    toml_lines.push(format!("openapi_spec = \"{}\"", spec_filename));
-
-    // Auth config
     let default_key_name = format!("{name}_api_key");
     let key_name = auth_key.unwrap_or(&default_key_name);
-    toml_lines.push(format!("auth_type = \"{}\"", auth_type));
-    if auth_type != "none" {
-        toml_lines.push(format!("auth_key_name = \"{}\"", key_name));
-    }
-    for (k, v) in &auth_extra {
-        toml_lines.push(format!("{k} = \"{v}\""));
+
+    #[derive(serde::Serialize)]
+    struct ProviderToml {
+        name: String,
+        description: String,
+        handler: String,
+        base_url: String,
+        openapi_spec: String,
+        auth_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_key_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_header_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_query_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        openapi_include_tags: Option<Vec<String>>,
     }
 
-    // Tag filters
-    if !include_tags.is_empty() {
-        let tags_str: Vec<String> = include_tags.iter().map(|t| format!("\"{t}\"")).collect();
-        toml_lines.push(format!("openapi_include_tags = [{}]", tags_str.join(", ")));
+    let mut provider_toml = ProviderToml {
+        name: name.to_string(),
+        description: spec.info.title.clone(),
+        handler: "openapi".to_string(),
+        base_url: base_url.clone(),
+        openapi_spec: spec_filename.clone(),
+        auth_type: auth_type.clone(),
+        auth_key_name: if auth_type != "none" { Some(key_name.to_string()) } else { None },
+        auth_header_name: auth_extra.get("auth_header_name").cloned(),
+        auth_query_name: auth_extra.get("auth_query_name").cloned(),
+        openapi_include_tags: if include_tags.is_empty() { None } else { Some(include_tags.to_vec()) },
+    };
+
+    // Suppress unused warning
+    let _ = &mut provider_toml;
+
+    #[derive(serde::Serialize)]
+    struct ManifestToml {
+        provider: ProviderToml,
     }
 
-    let toml_content = toml_lines.join("\n") + "\n";
+    let manifest = ManifestToml { provider: provider_toml };
+    let toml_content = toml::to_string_pretty(&manifest)
+        .map_err(|e| format!("Failed to serialize TOML manifest: {e}"))?;
 
     if dry_run {
         println!("--- Generated manifest ({name}.toml) ---");
@@ -184,7 +186,7 @@ fn import(
     }
 
     // Save spec file
-    let ati_dir = ati_dir();
+    let ati_dir = common::ati_dir();
     let specs_dir = ati_dir.join("specs");
     std::fs::create_dir_all(&specs_dir)?;
     let spec_dest = specs_dir.join(&spec_filename);
@@ -208,7 +210,7 @@ fn import(
     );
     if auth_type != "none" {
         eprintln!(
-            "Remember to add your API key: ati auth set {key_name} <your-key>"
+            "Remember to add your API key: ati keys set {key_name} <your-key>"
         );
     }
 
@@ -218,11 +220,33 @@ fn import(
 /// Read spec content from a file path or URL.
 fn read_spec_content(spec_ref: &str) -> Result<String, Box<dyn std::error::Error>> {
     if spec_ref.starts_with("http://") || spec_ref.starts_with("https://") {
-        // Download spec from URL
+        // SSRF protection: validate URL is not targeting private networks
+        crate::core::http::validate_url_not_private(spec_ref)
+            .map_err(|e| format!("SSRF protection: {e}"))?;
+
+        // Warn on non-HTTPS
+        if spec_ref.starts_with("http://") {
+            eprintln!("Warning: downloading spec over insecure HTTP — consider using HTTPS");
+        }
+
+        // Download spec from URL (disable redirect following to prevent SSRF via redirects)
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let response = client.get(spec_ref).send()?;
+
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("unknown");
+            return Err(format!(
+                "URL redirected to '{location}' — fetch the target URL directly to avoid SSRF"
+            ).into());
+        }
+
         if !response.status().is_success() {
             return Err(format!(
                 "Failed to fetch spec from {}: {}",

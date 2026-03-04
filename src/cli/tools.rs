@@ -1,19 +1,61 @@
-use std::path::PathBuf;
-
+use super::common;
+use crate::core::jwt;
+use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
+use crate::core::mcp_client::McpClient;
 use crate::core::scope::{self, ScopeConfig};
 use crate::output;
 use crate::{Cli, OutputFormat, ToolsCommands};
 
-fn ati_dir() -> PathBuf {
-    std::env::var("ATI_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var("HOME")
-                .map(|h| PathBuf::from(h).join(".ati"))
-                .unwrap_or_else(|_| PathBuf::from(".ati"))
-        })
+/// Load scopes from ATI_SESSION_TOKEN JWT, or return unrestricted.
+fn load_scopes_from_env() -> ScopeConfig {
+    match std::env::var("ATI_SESSION_TOKEN") {
+        Ok(token) if !token.is_empty() => match jwt::inspect(&token) {
+            Ok(claims) => ScopeConfig::from_jwt(&claims),
+            Err(_) => ScopeConfig::unrestricted(),
+        },
+        _ => ScopeConfig::unrestricted(),
+    }
+}
+
+/// Discover and register tools from all MCP providers.
+async fn discover_mcp_tools(registry: &mut ManifestRegistry, keyring: &Keyring, verbose: bool) {
+    let mcp_providers: Vec<_> = registry
+        .list_mcp_providers()
+        .into_iter()
+        .map(|p| (p.name.clone(), p.clone()))
+        .collect();
+
+    for (name, provider) in &mcp_providers {
+        match McpClient::connect(provider, keyring).await {
+            Ok(client) => {
+                match client.list_tools().await {
+                    Ok(tools) => {
+                        if verbose {
+                            eprintln!("Discovered {} tools from MCP provider '{name}'", tools.len());
+                        }
+                        let tools = tools.into_iter().map(|t| crate::core::manifest::McpToolDef {
+                            name: t.name,
+                            description: t.description,
+                            input_schema: t.input_schema,
+                        }).collect();
+                        registry.register_mcp_tools(name, tools);
+                    }
+                    Err(e) => {
+                        if verbose {
+                            eprintln!("Warning: failed to list tools from MCP provider '{name}': {e}");
+                        }
+                    }
+                }
+                client.disconnect().await;
+            }
+            Err(e) => {
+                if verbose {
+                    eprintln!("Warning: failed to connect to MCP provider '{name}': {e}");
+                }
+            }
+        }
+    }
 }
 
 /// Execute: ati tools <subcommand>
@@ -21,17 +63,18 @@ pub async fn execute(
     cli: &Cli,
     subcmd: &ToolsCommands,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ati_dir = ati_dir();
+    let ati_dir = common::ati_dir();
     let manifests_dir = ati_dir.join("manifests");
-    let registry = ManifestRegistry::load(&manifests_dir)?;
+    let mut registry = ManifestRegistry::load(&manifests_dir)?;
 
-    // Load scopes (optional)
-    let scopes_path = ati_dir.join("scopes.json");
-    let scopes = if scopes_path.exists() {
-        ScopeConfig::load(&scopes_path)?
-    } else {
-        ScopeConfig::unrestricted()
-    };
+    // Load keyring for MCP discovery (cascade: keyring.enc → credentials → empty)
+    let keyring = super::call::load_keyring(&ati_dir, cli.verbose);
+
+    // Discover MCP tools so they appear in list/search/info
+    discover_mcp_tools(&mut registry, &keyring, cli.verbose).await;
+
+    // Load scopes from JWT
+    let scopes = load_scopes_from_env();
 
     match subcmd {
         ToolsCommands::List { provider } => list_tools(cli, &registry, &scopes, provider.as_deref()),

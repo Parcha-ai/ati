@@ -1,22 +1,11 @@
-use std::path::PathBuf;
-
+use super::common;
+use crate::core::jwt;
 use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::scope::{self, ScopeConfig};
 use crate::core::skill::{self, SkillRegistry};
 use crate::proxy::client as proxy_client;
 use crate::Cli;
-
-fn ati_dir() -> PathBuf {
-    std::env::var("ATI_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var("HOME")
-                .map(|h| PathBuf::from(h).join(".ati"))
-                .unwrap_or_else(|_| PathBuf::from(".ati"))
-        })
-}
 
 const HELP_SYSTEM_PROMPT: &str = r#"You are a tool recommendation assistant for an AI agent. The agent has access to these tools via the `ati` CLI:
 
@@ -62,21 +51,25 @@ async fn execute_local(
     cli: &Cli,
     query: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ati_dir = ati_dir();
+    let ati_dir = common::ati_dir();
 
-    // Load manifests and scopes
+    // Load manifests
     let manifests_dir = ati_dir.join("manifests");
     let registry = ManifestRegistry::load(&manifests_dir)?;
 
-    let scopes_path = ati_dir.join("scopes.json");
-    let scopes = if scopes_path.exists() {
-        let s = ScopeConfig::load(&scopes_path)?;
-        if !s.help_enabled() {
-            return Err("Help is not enabled in your scopes. Add 'help' to your scopes list.".into());
-        }
-        s
-    } else {
-        ScopeConfig::unrestricted()
+    // Load scopes from JWT
+    let scopes = match std::env::var("ATI_SESSION_TOKEN") {
+        Ok(token) if !token.is_empty() => match jwt::inspect(&token) {
+            Ok(claims) => {
+                let s = ScopeConfig::from_jwt(&claims);
+                if !s.help_enabled() {
+                    return Err("Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into());
+                }
+                s
+            }
+            Err(_) => ScopeConfig::unrestricted(),
+        },
+        _ => ScopeConfig::unrestricted(),
     };
 
     // Build tool context from in-scope tools
@@ -109,67 +102,122 @@ async fn execute_local(
         eprintln!("Skills in context: {}", resolved_skills.len());
     }
 
-    // Look up the _llm provider for chat completions
-    let (llm_provider, llm_tool) = registry
-        .get_tool("_chat_completion")
-        .ok_or("No _llm.toml manifest found. ATI help requires a configured LLM provider.")?;
+    // Priority: CEREBRAS_API_KEY (10x faster) → keyring → ANTHROPIC_API_KEY (no extra setup)
+    let cerebras_key = std::env::var("CEREBRAS_API_KEY").ok();
 
-    // Load keyring for LLM API key
     let keyring_path = ati_dir.join("keyring.enc");
-    let keyring = if keyring_path.exists() {
-        Keyring::load(&keyring_path)?
+    let keyring_api_key = if cerebras_key.is_none() {
+        registry
+            .get_tool("_chat_completion")
+            .and_then(|(provider, _)| {
+                let keyring = if keyring_path.exists() {
+                    Keyring::load(&keyring_path).ok()?
+                } else {
+                    return None;
+                };
+                provider
+                    .auth_key_name
+                    .as_deref()
+                    .and_then(|k| keyring.get(k).map(|v| v.to_string()))
+            })
     } else {
-        return Err("No keyring found. ATI help requires an LLM API key.".into());
+        None
     };
 
-    // Get LLM API key
-    let api_key = llm_provider
-        .auth_key_name
-        .as_deref()
-        .and_then(|k| keyring.get(k))
-        .ok_or("LLM API key not found in keyring")?;
+    if let Some(api_key) = cerebras_key.or(keyring_api_key) {
+        // Cerebras path: env var or keyring (OpenAI-compatible API, ~10x faster)
+        let (llm_provider, llm_tool) = registry
+            .get_tool("_chat_completion")
+            .ok_or("No _llm.toml manifest found. Required for Cerebras assist.")?;
 
-    // Build chat completion request
-    let request_body = serde_json::json!({
-        "model": "zai-glm-4.7",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query}
-        ],
-        "max_completion_tokens": 1024,
-        "temperature": 0.3
-    });
+        let request_body = serde_json::json!({
+            "model": "zai-glm-4.7",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
+            ],
+            "max_completion_tokens": 1024,
+            "temperature": 0.3
+        });
 
-    // Make the request
-    let client = reqwest::Client::new();
-    let url = format!(
-        "{}{}",
-        llm_provider.base_url.trim_end_matches('/'),
-        llm_tool.endpoint
-    );
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}{}",
+            llm_provider.base_url.trim_end_matches('/'),
+            llm_tool.endpoint
+        );
 
-    let response = client
-        .post(&url)
-        .bearer_auth(api_key)
-        .json(&request_body)
-        .send()
-        .await?;
+        if cli.verbose {
+            eprintln!("LLM: Cerebras ({})", llm_provider.base_url);
+        }
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("LLM API error ({status}): {body}").into());
+        let response = client
+            .post(&url)
+            .bearer_auth(api_key)
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("LLM API error ({status}): {body}").into());
+        }
+
+        let body: serde_json::Value = response.json().await?;
+        let content = body
+            .pointer("/choices/0/message/content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("No response from LLM");
+
+        println!("{content}");
+    } else if let Ok(anthropic_key) = std::env::var("ANTHROPIC_API_KEY") {
+        // Fallback: use Anthropic Messages API with ANTHROPIC_API_KEY
+        let model = std::env::var("ATI_ASSIST_MODEL")
+            .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
+
+        if cli.verbose {
+            eprintln!("LLM: Anthropic Messages API (ANTHROPIC_API_KEY), model={model}");
+        }
+
+        let request_body = serde_json::json!({
+            "model": model,
+            "max_tokens": 1024,
+            "system": system_prompt,
+            "messages": [
+                {"role": "user", "content": query}
+            ]
+        });
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &anthropic_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Anthropic API error ({status}): {body}").into());
+        }
+
+        let body: serde_json::Value = response.json().await?;
+        let content = body
+            .pointer("/content/0/text")
+            .and_then(|c| c.as_str())
+            .unwrap_or("No response from LLM");
+
+        println!("{content}");
+    } else {
+        return Err(
+            "No LLM configured for ati assist. Set ANTHROPIC_API_KEY or configure a keyring with an LLM provider.".into()
+        );
     }
 
-    let body: serde_json::Value = response.json().await?;
-
-    // Extract the assistant's message
-    let content = body
-        .pointer("/choices/0/message/content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("No response from LLM");
-
-    println!("{content}");
     Ok(())
 }
 

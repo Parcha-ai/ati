@@ -1,6 +1,10 @@
 pub mod auth;
 pub mod call;
+pub mod common;
 pub mod help;
+pub mod init;
+pub mod keys;
 pub mod openapi;
 pub mod skills;
+pub mod token;
 pub mod tools;
