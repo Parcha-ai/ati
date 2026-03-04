@@ -28,6 +28,8 @@ pub enum ProxyError {
 pub struct ProxyCallRequest {
     pub tool_name: String,
     pub args: HashMap<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_args: Option<Vec<String>>,
 }
 
 /// Response payload from the proxy server.
@@ -73,6 +75,7 @@ pub async fn call_tool(
     proxy_url: &str,
     tool_name: &str,
     args: &HashMap<String, Value>,
+    raw_args: Option<&[String]>,
 ) -> Result<Value, ProxyError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
@@ -83,6 +86,7 @@ pub async fn call_tool(
     let payload = ProxyCallRequest {
         tool_name: tool_name.to_string(),
         args: args.clone(),
+        raw_args: raw_args.map(|r| r.to_vec()),
     };
 
     let response = build_proxy_request(&client, reqwest::Method::POST, &url)

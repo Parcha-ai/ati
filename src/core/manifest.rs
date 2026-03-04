@@ -90,6 +90,21 @@ pub struct Provider {
     #[serde(default)]
     pub mcp_env: HashMap<String, String>,
 
+    // --- CLI provider fields (handler = "cli") ---
+
+    /// Command to run for CLI providers (e.g., "gsutil", "gh", "kubectl")
+    #[serde(default)]
+    pub cli_command: Option<String>,
+    /// Default args prepended to every invocation
+    #[serde(default)]
+    pub cli_default_args: Vec<String>,
+    /// Environment variables for CLI. ${key} = string from keyring, @{key} = credential file
+    #[serde(default)]
+    pub cli_env: HashMap<String, String>,
+    /// Default timeout in seconds (default: 120)
+    #[serde(default)]
+    pub cli_timeout_secs: Option<u64>,
+
     // --- OpenAPI provider fields (handler = "openapi") ---
 
     /// Path (relative to ~/.ati/specs/) or URL to OpenAPI spec (JSON or YAML)
@@ -261,6 +276,15 @@ pub struct CachedProvider {
     pub mcp_args: Vec<String>,
     #[serde(default)]
     pub mcp_env: HashMap<String, String>,
+    // CLI fields
+    #[serde(default)]
+    pub cli_command: Option<String>,
+    #[serde(default)]
+    pub cli_default_args: Vec<String>,
+    #[serde(default)]
+    pub cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub cli_timeout_secs: Option<u64>,
     // MCP/HTTP auth
     #[serde(default)]
     pub auth: Option<String>,
@@ -343,6 +367,10 @@ impl CachedProvider {
             openapi_exclude_operations: Vec::new(),
             openapi_max_operations: None,
             openapi_overrides: HashMap::new(),
+            cli_command: self.cli_command.clone(),
+            cli_default_args: self.cli_default_args.clone(),
+            cli_env: self.cli_env.clone(),
+            cli_timeout_secs: self.cli_timeout_secs,
             category: None,
         }
     }
@@ -407,6 +435,22 @@ impl ManifestRegistry {
                         }
                     }
                 }
+            }
+
+            // For CLI providers with no [[tools]], auto-register one implicit tool
+            if manifest.provider.is_cli() && manifest.tools.is_empty() {
+                manifest.tools.push(Tool {
+                    name: manifest.provider.name.clone(),
+                    description: manifest.provider.description.clone(),
+                    endpoint: String::new(),
+                    method: HttpMethod::Get,
+                    scope: None,
+                    input_schema: None,
+                    response: None,
+                    tags: Vec::new(),
+                    hint: None,
+                    examples: Vec::new(),
+                });
             }
 
             let mi = manifests.len();
@@ -571,6 +615,15 @@ impl ManifestRegistry {
             .collect()
     }
 
+    /// List all CLI providers (handler = "cli").
+    pub fn list_cli_providers(&self) -> Vec<&Provider> {
+        self.manifests
+            .iter()
+            .filter(|m| m.provider.handler == "cli")
+            .map(|m| &m.provider)
+            .collect()
+    }
+
     /// Register dynamically discovered MCP tools for a provider.
     /// Tools are prefixed with provider name: "github__read_file".
     pub fn register_mcp_tools(&mut self, provider_name: &str, mcp_tools: Vec<McpToolDef>) {
@@ -616,6 +669,11 @@ impl Provider {
     /// Returns true if this provider uses OpenAPI spec-based tool discovery.
     pub fn is_openapi(&self) -> bool {
         self.handler == "openapi"
+    }
+
+    /// Returns true if this provider uses CLI handler.
+    pub fn is_cli(&self) -> bool {
+        self.handler == "cli"
     }
 
     /// Returns the MCP transport type, defaulting to "stdio".

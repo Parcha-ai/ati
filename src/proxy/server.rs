@@ -49,6 +49,8 @@ pub struct ProxyState {
 pub struct CallRequest {
     pub tool_name: String,
     pub args: HashMap<String, Value>,
+    #[serde(default)]
+    pub raw_args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,6 +203,22 @@ async fn handle_call(
                     Json(CallResponse {
                         result: Value::Null,
                         error: Some(format!("MCP error: {e}")),
+                    }),
+                ),
+            }
+        }
+        "cli" => {
+            let raw = call_req.raw_args.as_deref().unwrap_or(&[]);
+            match crate::core::cli_executor::execute(provider, raw, &state.keyring).await {
+                Ok(result) => (
+                    StatusCode::OK,
+                    Json(CallResponse { result, error: None }),
+                ),
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(CallResponse {
+                        result: Value::Null,
+                        error: Some(format!("CLI error: {e}")),
                     }),
                 ),
             }
@@ -489,6 +507,19 @@ async fn handle_mcp(
 
             let result = if provider.is_mcp() {
                 mcp_client::execute(provider, tool_name, &arguments, &state.keyring).await
+            } else if provider.is_cli() {
+                // Convert arguments map to CLI-style args for MCP passthrough
+                let raw: Vec<String> = arguments.iter()
+                    .flat_map(|(k, v)| {
+                        let val = match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        vec![format!("--{k}"), val]
+                    })
+                    .collect();
+                crate::core::cli_executor::execute(provider, &raw, &state.keyring).await
+                    .map_err(|e| mcp_client::McpError::Transport(e.to_string()))
             } else {
                 match match provider.handler.as_str() {
                     "xai" => xai::execute_xai_tool(provider, _tool, &arguments, &state.keyring).await,

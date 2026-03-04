@@ -162,14 +162,14 @@ pub async fn execute(
         if cli.verbose {
             eprintln!("Mode: proxy (ATI_PROXY_URL={proxy_url})");
         }
-        return execute_via_proxy(cli, tool_name, &args, &proxy_url).await;
+        return execute_via_proxy(cli, tool_name, &args, raw_args, &proxy_url).await;
     }
 
     // Local mode: keyring + direct HTTP
     if cli.verbose {
         eprintln!("Mode: local (no ATI_PROXY_URL)");
     }
-    execute_local(cli, tool_name, &args).await
+    execute_local(cli, tool_name, &args, raw_args).await
 }
 
 /// Load keyring using cascade: keyring.enc (sealed) → keyring.enc (persistent) → credentials → empty.
@@ -214,6 +214,7 @@ async fn execute_local(
     cli: &Cli,
     tool_name: &str,
     args: &HashMap<String, Value>,
+    raw_args: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = common::ati_dir();
 
@@ -290,6 +291,10 @@ async fn execute_local(
             let value = mcp_client::execute(provider, tool_name, &args, &keyring).await?;
             output::format_output(&value, &cli.output)
         }
+        "cli" => {
+            let value = crate::core::cli_executor::execute(provider, raw_args, &keyring).await?;
+            output::format_output(&value, &cli.output)
+        }
         _ => {
             generic::execute(provider, tool, &args, &keyring, &cli.output).await?
         }
@@ -304,6 +309,7 @@ async fn execute_via_proxy(
     cli: &Cli,
     tool_name: &str,
     args: &HashMap<String, Value>,
+    raw_args: &[String],
     proxy_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if cli.verbose {
@@ -312,7 +318,7 @@ async fn execute_via_proxy(
         eprintln!("Proxy: {proxy_url}");
     }
 
-    let result = proxy_client::call_tool(proxy_url, tool_name, args).await?;
+    let result = proxy_client::call_tool(proxy_url, tool_name, args, Some(raw_args)).await?;
 
     let formatted = output::format_output(&result, &cli.output);
     println!("{formatted}");

@@ -623,6 +623,10 @@ fn test_ati_mcp_client_against_linear() {
         openapi_exclude_operations: Vec::new(),
         openapi_max_operations: None,
         openapi_overrides: HashMap::new(),
+        cli_command: None,
+        cli_default_args: Vec::new(),
+        cli_env: HashMap::new(),
+        cli_timeout_secs: None,
         category: None,
     };
 
@@ -720,6 +724,10 @@ fn test_ati_mcp_client_against_github_stdio() {
         openapi_exclude_operations: Vec::new(),
         openapi_max_operations: None,
         openapi_overrides: HashMap::new(),
+        cli_command: None,
+        cli_default_args: Vec::new(),
+        cli_env: HashMap::new(),
+        cli_timeout_secs: None,
         category: None,
     };
 
@@ -1091,6 +1099,10 @@ fn test_deepwiki_mcp_http_full_flow() {
         openapi_exclude_operations: Vec::new(),
         openapi_max_operations: None,
         openapi_overrides: HashMap::new(),
+        cli_command: None,
+        cli_default_args: Vec::new(),
+        cli_env: HashMap::new(),
+        cli_timeout_secs: None,
         category: Some("documentation".to_string()),
     };
 

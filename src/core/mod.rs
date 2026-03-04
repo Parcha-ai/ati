@@ -1,3 +1,4 @@
+pub mod cli_executor;
 pub mod error;
 pub mod http;
 pub mod jwt;

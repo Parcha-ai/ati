@@ -28,6 +28,9 @@ pub struct Keyring {
     keys: HashMap<String, String>,
     /// Raw bytes pointer and length for mlock/munlock
     _raw_json: Vec<u8>,
+    /// Whether keys were loaded from a sealed source (one-shot key).
+    /// When true, credential files should be wiped after each use.
+    pub ephemeral: bool,
 }
 
 impl Keyring {
@@ -56,6 +59,7 @@ impl Keyring {
         Ok(Keyring {
             keys,
             _raw_json: decrypted,
+            ephemeral: true,
         })
     }
 
@@ -74,6 +78,7 @@ impl Keyring {
         Ok(Keyring {
             keys,
             _raw_json: decrypted,
+            ephemeral: true,
         })
     }
 
@@ -102,6 +107,7 @@ impl Keyring {
         Ok(Keyring {
             keys,
             _raw_json: Vec::new(),
+            ephemeral: false,
         })
     }
 
@@ -129,7 +135,9 @@ impl Keyring {
         let mut key = [0u8; 32];
         key.copy_from_slice(&decoded);
 
-        Self::load_with_key(keyring_path, &key)
+        let mut kr = Self::load_with_key(keyring_path, &key)?;
+        kr.ephemeral = false;
+        Ok(kr)
     }
 
     /// Create a keyring from environment variables with `ATI_KEY_` prefix.
@@ -148,6 +156,7 @@ impl Keyring {
         Keyring {
             keys,
             _raw_json: Vec::new(),
+            ephemeral: false,
         }
     }
 
@@ -156,6 +165,7 @@ impl Keyring {
         Keyring {
             keys: HashMap::new(),
             _raw_json: Vec::new(),
+            ephemeral: false,
         }
     }
 

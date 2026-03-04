@@ -48,6 +48,23 @@ pub async fn execute(
             description.as_deref(),
             category.as_deref(),
         ),
+        ProviderCommands::AddCli {
+            name,
+            command,
+            default_args,
+            env,
+            description,
+            category,
+            timeout,
+        } => add_cli(
+            name,
+            command,
+            default_args,
+            env,
+            description.as_deref(),
+            category.as_deref(),
+            *timeout,
+        ),
         ProviderCommands::ImportOpenapi {
             spec,
             name,
@@ -229,6 +246,94 @@ fn add_mcp(
     // Hint about auth key
     if let Some(key_name) = auth_key {
         eprintln!("Remember to add your API key: ati key set {key_name} <your-key>");
+    }
+
+    Ok(())
+}
+
+// ─── add-cli ─────────────────────────────────────────────────────────────────
+
+fn add_cli(
+    name: &str,
+    command: &str,
+    default_args: &[String],
+    env: &[String],
+    description: Option<&str>,
+    category: Option<&str>,
+    timeout: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse --env KEY=VALUE pairs
+    let mut cli_env = HashMap::new();
+    for entry in env {
+        let (k, v) = entry
+            .split_once('=')
+            .ok_or_else(|| format!("Invalid --env format: {entry} (expected KEY=VALUE)"))?;
+        cli_env.insert(k.to_string(), v.to_string());
+    }
+
+    #[derive(serde::Serialize)]
+    struct CliManifest {
+        provider: CliProvider,
+    }
+
+    #[derive(serde::Serialize)]
+    struct CliProvider {
+        name: String,
+        description: String,
+        handler: String,
+        cli_command: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        cli_default_args: Vec<String>,
+        #[serde(skip_serializing_if = "HashMap::is_empty")]
+        cli_env: HashMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cli_timeout_secs: Option<u64>,
+        auth_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
+    }
+
+    let desc = description
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{name} CLI provider"));
+
+    let manifest = CliManifest {
+        provider: CliProvider {
+            name: name.to_string(),
+            description: desc,
+            handler: "cli".to_string(),
+            cli_command: command.to_string(),
+            cli_default_args: default_args.to_vec(),
+            cli_env,
+            cli_timeout_secs: timeout,
+            auth_type: "none".to_string(),
+            category: category.map(|s| s.to_string()),
+        },
+    };
+
+    let toml_content = toml::to_string_pretty(&manifest)
+        .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
+
+    // Save to manifests directory
+    let ati_dir = common::ati_dir();
+    let manifests_dir = ati_dir.join("manifests");
+    std::fs::create_dir_all(&manifests_dir)?;
+
+    let manifest_path = manifests_dir.join(format!("{name}.toml"));
+    if manifest_path.exists() {
+        return Err(format!("Manifest already exists: {}", manifest_path.display()).into());
+    }
+
+    std::fs::write(&manifest_path, &toml_content)?;
+    eprintln!("Saved CLI manifest to {}", manifest_path.display());
+
+    // Hint about keyring references in env vars
+    for v in manifest.provider.cli_env.values() {
+        if let Some(key_ref) = v.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+            eprintln!("Remember to add your key: ati key set {key_ref} <value>");
+        } else if let Some(key_ref) = v.strip_prefix("@{").and_then(|s| s.strip_suffix('}')) {
+            eprintln!("Remember to add your credential: ati key set {key_ref} <content>");
+        }
     }
 
     Ok(())
@@ -512,11 +617,14 @@ fn list_providers(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     format!("mcp/{transport}")
                 }
                 "openapi" => "openapi".to_string(),
+                "cli" => "cli".to_string(),
                 _ => "http".to_string(),
             };
 
             let tool_label = if handler == "mcp" || handler == "openapi" {
                 "auto".to_string()
+            } else if handler == "cli" {
+                "1".to_string()
             } else {
                 tool_count.to_string()
             };
@@ -664,7 +772,7 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
 
     match cli.output {
         OutputFormat::Json => {
-            let info = serde_json::json!({
+            let mut info = serde_json::json!({
                 "name": provider.name,
                 "description": provider.description,
                 "handler": provider.handler,
@@ -673,6 +781,11 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
                 "category": provider.category,
                 "internal": provider.internal,
             });
+            if provider.is_cli() {
+                info["cli_command"] = serde_json::json!(provider.cli_command);
+                info["cli_default_args"] = serde_json::json!(provider.cli_default_args);
+                info["cli_timeout_secs"] = serde_json::json!(provider.cli_timeout_secs);
+            }
             println!("{}", serde_json::to_string_pretty(&info)?);
         }
         OutputFormat::Table | OutputFormat::Text => {
@@ -686,6 +799,23 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
             }
             if provider.is_mcp() {
                 println!("Transport:   MCP ({})", provider.mcp_transport_type());
+            }
+            if provider.is_cli() {
+                if let Some(cmd) = &provider.cli_command {
+                    println!("Command:     {cmd}");
+                }
+                if !provider.cli_default_args.is_empty() {
+                    println!("Default args: {:?}", provider.cli_default_args);
+                }
+                if !provider.cli_env.is_empty() {
+                    println!("Environment:");
+                    for (k, v) in &provider.cli_env {
+                        println!("  {k} = {v}");
+                    }
+                }
+                if let Some(timeout) = provider.cli_timeout_secs {
+                    println!("Timeout:     {timeout}s");
+                }
             }
         }
     }
@@ -796,6 +926,10 @@ async fn load_openapi_provider(
         mcp_command: None,
         mcp_args: vec![],
         mcp_env: HashMap::new(),
+        cli_command: None,
+        cli_default_args: Vec::new(),
+        cli_env: HashMap::new(),
+        cli_timeout_secs: None,
         auth: None,
         created_at: now.to_rfc3339(),
         ttl_seconds: ttl,
@@ -991,6 +1125,10 @@ async fn load_mcp_provider(
         mcp_command: command.map(|s| s.to_string()),
         mcp_args: args.to_vec(),
         mcp_env: mcp_env.clone(),
+        cli_command: None,
+        cli_default_args: Vec::new(),
+        cli_env: HashMap::new(),
+        cli_timeout_secs: None,
         auth: Some(auth_type.to_string()),
         created_at: now.to_rfc3339(),
         ttl_seconds: ttl,

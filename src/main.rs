@@ -253,6 +253,31 @@ pub enum ProviderCommands {
         category: Option<String>,
     },
 
+    /// Add a CLI provider — register a local CLI tool for use through ATI
+    #[command(name = "add-cli")]
+    AddCli {
+        /// Provider name (becomes the tool name for `ati run <name>`)
+        name: String,
+        /// Path to CLI binary (or name to resolve via PATH)
+        #[arg(long)]
+        command: String,
+        /// Default args prepended to every invocation
+        #[arg(long)]
+        default_args: Vec<String>,
+        /// Environment variables as KEY=VALUE (use ${key} for keyring, @{key} for credential file)
+        #[arg(long)]
+        env: Vec<String>,
+        /// Provider description
+        #[arg(long)]
+        description: Option<String>,
+        /// Provider category
+        #[arg(long)]
+        category: Option<String>,
+        /// Default timeout in seconds (default: 120)
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
+
     /// Import an OpenAPI spec — download to ~/.ati/specs/ and generate manifest
     #[command(name = "import-openapi")]
     ImportOpenapi {
