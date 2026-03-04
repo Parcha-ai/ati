@@ -720,6 +720,8 @@ auth_type = "none"
         skill_registry,
         keyring,
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
 
     let app = ati::proxy::server::build_router(state);

@@ -1,7 +1,8 @@
 /// Proxy client — forwards tool calls to an external ATI proxy server.
 ///
 /// When ATI_PROXY_URL is set, `ati call <tool>` sends tool_name + args
-/// to the proxy, which holds the real API keys and makes the upstream call.
+/// to the proxy. Authentication is via JWT in the Authorization header
+/// (ATI_SESSION_TOKEN env var).
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -53,10 +54,10 @@ pub struct ProxyHelpResponse {
 
 const PROXY_TIMEOUT_SECS: u64 = 120;
 
-/// Build an HTTP request builder with optional Bearer auth from ATI_PROXY_TOKEN.
+/// Build an HTTP request builder with JWT Bearer auth from ATI_SESSION_TOKEN.
 fn build_proxy_request(client: &Client, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
     let mut req = client.request(method, url);
-    if let Ok(token) = std::env::var("ATI_PROXY_TOKEN") {
+    if let Ok(token) = std::env::var("ATI_SESSION_TOKEN") {
         if !token.is_empty() {
             req = req.header("Authorization", format!("Bearer {token}"));
         }
@@ -67,6 +68,7 @@ fn build_proxy_request(client: &Client, method: reqwest::Method, url: &str) -> r
 /// Execute a tool call via the proxy server.
 ///
 /// POST {proxy_url}/call with JSON body: { tool_name, args }
+/// Scopes are carried inside the JWT — not in the request body.
 pub async fn call_tool(
     proxy_url: &str,
     tool_name: &str,
@@ -113,9 +115,6 @@ pub async fn call_tool(
 }
 
 /// Forward a raw MCP JSON-RPC message via the proxy's /mcp endpoint.
-///
-/// POST {proxy_url}/mcp with JSON-RPC body
-/// Used by sandbox ATI when ATI_PROXY_URL is set and the tool is an MCP provider.
 pub async fn call_mcp(
     proxy_url: &str,
     method: &str,
@@ -145,7 +144,6 @@ pub async fn call_mcp(
     let status = response.status();
 
     if status == reqwest::StatusCode::ACCEPTED {
-        // Notification accepted — no body expected
         return Ok(Value::Null);
     }
 
@@ -162,7 +160,6 @@ pub async fn call_mcp(
         .await
         .map_err(|e| ProxyError::InvalidResponse(e.to_string()))?;
 
-    // Extract result or error from JSON-RPC response
     if let Some(err) = body.get("error") {
         let message = err
             .get("message")
@@ -178,8 +175,6 @@ pub async fn call_mcp(
 }
 
 /// Fetch skill list from the proxy server.
-///
-/// GET {proxy_url}/skills[?category=X&provider=Y&tool=Z&search=Q]
 pub async fn list_skills(
     proxy_url: &str,
     query_params: &str,
@@ -214,8 +209,6 @@ pub async fn list_skills(
 }
 
 /// Fetch a skill's detail from the proxy server.
-///
-/// GET {proxy_url}/skills/{name}[?meta=true&refs=true]
 pub async fn get_skill(
     proxy_url: &str,
     name: &str,
@@ -254,8 +247,6 @@ pub async fn get_skill(
 }
 
 /// Resolve skills for given scopes via the proxy.
-///
-/// POST {proxy_url}/skills/resolve
 pub async fn resolve_skills(
     proxy_url: &str,
     scopes: &serde_json::Value,
@@ -287,8 +278,6 @@ pub async fn resolve_skills(
 }
 
 /// Execute an LLM help query via the proxy server.
-///
-/// POST {proxy_url}/help with JSON body: { query }
 pub async fn call_help(
     proxy_url: &str,
     query: &str,

@@ -32,10 +32,17 @@ pub fn read_and_delete_key() -> Result<[u8; 32], SealedFileError> {
 }
 
 /// Read session key from a specific path, then delete the file.
+///
+/// Uses open-then-unlink-then-read pattern to eliminate the TOCTOU window:
+/// 1. Open the file (get fd)
+/// 2. Unlink the file from the filesystem (no other process can open it)
+/// 3. Read contents from the fd (still valid after unlink)
 pub fn read_and_delete_key_from(path: &Path) -> Result<[u8; 32], SealedFileError> {
-    // Read the file
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    use std::io::Read;
+
+    // Step 1: Open the file (get fd)
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(SealedFileError::NotFound(path.display().to_string()));
         }
@@ -45,11 +52,15 @@ pub fn read_and_delete_key_from(path: &Path) -> Result<[u8; 32], SealedFileError
         Err(e) => return Err(SealedFileError::Io(e)),
     };
 
-    // Immediately delete the file
+    // Step 2: Unlink the file BEFORE reading — closes the TOCTOU window.
+    // After unlink, the file is invisible to other processes but our fd is still valid.
     if let Err(e) = std::fs::remove_file(path) {
-        // Log warning but don't fail — we already have the key
         eprintln!("Warning: could not delete key file {}: {e}", path.display());
     }
+
+    // Step 3: Read contents from the fd (file data persists until last fd is closed)
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
 
     // Decode base64
     let decoded = base64::Engine::decode(

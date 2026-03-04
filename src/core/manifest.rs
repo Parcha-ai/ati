@@ -359,6 +359,15 @@ impl ManifestRegistry {
             .collect()
     }
 
+    /// If `tool_name` has a `<provider>__<name>` prefix matching an MCP provider, return it.
+    pub fn find_mcp_provider_for_tool(&self, tool_name: &str) -> Option<&Provider> {
+        let prefix = tool_name.split("__").next()?;
+        self.manifests
+            .iter()
+            .find(|m| m.provider.handler == "mcp" && m.provider.name == prefix)
+            .map(|m| &m.provider)
+    }
+
     /// List all OpenAPI providers (handler = "openapi").
     pub fn list_openapi_providers(&self) -> Vec<&Provider> {
         self.manifests

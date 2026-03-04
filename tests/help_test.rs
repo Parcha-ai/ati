@@ -163,6 +163,8 @@ async fn test_proxy_help_returns_llm_recommendations() {
         skill_registry,
         keyring,
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
     let app = build_router(state);
 
@@ -222,6 +224,8 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
         skill_registry,
         keyring,
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
     let app = build_router(state);
 
@@ -257,6 +261,8 @@ async fn test_proxy_help_missing_llm_key_returns_503() {
         skill_registry,
         keyring: Keyring::empty(),
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
     let app = build_router(state);
 
@@ -305,6 +311,8 @@ async fn test_proxy_help_llm_error_returns_502() {
         skill_registry,
         keyring,
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
     let app = build_router(state);
 
@@ -611,6 +619,8 @@ async fn test_proxy_help_excludes_internal_tools() {
         skill_registry,
         keyring,
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
     let app = build_router(state);
 

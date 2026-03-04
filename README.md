@@ -27,7 +27,7 @@ ATI is a compiled Rust binary that:
 
 1. **Makes HTTP requests** on behalf of the agent, injecting auth that the agent never sees
 2. **Connects to MCP servers** (stdio or remote HTTP), discovers tools dynamically, and proxies calls — auth handled transparently
-3. **Enforces scopes** — per-tool access control with expiration timestamps
+3. **Enforces scopes** — JWT-based per-tool access control with expiration and wildcard patterns
 4. **Formats responses** — JSONPath extraction, table formatting, text summarization
 5. **Discovers tools** — fuzzy search (`ati tools search`) and LLM-powered recommendations (`ati assist`)
 
@@ -47,6 +47,44 @@ ati tools list
 ```
 
 No API keys. No process management. No JSON-RPC. Just CLI calls that return structured text.
+
+---
+
+## Quick Start: Give Any AI Agent Tools in 5 Minutes
+
+ATI works with any agentic SDK that has a shell/bash tool. The pattern is always the same: give the agent shell access, tell it about `ati` commands in the system prompt, done. No custom tool wrappers.
+
+### Claude Agent SDK (~30 lines)
+
+```python
+from claude_agent_sdk import ClaudeAgentOptions, query
+
+options = ClaudeAgentOptions(
+    system_prompt="You have ATI on your PATH. Use `ati tools search` to find tools, "
+                  "`ati tools info <name>` to inspect them, `ati call <tool> --key val` to execute.",
+    model="claude-haiku-4-5",
+    allowed_tools=["Bash"],
+    env={"ATI_DIR": "/path/to/ati"},
+)
+
+async for message in query(prompt="Research quantum computing papers", options=options):
+    print(message)
+```
+
+### Works with Every Major SDK
+
+| SDK | Shell Mechanism | Lines of Code |
+|-----|----------------|---------------|
+| [Claude Agent SDK](examples/claude-agent-sdk/) | Built-in `Bash` tool | ~100 |
+| [OpenAI Agents SDK](examples/openai-agents-sdk/) | `@function_tool` async shell | ~100 |
+| [Google ADK](examples/google-adk/) | `run_shell()` function tool | ~100 |
+| [LangChain](examples/langchain/) | `ShellTool` (zero-config) | ~80 |
+| [Codex CLI](examples/codex/) | Built-in (Codex IS a shell agent) | ~30 |
+| [Pi](examples/pi/) | Built-in `bashTool` | ~90 |
+
+Every example uses the same free, no-auth tools (DeepWiki, arXiv, Crossref, Hacker News) so you can run them immediately with just an LLM API key.
+
+See the [examples/](examples/) directory for complete, runnable code.
 
 ---
 
@@ -570,7 +608,7 @@ Self-contained. The orchestrator provisions encrypted credentials into the sandb
 │                                                      │
 │  /run/ati/.key  (session key, deleted after read)    │
 │  ~/.ati/manifests/*.toml  (your tool definitions)    │
-│  ~/.ati/scopes.json  (allowed tools + expiry)        │
+│  ATI_SESSION_TOKEN  (JWT with scopes + expiry)       │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -644,17 +682,48 @@ USAGE:
     ati [OPTIONS] <COMMAND>
 
 COMMANDS:
+    init       Initialize ATI directory structure (~/.ati/)
+    keys       Manage API keys in the encrypted keyring
     call       Execute a tool by name
     tools      List, inspect, search, and discover tools
+    mcp        Add, list, and remove MCP provider manifests
+    openapi    Inspect and import OpenAPI specs as manifests
     skills     Manage skill files (methodology docs for agents)
     assist     LLM-powered tool discovery
     auth       Authentication and scope information
+    token      JWT token management (keygen, issue, inspect, validate)
     proxy      Run ATI as a proxy server (holds keys, serves sandbox agents)
     version    Print version information
 
 OPTIONS:
     --output <FORMAT>   Output format: json, table, text [default: text]
     --verbose           Enable debug output
+```
+
+### Getting Started
+
+```bash
+# Initialize ATI directory
+ati init
+
+# Add API keys to the encrypted keyring
+ati keys set github_token ghp_abc123
+ati keys set serpapi_api_key your-key-here
+
+# Add an MCP provider (generates TOML manifest automatically)
+ati mcp add github --transport stdio \
+  --command npx --args "-y" --args "@modelcontextprotocol/server-github" \
+  --env 'GITHUB_PERSONAL_ACCESS_TOKEN=${github_token}'
+
+# Add an HTTP MCP provider
+ati mcp add serpapi --transport http \
+  --url 'https://mcp.serpapi.com/${serpapi_api_key}/mcp'
+
+# Import an OpenAPI spec
+ati openapi import https://api.example.com/openapi.json --name myapi
+
+# List everything available
+ati tools list
 ```
 
 ### Common Usage
@@ -686,6 +755,43 @@ ati auth status
 
 # LLM-powered discovery
 ati assist "I need to look up a company's SEC filings"
+```
+
+### MCP Provider Management
+
+```bash
+# Add HTTP transport MCP server
+ati mcp add parallel --transport http \
+  --url "https://search-mcp.parallel.ai/mcp" \
+  --auth bearer --auth-key parallel_api_key
+
+# Add stdio transport MCP server
+ati mcp add github --transport stdio \
+  --command npx --args "-y" --args "@modelcontextprotocol/server-github" \
+  --env 'GITHUB_PERSONAL_ACCESS_TOKEN=${github_token}'
+
+# List configured MCP providers
+ati mcp list
+
+# Remove an MCP provider
+ati mcp remove parallel
+```
+
+### JWT Token Management
+
+```bash
+# Generate a signing key
+ati token keygen ES256    # Asymmetric (recommended for production)
+ati token keygen HS256    # Symmetric (simpler, single-machine setups)
+
+# Issue a scoped session token
+ati token issue --sub agent-7 --scope "tool:web_search tool:github__* help" --ttl 3600
+
+# Inspect a token (decode without verification)
+ati token inspect $ATI_SESSION_TOKEN
+
+# Validate a token (full signature + expiry check)
+ati token validate $ATI_SESSION_TOKEN --secret $ATI_JWT_SECRET
 ```
 
 ### Output Formats
@@ -849,7 +955,7 @@ Resolution order:
 
 ```bash
 # Debug: see what skills resolve for your current scopes
-ati skills resolve --scopes ~/.ati/scopes.json
+ati skills resolve
 ```
 
 ### Skills in `ati assist`
@@ -879,7 +985,7 @@ cargo build
 # Build (release, for sandbox deployment)
 cargo build --release
 
-# Run tests (145+ tests — unit, integration, e2e, and live MCP)
+# Run tests (270+ tests — unit, integration, e2e, and live MCP)
 cargo test
 bash scripts/test_skills_e2e.sh
 
@@ -930,22 +1036,25 @@ ati/
 │   ├── cli/
 │   │   ├── call.rs         # ati call — routes to HTTP, MCP, xAI, or proxy
 │   │   ├── tools.rs        # ati tools list/info/search/providers
+│   │   ├── mcp.rs          # ati mcp add/list/remove — generate MCP manifests from CLI
 │   │   ├── skills.rs       # ati skills — full CRUD, proxy forwarding, search, resolve
 │   │   ├── help.rs         # ati assist — LLM-powered discovery with skill context
 │   │   ├── openapi.rs      # ati openapi inspect/import — spec tools
-│   │   └── auth.rs         # ati auth status
+│   │   ├── auth.rs         # ati auth status — JWT-based session info
+│   │   └── token.rs        # ati token keygen/issue/inspect/validate
 │   ├── core/
 │   │   ├── manifest.rs     # TOML manifest parsing + registry (HTTP, MCP, OpenAPI)
 │   │   ├── openapi.rs      # OpenAPI 3.0 spec parsing, tool registration, param classification
+│   │   ├── jwt.rs          # JWT issuance, validation, JWKS — ES256 and HS256
 │   │   ├── skill.rs        # Skill metadata, registry, scope-driven resolution
 │   │   ├── mcp_client.rs   # MCP client — stdio + Streamable HTTP transport
-│   │   ├── http.rs         # HTTP execution + auth injection + classified params
+│   │   ├── http.rs         # HTTP execution + auth injection + SSRF/header protection
 │   │   ├── keyring.rs      # AES-256-GCM encrypted credential storage
-│   │   ├── scope.rs        # Per-tool scope enforcement with expiry + wildcards
+│   │   ├── scope.rs        # Per-tool scope enforcement with wildcards, from JWT claims
 │   │   ├── response.rs     # JSONPath extraction + output formatting
 │   │   └── xai.rs          # xAI/Grok agentic handler
 │   ├── proxy/
-│   │   ├── client.rs       # HTTP + MCP + skills forwarding to proxy (Bearer auth)
+│   │   ├── client.rs       # HTTP + MCP + skills forwarding to proxy (JWT Bearer auth)
 │   │   └── server.rs       # axum proxy server — /call, /mcp, /help, /skills, /skills/resolve
 │   ├── security/
 │   │   ├── memory.rs       # mlock, madvise, zeroize
@@ -954,16 +1063,18 @@ ati/
 │   │   ├── json.rs, table.rs, text.rs
 │   └── providers/
 │       └── generic.rs      # Generic HTTP provider
-└── tests/                  # 145+ tests — unit, integration, e2e, and live MCP
+└── tests/                  # 270+ tests — unit, integration, e2e, and live MCP
     ├── manifest_test.rs    # TOML parsing, MCP/OpenAPI provider fields
     ├── openapi_test.rs     # OpenAPI spec parsing, tool generation, filtering
+    ├── mcp_cmd_test.rs     # ati mcp add/list/remove CLI tests
+    ├── http_test.rs        # Header deny-list, SSRF protection
     ├── skill_test.rs       # Skill loading, resolution, search, transitive deps
     ├── keyring_test.rs     # Encryption, key resolution
-    ├── scope_test.rs       # Scope enforcement + wildcards
+    ├── scope_test.rs       # Scope enforcement, wildcard matching, JWT integration
     ├── call_test.rs        # CLI dispatch (HTTP + MCP routing)
     ├── help_test.rs        # LLM-powered discovery with skill context
     ├── proxy_test.rs       # Proxy client forwarding
-    ├── proxy_server_test.rs # Proxy server endpoints including /mcp and /skills
+    ├── proxy_server_test.rs # Proxy server endpoints, JWT auth middleware
     └── mcp_live_test.rs    # Live MCP integration (GitHub, Linear, DeepWiki, Everything)
 ```
 

@@ -1,0 +1,6 @@
+# No Python dependencies — Codex is a Node.js CLI tool.
+# Install: npm i -g @openai/codex
+#
+# The Python scripts (mcp_agent.py, openapi_agent.py) are thin wrappers
+# around `codex exec` for consistency with other ATI examples.
+# They use only the Python standard library.

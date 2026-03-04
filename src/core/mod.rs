@@ -1,4 +1,5 @@
 pub mod http;
+pub mod jwt;
 pub mod keyring;
 pub mod manifest;
 pub mod mcp_client;

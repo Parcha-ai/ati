@@ -1,0 +1,16 @@
+{
+  "name": "ati-pi-examples",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "mcp": "npx tsx mcp_agent.ts",
+    "openapi": "npx tsx openapi_agent.ts"
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.55.0",
+    "@mariozechner/pi-ai": "^0.55.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0"
+  }
+}

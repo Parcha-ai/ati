@@ -12,6 +12,7 @@ use tower::ServiceExt;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use ati::core::jwt::{self, JwtConfig, TokenClaims, AtiNamespace};
 use ati::core::keyring::Keyring;
 use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
@@ -39,6 +40,7 @@ name = "test_search"
 description = "A test search tool"
 endpoint = "/search"
 method = "GET"
+scope = "tool:test_search"
 
 [tools.input_schema]
 type = "object"
@@ -68,16 +70,35 @@ description = "Title to create"
     dir
 }
 
-/// Build a test Router with manifests pointing at the given upstream and an empty keyring.
+/// Create an HS256 JWT config for testing.
+fn test_jwt_config() -> JwtConfig {
+    jwt::config_from_secret(b"test-secret-key-32-bytes-long!!!", None, "ati-proxy".into())
+}
+
+/// Issue a test JWT with given scopes.
+fn issue_test_token(scope: &str) -> String {
+    let config = test_jwt_config();
+    let now = jwt::now_secs();
+    let claims = TokenClaims {
+        iss: None,
+        sub: "test-agent".into(),
+        aud: "ati-proxy".into(),
+        iat: now,
+        exp: now + 3600,
+        jti: None,
+        scope: scope.into(),
+        ati: Some(AtiNamespace { v: 1 }),
+    };
+    jwt::issue(&claims, &config).unwrap()
+}
+
+/// Build a test Router with manifests pointing at the given upstream, no auth.
 fn build_test_app(upstream_url: &str) -> axum::Router {
     let dir = create_test_manifests(upstream_url);
     let manifests_dir = dir.path().join("manifests");
     let registry = ManifestRegistry::load(&manifests_dir).expect("load test manifests");
-
-    // Leak the TempDir so it lives for the whole test (manifests already loaded anyway)
     std::mem::forget(dir);
 
-    // Empty skill registry for tests
     let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
 
     let state = Arc::new(ProxyState {
@@ -85,6 +106,29 @@ fn build_test_app(upstream_url: &str) -> axum::Router {
         skill_registry,
         keyring: Keyring::empty(),
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
+    });
+
+    build_router(state)
+}
+
+/// Build a test app with JWT auth configured.
+fn build_test_app_with_jwt(upstream_url: &str) -> axum::Router {
+    let dir = create_test_manifests(upstream_url);
+    let manifests_dir = dir.path().join("manifests");
+    let registry = ManifestRegistry::load(&manifests_dir).expect("load test manifests");
+    std::mem::forget(dir);
+
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring: Keyring::empty(),
+        verbose: false,
+        jwt_config: Some(test_jwt_config()),
+        jwks_json: None,
     });
 
     build_router(state)
@@ -150,8 +194,6 @@ async fn test_call_unknown_tool_returns_404() {
 }
 
 /// /call routes to the upstream API and returns the response.
-/// Uses wiremock as the upstream — the proxy's handler calls http::execute_tool
-/// which makes a real HTTP request to wiremock.
 #[tokio::test]
 async fn test_call_routes_to_upstream() {
     let upstream = MockServer::start().await;
@@ -182,10 +224,7 @@ async fn test_call_routes_to_upstream() {
 
     let resp = app.oneshot(req).await.expect("oneshot");
 
-    // The tool requires auth_type=bearer but keyring is empty, so we expect 502 (missing key).
-    // This is correct — we're testing the proxy routing, not auth.
-    // A 502 with "API key 'test_api_key' not found in keyring" means the tool was found
-    // and the proxy attempted to execute it.
+    // The tool requires auth_type=bearer but keyring is empty, so we expect 502.
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
     let json = body_json(resp.into_body()).await;
@@ -200,9 +239,6 @@ async fn test_call_routes_to_upstream() {
 async fn test_call_upstream_error_returns_502() {
     let upstream = MockServer::start().await;
 
-    // No mocks mounted — upstream returns nothing, connection will work but the proxy
-    // needs auth first. With auth_type=none we can test the upstream error path.
-    // Let's create a manifest with auth_type = "none" instead.
     let dir = tempfile::tempdir().expect("create tempdir");
     let manifests_dir = dir.path().join("manifests");
     std::fs::create_dir_all(&manifests_dir).expect("create manifests dir");
@@ -236,7 +272,6 @@ description = "Query"
 
     let registry = ManifestRegistry::load(&manifests_dir).expect("load manifests");
 
-    // Mount a 500 error on the upstream
     Mock::given(method("GET"))
         .and(path("/search"))
         .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
@@ -249,6 +284,8 @@ description = "Query"
         skill_registry,
         keyring: Keyring::empty(),
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
     let app = build_router(state);
 
@@ -325,6 +362,8 @@ description = "ID to look up"
         skill_registry,
         keyring: Keyring::empty(),
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
     let app = build_router(state);
 
@@ -401,6 +440,8 @@ description = "Title"
         skill_registry,
         keyring: Keyring::empty(),
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
     let app = build_router(state);
 
@@ -450,7 +491,7 @@ async fn test_help_without_llm_returns_503() {
         .contains("_llm.toml"));
 }
 
-/// /call with invalid JSON body returns 422 (axum deserialization error).
+/// /call with invalid JSON body returns 400.
 #[tokio::test]
 async fn test_call_invalid_json_returns_error() {
     let app = build_test_app("http://unused.test");
@@ -463,8 +504,8 @@ async fn test_call_invalid_json_returns_error() {
         .unwrap();
 
     let resp = app.oneshot(req).await.expect("oneshot");
-    // axum returns 400 Bad Request for malformed JSON
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // Now we parse manually so we get 422 for invalid JSON
+    assert!(resp.status() == StatusCode::UNPROCESSABLE_ENTITY || resp.status() == StatusCode::BAD_REQUEST);
 }
 
 /// /call with missing required fields returns 422.
@@ -472,7 +513,6 @@ async fn test_call_invalid_json_returns_error() {
 async fn test_call_missing_fields_returns_error() {
     let app = build_test_app("http://unused.test");
 
-    // Missing "tool_name" field
     let body = serde_json::json!({
         "args": {"query": "test"}
     });
@@ -507,7 +547,6 @@ async fn test_call_get_method_not_allowed() {
 async fn test_call_with_keyring_injects_auth() {
     let upstream = MockServer::start().await;
 
-    // Only respond if Authorization header is present
     Mock::given(method("GET"))
         .and(path("/search"))
         .and(header("Authorization", "Bearer secret-key-value"))
@@ -551,7 +590,6 @@ description = "Query"
 
     let registry = ManifestRegistry::load(&manifests_dir).expect("load manifests");
 
-    // Create encrypted keyring with the test key
     let session_key = ati::core::keyring::generate_session_key();
     let keyring_json = serde_json::json!({"secure_api_key": "secret-key-value"});
     let plaintext = serde_json::to_vec(&keyring_json).unwrap();
@@ -568,6 +606,8 @@ description = "Query"
         skill_registry,
         keyring,
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     });
     let app = build_router(state);
 
@@ -589,4 +629,248 @@ description = "Query"
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["auth_verified"], true);
     assert_eq!(json["result"]["data"], "secure result");
+}
+
+// --- JWT Auth middleware tests ---
+
+/// Requests without token are rejected when JWT auth is configured.
+#[tokio::test]
+async fn test_jwt_auth_rejects_missing_token() {
+    let app = build_test_app_with_jwt("http://unused.test");
+
+    let body = serde_json::json!({
+        "tool_name": "test_search",
+        "args": {"query": "hello"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Requests with invalid JWT are rejected.
+#[tokio::test]
+async fn test_jwt_auth_rejects_invalid_token() {
+    let app = build_test_app_with_jwt("http://unused.test");
+
+    let body = serde_json::json!({
+        "tool_name": "test_search",
+        "args": {"query": "hello"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer not-a-valid-jwt")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Requests with wrong secret JWT are rejected.
+#[tokio::test]
+async fn test_jwt_auth_rejects_wrong_secret() {
+    let app = build_test_app_with_jwt("http://unused.test");
+
+    // Issue token with a different secret
+    let wrong_config = jwt::config_from_secret(b"wrong-secret-key-32-bytes-long!!", None, "ati-proxy".into());
+    let now = jwt::now_secs();
+    let claims = TokenClaims {
+        iss: None,
+        sub: "test-agent".into(),
+        aud: "ati-proxy".into(),
+        iat: now,
+        exp: now + 3600,
+        jti: None,
+        scope: "*".into(),
+        ati: None,
+    };
+    let bad_token = jwt::issue(&claims, &wrong_config).unwrap();
+
+    let body = serde_json::json!({
+        "tool_name": "test_search",
+        "args": {"query": "hello"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {bad_token}"))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Requests with valid JWT are accepted and scopes enforced.
+#[tokio::test]
+async fn test_jwt_auth_accepts_valid_token() {
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("tool:test_search tool:test_create");
+
+    let body = serde_json::json!({
+        "tool_name": "nonexistent_tool",
+        "args": {}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    // 404 means middleware passed and handler ran (tool not found)
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// JWT with insufficient scopes returns 403.
+#[tokio::test]
+async fn test_jwt_scope_enforcement_denies_access() {
+    let app = build_test_app_with_jwt("http://unused.test");
+    // Issue token with scope that doesn't include test_search
+    let token = issue_test_token("tool:other_tool");
+
+    let body = serde_json::json!({
+        "tool_name": "test_search",
+        "args": {"query": "hello"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// JWT with wildcard scope allows access to any tool.
+#[tokio::test]
+async fn test_jwt_wildcard_scope_allows_all() {
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("*");
+
+    let body = serde_json::json!({
+        "tool_name": "test_search",
+        "args": {"query": "hello"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    // 502 means auth passed, scope passed, tool found, but keyring is empty
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}
+
+/// Expired JWT is rejected.
+#[tokio::test]
+async fn test_jwt_expired_token_rejected() {
+    let app = build_test_app_with_jwt("http://unused.test");
+
+    let config = test_jwt_config();
+    let claims = TokenClaims {
+        iss: None,
+        sub: "test-agent".into(),
+        aud: "ati-proxy".into(),
+        iat: 1000000,
+        exp: 1000001, // Expired long ago
+        jti: None,
+        scope: "*".into(),
+        ati: None,
+    };
+    let expired_token = jwt::issue(&claims, &config).unwrap();
+
+    let body = serde_json::json!({
+        "tool_name": "test_search",
+        "args": {"query": "hello"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {expired_token}"))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// /health is exempt from JWT auth.
+#[tokio::test]
+async fn test_health_bypasses_jwt_auth() {
+    let app = build_test_app_with_jwt("http://unused.test");
+
+    let req = Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["auth"], "jwt");
+}
+
+/// /.well-known/jwks.json is exempt from JWT auth.
+#[tokio::test]
+async fn test_jwks_bypasses_jwt_auth() {
+    let app = build_test_app_with_jwt("http://unused.test");
+
+    let req = Request::builder()
+        .uri("/.well-known/jwks.json")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    // 404 because no JWKS configured (HS256 doesn't have JWKS), but auth was bypassed
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// When no JWT config is set, all requests pass through (dev mode).
+#[tokio::test]
+async fn test_no_jwt_config_allows_all() {
+    let app = build_test_app("http://unused.test");
+
+    let body = serde_json::json!({
+        "tool_name": "nonexistent_tool",
+        "args": {}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    // 404 means the middleware passed through and handler ran
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

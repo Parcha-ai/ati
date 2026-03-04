@@ -314,10 +314,28 @@ impl SkillRegistry {
 
     /// Read a specific reference file.
     pub fn read_reference(&self, skill_name: &str, ref_name: &str) -> Result<String, SkillError> {
+        // Path traversal protection: reject names with path components
+        if ref_name.contains("..") || ref_name.contains('/') || ref_name.contains('\\') || ref_name.contains('\0') {
+            return Err(SkillError::NotFound(format!(
+                "Invalid reference name '{ref_name}' — path traversal not allowed"
+            )));
+        }
+
         let skill = self
             .get_skill(skill_name)
             .ok_or_else(|| SkillError::NotFound(skill_name.to_string()))?;
-        let ref_path = skill.dir.join("references").join(ref_name);
+        let refs_dir = skill.dir.join("references");
+        let ref_path = refs_dir.join(ref_name);
+
+        // Canonicalize and verify the resolved path is inside the references directory
+        if let (Ok(canonical_ref), Ok(canonical_dir)) = (ref_path.canonicalize(), refs_dir.canonicalize()) {
+            if !canonical_ref.starts_with(&canonical_dir) {
+                return Err(SkillError::NotFound(format!(
+                    "Reference '{ref_name}' resolves outside references directory"
+                )));
+            }
+        }
+
         if !ref_path.exists() {
             return Err(SkillError::NotFound(format!(
                 "Reference '{ref_name}' in skill '{skill_name}'"
@@ -440,16 +458,25 @@ pub fn resolve_skills<'a>(
         .collect()
 }
 
+/// Maximum size of skill content injected into LLM system prompts (32 KB).
+/// Prevents prompt injection via extremely large SKILL.md files.
+const MAX_SKILL_INJECT_SIZE: usize = 32 * 1024;
+
 /// Build a skill context string for LLM system prompts.
 /// For each skill: name, description, hint, covered tools.
+/// Content is bounded and delimited to mitigate prompt injection.
 pub fn build_skill_context(skills: &[&SkillMeta]) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
+    let mut total_size = 0;
     let mut sections = Vec::new();
     for skill in skills {
-        let mut section = format!("- **{}**: {}", skill.name, skill.description);
+        let mut section = format!(
+            "--- BEGIN SKILL: {} ---\n- **{}**: {}",
+            skill.name, skill.name, skill.description
+        );
         if let Some(hint) = &skill.hint {
             section.push_str(&format!("\n  Hint: {hint}"));
         }
@@ -461,6 +488,13 @@ pub fn build_skill_context(skills: &[&SkillMeta]) -> String {
                 "\n  Related skills: {}",
                 skill.suggests.join(", ")
             ));
+        }
+        section.push_str(&format!("\n--- END SKILL: {} ---", skill.name));
+
+        total_size += section.len();
+        if total_size > MAX_SKILL_INJECT_SIZE {
+            sections.push("(remaining skills truncated due to size limit)".to_string());
+            break;
         }
         sections.push(section);
     }
@@ -810,10 +844,8 @@ description = "Test"
 
         let scopes = ScopeConfig {
             scopes: vec!["skill:skill-a".to_string()],
-            agent_id: String::new(),
-            job_id: String::new(),
+            sub: String::new(),
             expires_at: 0,
-            hmac: None,
         };
 
         let resolved = resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -845,10 +877,8 @@ description = "Test"
 
         let scopes = ScopeConfig {
             scopes: vec!["tool:ca_sanctions_search".to_string()],
-            agent_id: String::new(),
-            job_id: String::new(),
+            sub: String::new(),
             expires_at: 0,
-            hmac: None,
         };
 
         let resolved = resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -898,10 +928,8 @@ tools = ["tool_b"]
 
         let scopes = ScopeConfig {
             scopes: vec!["tool:tool_a".to_string()],
-            agent_id: String::new(),
-            job_id: String::new(),
+            sub: String::new(),
             expires_at: 0,
-            hmac: None,
         };
 
         let resolved = resolve_skills(&skill_reg, &manifest_reg, &scopes);

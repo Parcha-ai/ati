@@ -20,6 +20,14 @@ pub enum HttpError {
     ParseError(String),
     #[error("OAuth2 token exchange failed: {0}")]
     Oauth2Error(String),
+    #[error("Invalid path parameter '{key}': value '{value}' contains forbidden characters")]
+    InvalidPathParam { key: String, value: String },
+    #[error("Header '{0}' is not allowed as a user-supplied parameter")]
+    DeniedHeader(String),
+    #[error("SSRF protection: URL '{0}' targets a private/internal network address")]
+    SsrfBlocked(String),
+    #[error("OAuth2 token URL must use HTTPS: '{0}'")]
+    InsecureTokenUrl(String),
 }
 
 /// Cached OAuth2 token: (access_token, expiry_instant)
@@ -27,6 +35,109 @@ static OAUTH2_CACHE: std::sync::LazyLock<Mutex<HashMap<String, (String, Instant)
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
+/// Validate that a URL does not target private/internal network addresses (SSRF protection).
+/// Checks the hostname against deny-listed private IP ranges.
+///
+/// Enforcement is controlled by `ATI_SSRF_PROTECTION` env var:
+/// - "1" or "true": block requests to private addresses (default in proxy mode)
+/// - "warn": log a warning but allow the request
+/// - unset/other: allow the request (for local development/testing)
+pub fn validate_url_not_private(url: &str) -> Result<(), HttpError> {
+    let mode = std::env::var("ATI_SSRF_PROTECTION").unwrap_or_default();
+    let enforce = mode == "1" || mode.eq_ignore_ascii_case("true");
+    let warn_only = mode.eq_ignore_ascii_case("warn");
+
+    if !enforce && !warn_only {
+        return Ok(());
+    }
+    // Parse just the host part
+    let host = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+
+    if host.is_empty() {
+        return Ok(());
+    }
+
+    let mut is_private = false;
+
+    // Check literal IP addresses
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        if ip.is_loopback()           // 127.0.0.0/8
+            || ip.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+            || ip.is_link_local()     // 169.254.0.0/16
+            || ip.is_unspecified()    // 0.0.0.0
+            || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127)  // CGNAT 100.64.0.0/10
+        {
+            is_private = true;
+        }
+    }
+
+    // Check common internal hostnames
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost"
+        || host_lower == "metadata.google.internal"
+        || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".local")
+    {
+        is_private = true;
+    }
+
+    if is_private {
+        if warn_only {
+            eprintln!("Warning: SSRF protection — URL targets private address: {url}");
+            return Ok(());
+        }
+        return Err(HttpError::SsrfBlocked(url.to_string()));
+    }
+
+    Ok(())
+}
+
+/// Headers that must never be set by agent-supplied parameters.
+/// Checked case-insensitively.
+const DENIED_HEADERS: &[&str] = &[
+    "authorization",
+    "host",
+    "cookie",
+    "set-cookie",
+    "content-type",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "proxy-authorization",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+];
+
+/// Check that classified header parameters don't contain denied headers.
+pub fn validate_headers(
+    headers: &HashMap<String, String>,
+    provider_auth_header: Option<&str>,
+) -> Result<(), HttpError> {
+    for key in headers.keys() {
+        let lower = key.to_lowercase();
+        if DENIED_HEADERS.contains(&lower.as_str()) {
+            return Err(HttpError::DeniedHeader(key.clone()));
+        }
+        if let Some(auth_header) = provider_auth_header {
+            if lower == auth_header.to_lowercase() {
+                return Err(HttpError::DeniedHeader(key.clone()));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Merge manifest defaults into the args map for any params not provided by caller.
 fn merge_defaults(tool: &Tool, args: &HashMap<String, Value>) -> HashMap<String, Value> {
@@ -115,13 +226,47 @@ fn classify_params(
 }
 
 /// Substitute path parameters like `{petId}` in the endpoint template.
-/// Returns the resolved URL path string.
-fn substitute_path_params(endpoint: &str, path_args: &HashMap<String, String>) -> String {
+/// Rejects values containing path traversal or URL-breaking characters,
+/// then percent-encodes the value before substitution.
+fn substitute_path_params(
+    endpoint: &str,
+    path_args: &HashMap<String, String>,
+) -> Result<String, HttpError> {
     let mut result = endpoint.to_string();
     for (key, value) in path_args {
-        result = result.replace(&format!("{{{key}}}"), value);
+        if value.contains("..")
+            || value.contains('/')
+            || value.contains('\\')
+            || value.contains('?')
+            || value.contains('#')
+            || value.contains('\0')
+        {
+            return Err(HttpError::InvalidPathParam {
+                key: key.clone(),
+                value: value.clone(),
+            });
+        }
+        let encoded = percent_encode_path_segment(value);
+        result = result.replace(&format!("{{{key}}}"), &encoded);
     }
-    result
+    Ok(result)
+}
+
+/// Percent-encode a path segment value. Encodes everything except unreserved chars
+/// (RFC 3986 section 2.3: ALPHA / DIGIT / "-" / "." / "_" / "~").
+fn percent_encode_path_segment(s: &str) -> String {
+    let mut encoded = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
 }
 
 /// Convert a serde_json::Value to a URL-safe string.
@@ -149,6 +294,9 @@ pub async fn execute_tool(
     args: &HashMap<String, Value>,
     keyring: &Keyring,
 ) -> Result<Value, HttpError> {
+    // SSRF protection: validate base_url is not targeting private networks
+    validate_url_not_private(&provider.base_url)?;
+
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
         .build()?;
@@ -158,8 +306,11 @@ pub async fn execute_tool(
 
     // Try location-aware classification (OpenAPI tools have x-ati-param-location)
     let mut request = if let Some(classified) = classify_params(tool, &merged_args) {
+        // Validate headers against deny-list before injecting
+        validate_headers(&classified.header, provider.auth_header_name.as_deref())?;
+
         // Location-aware mode: substitute path params, route by location
-        let resolved_endpoint = substitute_path_params(&tool.endpoint, &classified.path);
+        let resolved_endpoint = substitute_path_params(&tool.endpoint, &classified.path)?;
         let url = format!(
             "{}{}",
             provider.base_url.trim_end_matches('/'),
@@ -358,6 +509,11 @@ async fn get_oauth2_token(
         None => return Err(HttpError::Oauth2Error("oauth2_token_url not set".into())),
     };
 
+    // Enforce HTTPS for OAuth2 token URLs (credentials are sent in plaintext otherwise)
+    if token_url.starts_with("http://") {
+        return Err(HttpError::InsecureTokenUrl(token_url));
+    }
+
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
         .build()?;
@@ -417,4 +573,110 @@ async fn get_oauth2_token(
     }
 
     Ok(access_token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_substitute_path_params_normal() {
+        let mut args = HashMap::new();
+        args.insert("petId".to_string(), "123".to_string());
+        let result = substitute_path_params("/pet/{petId}", &args).unwrap();
+        assert_eq!(result, "/pet/123");
+    }
+
+    #[test]
+    fn test_substitute_path_params_rejects_dotdot() {
+        let mut args = HashMap::new();
+        args.insert("id".to_string(), "../admin".to_string());
+        assert!(substitute_path_params("/resource/{id}", &args).is_err());
+    }
+
+    #[test]
+    fn test_substitute_path_params_rejects_slash() {
+        let mut args = HashMap::new();
+        args.insert("id".to_string(), "foo/bar".to_string());
+        assert!(substitute_path_params("/resource/{id}", &args).is_err());
+    }
+
+    #[test]
+    fn test_substitute_path_params_rejects_backslash() {
+        let mut args = HashMap::new();
+        args.insert("id".to_string(), "foo\\bar".to_string());
+        assert!(substitute_path_params("/resource/{id}", &args).is_err());
+    }
+
+    #[test]
+    fn test_substitute_path_params_rejects_question() {
+        let mut args = HashMap::new();
+        args.insert("id".to_string(), "foo?bar=1".to_string());
+        assert!(substitute_path_params("/resource/{id}", &args).is_err());
+    }
+
+    #[test]
+    fn test_substitute_path_params_rejects_hash() {
+        let mut args = HashMap::new();
+        args.insert("id".to_string(), "foo#bar".to_string());
+        assert!(substitute_path_params("/resource/{id}", &args).is_err());
+    }
+
+    #[test]
+    fn test_substitute_path_params_rejects_null_byte() {
+        let mut args = HashMap::new();
+        args.insert("id".to_string(), "foo\0bar".to_string());
+        assert!(substitute_path_params("/resource/{id}", &args).is_err());
+    }
+
+    #[test]
+    fn test_substitute_path_params_encodes_special() {
+        let mut args = HashMap::new();
+        args.insert("name".to_string(), "hello world".to_string());
+        let result = substitute_path_params("/users/{name}", &args).unwrap();
+        assert_eq!(result, "/users/hello%20world");
+    }
+
+    #[test]
+    fn test_substitute_path_params_preserves_unreserved() {
+        let mut args = HashMap::new();
+        args.insert("id".to_string(), "abc-123_test.v2~draft".to_string());
+        let result = substitute_path_params("/items/{id}", &args).unwrap();
+        assert_eq!(result, "/items/abc-123_test.v2~draft");
+    }
+
+    #[test]
+    fn test_substitute_path_params_encodes_at_sign() {
+        let mut args = HashMap::new();
+        args.insert("user".to_string(), "user@domain".to_string());
+        let result = substitute_path_params("/profile/{user}", &args).unwrap();
+        assert_eq!(result, "/profile/user%40domain");
+    }
+
+    #[test]
+    fn test_percent_encode_path_segment_empty() {
+        assert_eq!(percent_encode_path_segment(""), "");
+    }
+
+    #[test]
+    fn test_percent_encode_path_segment_ascii_only() {
+        assert_eq!(percent_encode_path_segment("abc123"), "abc123");
+    }
+
+    #[test]
+    fn test_substitute_path_params_multiple() {
+        let mut args = HashMap::new();
+        args.insert("owner".to_string(), "acme".to_string());
+        args.insert("repo".to_string(), "widgets".to_string());
+        let result =
+            substitute_path_params("/repos/{owner}/{repo}/issues", &args).unwrap();
+        assert_eq!(result, "/repos/acme/widgets/issues");
+    }
+
+    #[test]
+    fn test_substitute_path_params_no_placeholders() {
+        let args = HashMap::new();
+        let result = substitute_path_params("/health", &args).unwrap();
+        assert_eq!(result, "/health");
+    }
 }

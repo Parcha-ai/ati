@@ -33,6 +33,11 @@ aes-gcm = "0.10"
 hmac = "0.12"
 sha2 = "0.10"
 
+# JWT
+jsonwebtoken = "9"
+uuid = { version = "1", features = ["v4"] }
+ring = "0.17"
+
 # Secure memory
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -45,6 +50,7 @@ comfy-table = "7"
 
 # Encoding
 base64 = "0.22"
+hex = "0.4"
 
 # OpenAPI spec parsing
 openapiv3 = "2"

@@ -1,4 +1,13 @@
 /target
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+
+# Research artifacts (not for distribution)
+RESEARCH_*.md
+JWT_FINDINGS_*.md
+
 *.swp
 *.swo
 *~

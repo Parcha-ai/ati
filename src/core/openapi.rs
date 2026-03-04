@@ -558,8 +558,19 @@ fn schema_to_json_type(schema: &Schema) -> Value {
     Value::Object(result)
 }
 
+/// Maximum recursion depth for schema resolution (prevents stack overflow from circular $ref).
+const MAX_SCHEMA_DEPTH: usize = 32;
+
 /// Resolve a Schema $ref to a JSON representation.
 fn resolve_schema_to_json(schema_ref: &ReferenceOr<Schema>, spec: &OpenAPI) -> Value {
+    resolve_schema_to_json_depth(schema_ref, spec, 0)
+}
+
+fn resolve_schema_to_json_depth(schema_ref: &ReferenceOr<Schema>, spec: &OpenAPI, depth: usize) -> Value {
+    if depth >= MAX_SCHEMA_DEPTH {
+        return json!({"type": "object", "description": "(schema too deeply nested)"});
+    }
+
     match schema_ref {
         ReferenceOr::Item(schema) => {
             // Build a full JSON schema from the openapiv3 Schema
@@ -572,7 +583,7 @@ fn resolve_schema_to_json(schema_ref: &ReferenceOr<Schema>, spec: &OpenAPI) -> V
                     let prop_schema = match prop_ref {
                         ReferenceOr::Item(s) => schema_to_json_type(s.as_ref()),
                         ReferenceOr::Reference { reference } => {
-                            resolve_schema_ref_to_json(reference, spec)
+                            resolve_schema_ref_to_json_depth(reference, spec, depth + 1)
                         }
                     };
                     props.insert(name.clone(), prop_schema);
@@ -591,12 +602,20 @@ fn resolve_schema_to_json(schema_ref: &ReferenceOr<Schema>, spec: &OpenAPI) -> V
 
             result
         }
-        ReferenceOr::Reference { reference } => resolve_schema_ref_to_json(reference, spec),
+        ReferenceOr::Reference { reference } => resolve_schema_ref_to_json_depth(reference, spec, depth + 1),
     }
 }
 
 /// Resolve a schema $ref string like "#/components/schemas/Pet" to JSON.
 fn resolve_schema_ref_to_json(reference: &str, spec: &OpenAPI) -> Value {
+    resolve_schema_ref_to_json_depth(reference, spec, 0)
+}
+
+fn resolve_schema_ref_to_json_depth(reference: &str, spec: &OpenAPI, depth: usize) -> Value {
+    if depth >= MAX_SCHEMA_DEPTH {
+        return json!({"type": "object", "description": "(schema too deeply nested)"});
+    }
+
     let name = match reference.strip_prefix("#/components/schemas/") {
         Some(n) => n,
         None => return json!({"type": "object"}),
@@ -608,7 +627,7 @@ fn resolve_schema_ref_to_json(reference: &str, spec: &OpenAPI) -> Value {
         .and_then(|c| c.schemas.get(name));
 
     match schema {
-        Some(schema_ref) => resolve_schema_to_json(schema_ref, spec),
+        Some(schema_ref) => resolve_schema_to_json_depth(schema_ref, spec, depth + 1),
         None => json!({"type": "object"}),
     }
 }

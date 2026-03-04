@@ -41,6 +41,8 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
         skill_registry,
         keyring: Keyring::empty(),
         verbose: false,
+        jwt_config: None,
+        jwks_json: None,
     })
 }
 
@@ -263,10 +265,8 @@ description = "Other skill"
 
     let scopes = ScopeConfig {
         scopes: vec!["skill:target".to_string()],
-        agent_id: String::new(),
-        job_id: String::new(),
+        sub: String::new(),
         expires_at: 0,
-        hmac: None,
     };
 
     let resolved = skill::resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -305,10 +305,8 @@ tools = ["other_tool"]
 
     let scopes = ScopeConfig {
         scopes: vec!["tool:my_tool".to_string()],
-        agent_id: String::new(),
-        job_id: String::new(),
+        sub: String::new(),
         expires_at: 0,
-        hmac: None,
     };
 
     let resolved = skill::resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -358,10 +356,8 @@ description = "Dependency B"
 
     let scopes = ScopeConfig {
         scopes: vec!["tool:root_tool".to_string()],
-        agent_id: String::new(),
-        job_id: String::new(),
+        sub: String::new(),
         expires_at: 0,
-        hmac: None,
     };
 
     let resolved = skill::resolve_skills(&skill_reg, &manifest_reg, &scopes);
