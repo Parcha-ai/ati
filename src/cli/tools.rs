@@ -288,6 +288,61 @@ fn search_tools(
 
 /// Score how well a tool matches the search query terms.
 /// Returns 0.0 for no match, higher scores for better matches.
+/// Common stop words to skip during fuzzy matching.
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "must",
+    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "they",
+    "how", "what", "when", "where", "which", "who", "whom", "why",
+    "to", "of", "in", "for", "on", "with", "at", "by", "from", "about",
+    "into", "through", "during", "before", "after", "above", "below",
+    "and", "but", "or", "nor", "not", "so", "if", "than", "that", "this",
+    "there", "here", "all", "each", "every", "both", "few", "more", "most",
+    "some", "any", "no", "only", "very", "just", "also", "then",
+    "use", "using", "want", "like", "way",
+];
+
+/// Jaro-Winkler threshold for considering two words a fuzzy match.
+/// 0.85 catches "repos"→"repositories", "config"→"configuration" but
+/// rejects unrelated short words.
+const FUZZY_THRESHOLD: f64 = 0.85;
+
+/// Check if a query term matches a word using substring OR Jaro-Winkler similarity.
+/// Substring is tried first (cheaper). Fuzzy is only tried for terms >= 4 chars
+/// to avoid false positives on short words.
+fn term_matches_word(term: &str, word: &str) -> bool {
+    if word.contains(term) {
+        return true;
+    }
+    // Fuzzy match: only for longer terms where edit distance is meaningful
+    if term.len() >= 4 {
+        // Check against each word in the field (split on non-alphanumeric)
+        // so "repos" can match "repositories" as a standalone word
+        return strsim::jaro_winkler(term, word) >= FUZZY_THRESHOLD;
+    }
+    false
+}
+
+/// Score a term against a text field, checking each word in the field.
+/// Returns the best match score (0.0 if no match).
+fn score_term_against_field(term: &str, field: &str, weight: f64) -> f64 {
+    // Fast path: substring match on the whole field
+    if field.contains(term) {
+        return weight;
+    }
+    // Slow path: fuzzy match against individual words (only for longer terms)
+    if term.len() >= 4 {
+        for word in field.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if word.len() >= 3 && strsim::jaro_winkler(term, word) >= FUZZY_THRESHOLD {
+                // Fuzzy matches score slightly less than exact substring
+                return weight * 0.8;
+            }
+        }
+    }
+    0.0
+}
+
 pub(crate) fn score_tool_match(
     provider: &crate::core::manifest::Provider,
     tool: &crate::core::manifest::Tool,
@@ -305,54 +360,66 @@ pub(crate) fn score_tool_match(
         .to_lowercase();
     let tags_lower: Vec<String> = tool.tags.iter().map(|t| t.to_lowercase()).collect();
 
-    for term in query_terms {
+    // Filter out stop words
+    let content_terms: Vec<&str> = query_terms
+        .iter()
+        .filter(|t| t.len() >= 2 && !STOP_WORDS.contains(&t.to_lowercase().as_str()))
+        .map(|t| *t)
+        .collect();
+
+    if content_terms.is_empty() {
+        return 0.0;
+    }
+
+    let mut matched_terms = 0;
+    for term in &content_terms {
         let mut term_score = 0.0;
 
-        // Exact name match (highest weight)
+        // Name match (highest weight) — check both exact and fuzzy
         if name_lower == *term {
             term_score += 10.0;
-        } else if name_lower.contains(term) {
-            term_score += 5.0;
+        } else {
+            term_score += score_term_against_field(term, &name_lower, 5.0);
         }
 
         // Provider name match
-        if provider_lower.contains(term) {
-            term_score += 3.0;
-        }
+        term_score += score_term_against_field(term, &provider_lower, 3.0);
 
         // Category match
-        if category_lower.contains(term) {
-            term_score += 3.0;
+        if !category_lower.is_empty() {
+            term_score += score_term_against_field(term, &category_lower, 3.0);
         }
 
         // Tag match
         for tag in &tags_lower {
-            if tag.contains(term) {
+            if term_matches_word(term, tag) {
                 term_score += 4.0;
                 break;
             }
         }
 
-        // Description match (lower weight)
-        if desc_lower.contains(term) {
-            term_score += 2.0;
-        }
+        // Description match
+        term_score += score_term_against_field(term, &desc_lower, 2.0);
 
         // Hint match
         if let Some(hint) = &tool.hint {
-            if hint.to_lowercase().contains(term) {
-                term_score += 1.5;
-            }
+            term_score += score_term_against_field(term, &hint.to_lowercase(), 1.5);
         }
 
-        if term_score == 0.0 {
-            // If any term has zero score, this tool doesn't match
-            return 0.0;
+        if term_score > 0.0 {
+            matched_terms += 1;
         }
-
         score += term_score;
     }
 
-    score
+    // Require at least half of content terms to match
+    let min_required = (content_terms.len() + 1) / 2;
+    if matched_terms < min_required {
+        return 0.0;
+    }
+
+    // Scale by match ratio so full matches rank higher than partial
+    let match_ratio = matched_terms as f64 / content_terms.len() as f64;
+    score * match_ratio
 }
 

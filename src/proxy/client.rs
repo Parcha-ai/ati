@@ -44,6 +44,8 @@ pub struct ProxyCallResponse {
 #[derive(Debug, Serialize)]
 pub struct ProxyHelpRequest {
     pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
 }
 
 /// Response from the proxy's /help endpoint.
@@ -285,6 +287,7 @@ pub async fn resolve_skills(
 pub async fn call_help(
     proxy_url: &str,
     query: &str,
+    tool: Option<&str>,
 ) -> Result<String, ProxyError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
@@ -294,6 +297,7 @@ pub async fn call_help(
 
     let payload = ProxyHelpRequest {
         query: query.to_string(),
+        tool: tool.map(|t| t.to_string()),
     };
 
     let response = build_proxy_request(&client, reqwest::Method::POST, &url)

@@ -63,6 +63,8 @@ pub struct CallResponse {
 #[derive(Debug, Deserialize)]
 pub struct HelpRequest {
     pub query: String,
+    #[serde(default)]
+    pub tool: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,7 +268,7 @@ async fn handle_help(
     Json(req): Json<HelpRequest>,
 ) -> impl IntoResponse {
     if state.verbose {
-        eprintln!("[proxy] /help query={}", req.query);
+        eprintln!("[proxy] /help query={} tool={:?}", req.query, req.tool);
     }
 
     let (llm_provider, llm_tool) = match state.registry.get_tool("_chat_completion") {
@@ -299,9 +301,6 @@ async fn handle_help(
         }
     };
 
-    let all_tools = state.registry.list_public_tools();
-    let tools_context = build_tool_context(&all_tools);
-
     let scopes = ScopeConfig::unrestricted();
     let resolved_skills =
         skill::resolve_skills(&state.skill_registry, &state.registry, &scopes);
@@ -314,9 +313,30 @@ async fn handle_help(
         )
     };
 
-    let system_prompt = HELP_SYSTEM_PROMPT
-        .replace("{tools}", &tools_context)
-        .replace("{skills_section}", &skills_section);
+    // Build system prompt — scoped or unscoped
+    let system_prompt = if let Some(ref tool_name) = req.tool {
+        // Scoped mode: narrow tools to the specified tool or provider
+        match build_scoped_prompt(tool_name, &state.registry, &skills_section) {
+            Some(prompt) => prompt,
+            None => {
+                // Fall back to unscoped if tool/provider not found
+                if state.verbose {
+                    eprintln!("[proxy] /help scope '{}' not found, falling back to unscoped", tool_name);
+                }
+                let all_tools = state.registry.list_public_tools();
+                let tools_context = build_tool_context(&all_tools);
+                HELP_SYSTEM_PROMPT
+                    .replace("{tools}", &tools_context)
+                    .replace("{skills_section}", &skills_section)
+            }
+        }
+    } else {
+        let all_tools = state.registry.list_public_tools();
+        let tools_context = build_tool_context(&all_tools);
+        HELP_SYSTEM_PROMPT
+            .replace("{tools}", &tools_context)
+            .replace("{skills_section}", &skills_section)
+    };
 
     let request_body = serde_json::json!({
         "model": "zai-glm-4.7",
@@ -984,7 +1004,14 @@ fn build_tool_context(
         if !tool.tags.is_empty() {
             summary.push_str(&format!("\n  Tags: {}", tool.tags.join(", ")));
         }
-        if let Some(schema) = &tool.input_schema {
+        // CLI tools: show passthrough usage
+        if provider.is_cli() && tool.input_schema.is_none() {
+            let cmd = provider.cli_command.as_deref().unwrap_or("?");
+            summary.push_str(&format!(
+                "\n  Usage: `ati run {} -- <args>`  (passthrough to `{}`)",
+                tool.name, cmd
+            ));
+        } else if let Some(schema) = &tool.input_schema {
             if let Some(props) = schema.get("properties") {
                 if let Some(obj) = props.as_object() {
                     let params: Vec<String> = obj
@@ -1011,4 +1038,69 @@ fn build_tool_context(
         summaries.push(summary);
     }
     summaries.join("\n\n")
+}
+
+/// Build a scoped system prompt for a specific tool or provider.
+///
+/// Returns None if the scope_name doesn't match any tool or provider.
+fn build_scoped_prompt(
+    scope_name: &str,
+    registry: &ManifestRegistry,
+    skills_section: &str,
+) -> Option<String> {
+    // Check if scope_name is a tool
+    if let Some((provider, tool)) = registry.get_tool(scope_name) {
+        let mut details = format!(
+            "**Name**: `{}`\n**Provider**: {} (handler: {})\n**Description**: {}\n",
+            tool.name, provider.name, provider.handler, tool.description
+        );
+        if let Some(cat) = &provider.category {
+            details.push_str(&format!("**Category**: {}\n", cat));
+        }
+        if provider.is_cli() {
+            let cmd = provider.cli_command.as_deref().unwrap_or("?");
+            details.push_str(&format!("\n**Usage**: `ati run {} -- <args>`  (passthrough to `{}`)\n", tool.name, cmd));
+        } else if let Some(schema) = &tool.input_schema {
+            if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+                let required: Vec<String> = schema
+                    .get("required")
+                    .and_then(|r| r.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                details.push_str("\n**Parameters**:\n");
+                for (key, val) in props {
+                    let type_str = val.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+                    let desc = val.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                    let req = if required.contains(key) { " **(required)**" } else { "" };
+                    details.push_str(&format!("- `--{key}` ({type_str}{req}): {desc}\n"));
+                }
+            }
+        }
+
+        let prompt = format!(
+            "You are an expert assistant for the `{}` tool, accessed via the `ati` CLI.\n\n\
+            ## Tool Details\n{}\n\n{}\n\n\
+            Answer the agent's question about this specific tool. Provide exact commands, explain flags and options, and give practical examples. Be concise and actionable.",
+            tool.name, details, skills_section
+        );
+        return Some(prompt);
+    }
+
+    // Check if scope_name is a provider
+    if registry.has_provider(scope_name) {
+        let tools = registry.tools_by_provider(scope_name);
+        if tools.is_empty() {
+            return None;
+        }
+        let tools_context = build_tool_context(&tools);
+        let prompt = format!(
+            "You are an expert assistant for the `{}` provider's tools, accessed via the `ati` CLI.\n\n\
+            ## Tools in provider `{}`\n{}\n\n{}\n\n\
+            Answer the agent's question about these tools. Provide exact `ati run` commands, explain parameters, and give practical examples. Be concise and actionable.",
+            scope_name, scope_name, tools_context, skills_section
+        );
+        return Some(prompt);
+    }
+
+    None
 }

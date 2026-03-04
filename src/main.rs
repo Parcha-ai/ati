@@ -62,8 +62,9 @@ pub enum Commands {
     /// LLM-powered tool discovery — ask what tool to use
     #[command(name = "assist")]
     Assist {
-        /// Natural language query describing what you need
-        query: String,
+        /// Optional tool/provider scope, followed by the query
+        #[arg(trailing_var_arg = true, required = true)]
+        args: Vec<String>,
     },
 
     /// Unified provider management — MCP, OpenAPI, and HTTP providers
@@ -464,7 +465,7 @@ async fn main() {
         Commands::Run { tool_name, args } => cli::call::execute(&cli, tool_name, args).await,
         Commands::Tool(subcmd) => cli::tools::execute(&cli, subcmd).await,
         Commands::Skill(subcmd) => cli::skills::execute(&cli, subcmd).await,
-        Commands::Assist { query } => cli::help::execute(&cli, query).await,
+        Commands::Assist { args } => cli::help::execute(&cli, args).await,
         Commands::Provider(subcmd) => cli::provider::execute(&cli, subcmd).await,
         Commands::Auth(subcmd) => cli::auth::execute(&cli, subcmd).await,
         Commands::Token(subcmd) => cli::token::execute(subcmd).map_err(|e| e as Box<dyn std::error::Error>),

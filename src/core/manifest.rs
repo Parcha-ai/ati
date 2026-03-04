@@ -615,6 +615,20 @@ impl ManifestRegistry {
             .collect()
     }
 
+    /// Check if a provider with the given name exists.
+    pub fn has_provider(&self, name: &str) -> bool {
+        self.manifests.iter().any(|m| m.provider.name == name)
+    }
+
+    /// Get tools belonging to a specific provider.
+    pub fn tools_by_provider(&self, provider_name: &str) -> Vec<(&Provider, &Tool)> {
+        self.manifests
+            .iter()
+            .filter(|m| m.provider.name == provider_name)
+            .flat_map(|m| m.tools.iter().map(move |t| (&m.provider, t)))
+            .collect()
+    }
+
     /// List all CLI providers (handler = "cli").
     pub fn list_cli_providers(&self) -> Vec<&Provider> {
         self.manifests
