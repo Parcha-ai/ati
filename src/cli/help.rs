@@ -2,7 +2,7 @@ use super::common;
 use crate::core::jwt;
 use crate::core::manifest::{ManifestRegistry, Provider, Tool};
 use crate::core::scope::{self, ScopeConfig};
-use crate::core::skill::{self, SkillRegistry};
+use crate::core::skill::SkillRegistry;
 use crate::proxy::client as proxy_client;
 use crate::Cli;
 use std::process::{Command, Stdio};
@@ -15,7 +15,13 @@ const HELP_SYSTEM_PROMPT: &str = r#"You are a tool recommendation assistant for 
 
 {skills_section}
 
-Given the user's query, recommend the most relevant tools (1-4) and explain when to use each one. Use the FULL tool name including provider prefix (e.g. `parallel_search__web_search_preview`). Show a realistic example command with `ati run`. If a methodology skill is relevant, mention `ati skill show <name>`. Be concise. Only recommend tools from the list above."#;
+Given the user's query, recommend the most relevant tools (1-4). For each tool:
+1. Explain **when and why** to use it — what it's best at, gotchas, practical tips
+2. Show a realistic `ati run` command with the FULL tool name (e.g. `finnhub__stock_candles`)
+3. Note important parameters, defaults, and common pitfalls
+4. If a skill was loaded, incorporate its methodology — don't just say "read the skill", apply its guidance directly
+
+Be practical and opinionated. An agent reading your output should be able to run the tool correctly on the first try. Only recommend tools from the list above."#;
 
 const SCOPED_HELP_SYSTEM_PROMPT: &str = r#"You are an expert assistant for the `{tool_name}` tool, accessed via the `ati` CLI.
 
@@ -26,7 +32,12 @@ const SCOPED_HELP_SYSTEM_PROMPT: &str = r#"You are an expert assistant for the `
 
 The agent runs this tool via: `ati run {tool_name} -- <args>`
 
-Answer the agent's question about this specific tool. Provide exact commands, explain flags and options, and give practical examples. Be concise and actionable."#;
+Answer the agent's question about this specific tool. Be practical:
+- Give exact commands with realistic parameter values
+- Explain important parameters, defaults, and what to watch out for
+- If a skill methodology was loaded, apply its guidance directly (don't just reference it)
+- Include tips on common mistakes and how to get the best results
+Be concise but thorough — the agent should be able to use the tool correctly on the first try."#;
 
 /// Maximum characters of CLI --help output to include in context.
 const CLI_HELP_MAX_CHARS: usize = 3000;
@@ -201,18 +212,15 @@ async fn execute_local(
     let skill_registry = SkillRegistry::load(&skills_dir).unwrap_or_else(|_| {
         SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap()
     });
-    let resolved_skills = skill::resolve_skills(&skill_registry, &registry, &scopes);
-    let skills_section = if resolved_skills.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "## Available Skills (methodology guides)\n{}",
-            skill::build_skill_context(&resolved_skills)
-        )
-    };
 
     // Build system prompt — scoped vs unscoped
     let (system_prompt, scoped_tools) = if let Some(ref tool_name) = scope_name {
+        // For scoped mode, find skills for the specific tool/provider
+        let skills_section = build_skills_for_tools(
+            &skill_registry,
+            &[tool_name.as_str()],
+            cli.verbose,
+        );
         build_scoped_context(tool_name, &registry, &skills_section, cli.verbose)?
     } else {
         // Unscoped: all public tools, pre-filtered by query
@@ -220,6 +228,10 @@ async fn execute_local(
         let scoped = scope::filter_tools_by_scope(all_tools, &scopes);
         let scoped = prefilter_tools_by_query(&scoped, &query, 50);
         let tools_context = build_tool_context(&scoped, false);
+
+        // Find skills for the pre-filtered tools (not just JWT scopes)
+        let tool_names: Vec<&str> = scoped.iter().map(|(_, t)| t.name.as_str()).collect();
+        let skills_section = build_skills_for_tools(&skill_registry, &tool_names, cli.verbose);
 
         let prompt = HELP_SYSTEM_PROMPT
             .replace("{tools}", &tools_context)
@@ -231,7 +243,6 @@ async fn execute_local(
     if cli.verbose {
         eprintln!("System prompt length: {} chars", system_prompt.len());
         eprintln!("Tools in context: {}", scoped_tools.len());
-        eprintln!("Skills in context: {}", resolved_skills.len());
     }
 
     // Call LLM and print result
@@ -518,6 +529,144 @@ async fn execute_via_proxy(
     let content = proxy_client::call_help(proxy_url, query, tool).await?;
     println!("{content}");
     Ok(())
+}
+
+/// Maximum total characters of skill content to inject into the assist prompt.
+const MAX_SKILL_CONTENT_CHARS: usize = 16000;
+
+/// Find skills for the given tool names and build a rich skills section
+/// that includes actual SKILL.md content (not just metadata).
+///
+/// Searches by: tool name binding, provider binding, and keyword matching.
+fn build_skills_for_tools(
+    skill_registry: &SkillRegistry,
+    tool_names: &[&str],
+    verbose: bool,
+) -> String {
+    // Collect unique skills across all matched tools
+    let mut seen_skills = std::collections::HashSet::new();
+    let mut skill_entries: Vec<(String, String)> = Vec::new(); // (name, content)
+    let mut total_chars = 0;
+
+    // Collect provider names from tool names (tool name format: provider__tool)
+    let mut provider_names = std::collections::HashSet::new();
+    for tool_name in tool_names {
+        if let Some(idx) = tool_name.find("__") {
+            provider_names.insert(&tool_name[..idx]);
+        }
+    }
+
+    // Phase 1: Skills bound to specific tools
+    for tool_name in tool_names {
+        for skill_meta in skill_registry.skills_for_tool(tool_name) {
+            if !seen_skills.insert(skill_meta.name.clone()) {
+                continue;
+            }
+            add_skill_content(skill_registry, skill_meta, &mut skill_entries, &mut total_chars, verbose);
+            if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+        }
+        if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+    }
+
+    // Phase 2: Skills bound to providers of matched tools
+    // Sort provider names for deterministic ordering
+    let mut sorted_providers: Vec<&str> = provider_names.into_iter().collect();
+    sorted_providers.sort();
+
+    if total_chars < MAX_SKILL_CONTENT_CHARS {
+        if verbose && !sorted_providers.is_empty() {
+            eprintln!("Skill search Phase 2: providers {:?}", sorted_providers);
+        }
+        for provider_name in &sorted_providers {
+            let provider_skills = skill_registry.skills_for_provider(provider_name);
+            if verbose && !provider_skills.is_empty() {
+                eprintln!(
+                    "  Provider '{}' has {} skills",
+                    provider_name,
+                    provider_skills.len()
+                );
+            }
+            for skill_meta in provider_skills {
+                if !seen_skills.insert(skill_meta.name.clone()) {
+                    continue;
+                }
+                add_skill_content(skill_registry, skill_meta, &mut skill_entries, &mut total_chars, verbose);
+                if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+            }
+            if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+        }
+    }
+
+    // Phase 3: Keyword search — match tool names against skill keywords
+    if total_chars < MAX_SKILL_CONTENT_CHARS {
+        for tool_name in tool_names {
+            // Extract meaningful terms from tool name (split on __ and _)
+            let terms: Vec<&str> = tool_name
+                .split("__")
+                .flat_map(|s| s.split('_'))
+                .filter(|s| s.len() > 2)
+                .collect();
+            for skill_meta in skill_registry.search(&terms.join(" ")) {
+                if !seen_skills.insert(skill_meta.name.clone()) {
+                    continue;
+                }
+                add_skill_content(skill_registry, skill_meta, &mut skill_entries, &mut total_chars, verbose);
+                if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+            }
+            if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+        }
+    }
+
+    if skill_entries.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from("## Skill Methodologies (loaded for matched tools)\n\n");
+    section.push_str("These skills contain expert methodology for using the tools above. Apply their guidance in your recommendations.\n\n");
+    for (name, content) in &skill_entries {
+        section.push_str(&format!("### Skill: {name}\n\n{content}\n\n"));
+    }
+
+    section
+}
+
+/// Helper: read and add a skill's SKILL.md content to the entries list.
+fn add_skill_content(
+    skill_registry: &SkillRegistry,
+    skill_meta: &crate::core::skill::SkillMeta,
+    skill_entries: &mut Vec<(String, String)>,
+    total_chars: &mut usize,
+    verbose: bool,
+) {
+    match skill_registry.read_content(&skill_meta.name) {
+        Ok(content) if !content.is_empty() => {
+            let max_per_skill = 4000;
+            let truncated = if content.len() > max_per_skill {
+                format!("{}...\n[truncated]", &content[..max_per_skill])
+            } else {
+                content.clone()
+            };
+
+            *total_chars += truncated.len();
+            skill_entries.push((skill_meta.name.clone(), truncated));
+            if verbose {
+                eprintln!(
+                    "Loaded skill '{}' ({} chars)",
+                    skill_meta.name,
+                    content.len()
+                );
+            }
+        }
+        _ => {
+            let meta_line = format!(
+                "- **{}**: {} (covers: {})",
+                skill_meta.name,
+                skill_meta.description,
+                skill_meta.tools.join(", ")
+            );
+            skill_entries.push((skill_meta.name.clone(), meta_line));
+        }
+    }
 }
 
 /// Pre-filter tools by fuzzy matching against the query.
