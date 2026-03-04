@@ -4,125 +4,148 @@
 
 One binary. Any agent framework. Every tool your agent needs.
 
-ATI gives AI agents secure access to HTTP APIs, MCP servers, OpenAPI services, and local CLIs — through one unified command. No custom tool wrappers. No per-SDK plumbing. If your agent framework has a shell tool, ATI works.
-
-```bash
-# HTTP API — search medical literature
-ati run medical_search --term "CRISPR gene therapy" --retmax 5
-
-# MCP server — search GitHub repos
-ati run github__search_repositories --query "rust mcp client"
-
-# OpenAPI spec — search clinical trials (auto-discovered from spec)
-ati run clinicaltrials_searchStudies --query.term "cancer immunotherapy"
-
-# Local CLI — use gh with injected credentials
-ati run gh pr list --state open --limit 5
-```
-
-Every tool looks the same from the agent's perspective: `ati run <tool> --arg value`. The agent doesn't know (or care) whether it's calling a REST API, an MCP server, an OpenAPI service, or a local CLI.
-
-### The Integration Pattern
-
-ATI works with any agent framework that has a shell tool. The integration is always the same — ~30 lines, no matter the SDK:
-
-```python
-# Give the agent shell access and tell it about ATI. That's it.
-system_prompt = """
-You have ATI on your PATH. Available commands:
-- `ati tool search <query>` — find tools by keyword
-- `ati tool info <name>` — inspect a tool's schema and usage
-- `ati run <tool> --key value` — execute a tool
-- `ati assist "<question>"` — ask for tool recommendations
-"""
-
-# Claude Agent SDK
-agent = Agent(model="claude-sonnet-4-20250514", tools=[Bash()], system=system_prompt)
-
-# OpenAI Agents SDK
-agent = Agent(model="gpt-4o", tools=[shell_tool], instructions=system_prompt)
-
-# LangChain
-agent = create_react_agent(llm, [ShellTool()], prompt=system_prompt)
-
-# ... same pattern for any framework
-```
-
-No `@tool` decorators. No function wrappers. No SDK-specific adapters. Just shell access + a system prompt.
+ATI gives AI agents secure access to APIs, MCP servers, OpenAPI services, and local CLIs — through one unified interface. No custom tool wrappers. No per-SDK plumbing. Your agent calls `ati run <tool> --arg value` and ATI handles auth, protocol bridging, and response formatting.
 
 ---
 
-## Quick Start
+## See It Work — 60 Seconds, Zero Install
 
-Get from zero to working tools in 60 seconds.
+### Import an API from its OpenAPI spec
 
-### 1. Initialize
+ClinicalTrials.gov publishes an OpenAPI spec. One command turns it into tools your agent can use:
 
 ```bash
+# Initialize ATI
 ati init
-```
 
-Creates `~/.ati/` with directories for manifests, specs, and skills.
-
-### 2. Try a Free Tool (No Auth Required)
-
-DeepWiki is a free MCP server — no API key needed:
-
-```bash
-# Add DeepWiki as a provider
-ati provider add-mcp deepwiki --transport http \
-  --url "https://mcp.deepwiki.com/mcp" \
-  --description "AI-powered docs for GitHub repos"
+# Import the spec — ATI downloads it, discovers all operations, generates the manifest
+ati provider import-openapi https://clinicaltrials.gov/api/v2/openapi.json \
+  --name clinicaltrials
 
 # See what tools were discovered
+ati tool list --provider clinicaltrials
+```
+
+That's it. Every operation in the spec is now a tool. No TOML to write, no code to generate.
+
+### Explore what you just added
+
+```bash
+# Inspect a specific tool — see its parameters, types, required fields
+ati tool info clinicaltrials_searchStudies
+
+# Ask the LLM for help — scoped to this provider
+ati assist clinicaltrials "find phase 3 cancer trials"
+```
+
+`ati assist` reads the tool schemas and returns exact `ati run` commands you can copy-paste.
+
+### Run it
+
+```bash
+# Execute the command assist recommended
+ati run clinicaltrials_searchStudies \
+  --query.term "cancer immunotherapy" \
+  --filter.overallStatus "RECRUITING" \
+  --pageSize 5
+```
+
+The agent doesn't write HTTP requests. It doesn't parse JSON responses. It calls `ati run` and gets structured text back.
+
+### Now add an MCP server — same pattern, zero install
+
+```bash
+# DeepWiki is a free MCP server — no API key needed
+ati provider add-mcp deepwiki --transport http \
+  --url "https://mcp.deepwiki.com/mcp" \
+  --description "AI-powered docs for any GitHub repo"
+
+# See the auto-discovered tools
 ati tool list --provider deepwiki
 
-# Ask a question about any GitHub repo
+# Ask a question about any repo
 ati run deepwiki__ask_question \
   --repoName "anthropics/claude-code" \
   --question "How does tool dispatch work?"
 ```
 
-### 3. Add an Authenticated Tool
-
-```bash
-# Store your GitHub token
-ati key set github_token ghp_your_token_here
-
-# Add the GitHub MCP server
-ati provider add-mcp github --transport stdio \
-  --command npx --args "-y" --args "@modelcontextprotocol/server-github" \
-  --env 'GITHUB_PERSONAL_ACCESS_TOKEN=${github_token}'
-
-# Search repos, read files, manage issues...
-ati run github__search_repositories --query "rust mcp"
-```
-
-### 4. Discover What's Available
-
-```bash
-# Fuzzy search across all tools
-ati tool search "sanctions screening"
-
-# LLM-powered recommendations with exact commands
-ati assist "How do I check SEC filings?"
-
-# Full tool catalog
-ati tool list
-```
+MCP tools are namespaced as `<provider>__<tool_name>`. ATI handles JSON-RPC framing, session management, and auth injection.
 
 ---
 
 ## Four Provider Types
 
-ATI supports four ways to connect tools. Each uses a different `handler` in the TOML manifest, but all produce the same interface: `ati run <tool> --arg value`.
+Every provider type produces the same interface: `ati run <tool> --arg value`. The agent doesn't know or care what's behind it.
 
-### HTTP APIs
+### OpenAPI Specs — Auto-discovered from any spec
 
-Hand-written TOML with full control over endpoints, parameters, and response formatting. Best for simple REST APIs.
+Point ATI at an OpenAPI 3.0 spec URL or file. It downloads the spec, discovers every operation, and registers each as a tool with auto-generated schemas.
+
+```bash
+# Preview what's in a spec before importing
+ati provider inspect-openapi https://petstore3.swagger.io/api/v3/openapi.json
+
+# Import it
+ati provider import-openapi https://api.example.com/openapi.json --name myapi
+
+# If the API needs auth, ATI tells you what key to set
+ati key set myapi_api_key sk-your-key-here
+```
+
+Supports tag/operation filtering (`--include-tags`, `--exclude-tags`) and an operation cap (`openapi_max_operations`) for large APIs.
+
+17 OpenAPI specs ship out of the box: ClinicalTrials.gov, Finnhub, SEC EDGAR, Crossref, Semantic Scholar, PubMed Central, CourtListener, Middesk, and more.
+
+### MCP Servers — Auto-discovered via protocol
+
+Any MCP server — stdio subprocess or remote HTTP — gets its tools auto-discovered. No hand-written tool definitions.
+
+```bash
+# Remote MCP server (HTTP transport)
+ati provider add-mcp linear --transport http \
+  --url "https://mcp.linear.app/mcp" \
+  --auth bearer --auth-key linear_api_key
+
+# Local MCP server (stdio transport)
+ati provider add-mcp github --transport stdio \
+  --command npx --args "-y" --args "@modelcontextprotocol/server-github" \
+  --env 'GITHUB_PERSONAL_ACCESS_TOKEN=${github_token}'
+
+# Store the key, then use the tools
+ati key set github_token ghp_your_token_here
+ati run github__search_repositories --query "rust mcp"
+ati run github__read_file --owner anthropics --repo claude-code --path README.md
+```
+
+### Local CLIs — Wrap any command with credential injection
+
+Run `gh`, `gcloud`, `kubectl`, or any CLI through ATI. The agent calls `ati run`, ATI spawns the subprocess with a curated environment, and credentials never leak to the agent.
+
+```bash
+# Wrap the GitHub CLI
+ati provider add-cli gh --command gh \
+  --env 'GH_TOKEN=${github_token}'
+
+# Wrap gcloud with a credential file
+ati provider add-cli gcloud --command gcloud \
+  --default-args "--format" --default-args "json" \
+  --env 'GOOGLE_APPLICATION_CREDENTIALS=@{gcp_service_account}'
+
+# Use them
+ati run gh pr list --state open --limit 5
+ati run gcloud compute instances list --project my-project
+```
+
+The `${key}` syntax injects a keyring secret as an env var. The `@{key}` syntax materializes it as a temporary file (0600 permissions, wiped on process exit) — for CLIs that need a credential file path.
+
+CLI providers get a curated environment (only `PATH`, `HOME`, `TMPDIR`, `LANG`, `USER`, `TERM` from the host). The subprocess can't see your shell's full environment.
+
+### HTTP Tools — Hand-written TOML for full control
+
+For APIs where you want precise control over endpoints, parameters, and response extraction, write TOML manifests directly:
 
 ```toml
-# manifests/pubmed.toml
+# ~/.ati/manifests/pubmed.toml
 [provider]
 name = "pubmed"
 description = "PubMed medical literature search"
@@ -159,130 +182,38 @@ ati run medical_search --term "CRISPR gene therapy" --retmax 5
 
 Auth types: `bearer`, `header`, `query`, `basic`, `oauth2`, `none`.
 
-### MCP Servers
+---
 
-Point ATI at any MCP server and tools are auto-discovered — no hand-written `[[tools]]` needed.
+## Manifests — Your Provider Catalog
 
-**Stdio transport** (local subprocess):
-
-```toml
-# manifests/github-mcp.toml
-[provider]
-name = "github"
-description = "GitHub via official MCP server"
-handler = "mcp"
-mcp_transport = "stdio"
-mcp_command = "npx"
-mcp_args = ["-y", "@modelcontextprotocol/server-github"]
-auth_type = "none"
-category = "developer-tools"
-
-[provider.mcp_env]
-GITHUB_PERSONAL_ACCESS_TOKEN = "${github_token}"
-```
-
-**HTTP transport** (remote server):
-
-```toml
-# manifests/linear-mcp.toml
-[provider]
-name = "linear"
-description = "Linear project management via MCP"
-handler = "mcp"
-mcp_transport = "http"
-mcp_url = "https://mcp.linear.app/mcp"
-auth_type = "bearer"
-auth_key_name = "linear_api_key"
-category = "project-management"
-```
+Every provider is a `.toml` file in `~/.ati/manifests/`. The `ati provider` commands generate these for you, but you can also edit them directly for full control.
 
 ```bash
-# Tools are auto-discovered — just run them
-ati run github__search_repositories --query "rust mcp"
-ati run github__read_file --owner anthropics --repo claude-code --path README.md
-ati run linear__list_issues --teamId "TEAM-123"
+# What you've got
+ati provider list
+ati provider info github
+
+# Add via CLI
+ati provider add-mcp ...
+ati provider add-cli ...
+ati provider import-openapi ...
+
+# Or edit manifests directly
+$EDITOR ~/.ati/manifests/my-provider.toml
+
+# Remove
+ati provider remove my-provider
 ```
 
-MCP tools are namespaced as `<provider>__<tool_name>`. ATI handles JSON-RPC framing, session management, and auth injection transparently.
-
-### OpenAPI Specs
-
-Auto-discover every operation from an OpenAPI 3.0 spec. One manifest replaces hundreds of lines of hand-written tool definitions.
-
-```toml
-# manifests/clinicaltrials.toml
-[provider]
-name = "clinicaltrials"
-description = "NIH ClinicalTrials.gov — search and retrieve clinical study data"
-handler = "openapi"
-base_url = "https://clinicaltrials.gov/api/v2"
-openapi_spec = "clinicaltrials.json"
-auth_type = "none"
-category = "medical"
-```
-
-That's it — ATI reads the spec, discovers all operations, and registers each as a tool with auto-generated schemas.
-
-```bash
-# Preview operations in a spec before importing
-ati provider inspect-openapi https://petstore3.swagger.io/api/v3/openapi.json
-
-# Import a spec (downloads + generates manifest)
-ati provider import-openapi https://api.example.com/openapi.json --name myapi
-
-# Run an auto-discovered tool
-ati run clinicaltrials_searchStudies --query.term "cancer immunotherapy"
-```
-
-Supports tag/operation filtering (`openapi_include_tags`, `openapi_exclude_tags`) and an operation cap (`openapi_max_operations`) for large APIs.
-
-17 OpenAPI specs are included out of the box: ClinicalTrials.gov, Finnhub, SEC EDGAR, Crossref, Semantic Scholar, PubMed Central, CourtListener, Middesk, and more.
-
-### Local CLIs
-
-Run `gh`, `gcloud`, `gsutil`, `kubectl`, or any CLI through ATI with credential injection. The agent calls `ati run`, ATI spawns the subprocess with a curated environment, and credentials never leak.
-
-```toml
-# manifests/gh.toml
-[provider]
-name = "gh"
-description = "GitHub CLI"
-handler = "cli"
-cli_command = "gh"
-auth_type = "none"
-
-[provider.cli_env]
-GH_TOKEN = "${github_token}"
-```
-
-The `@{key}` syntax materializes a keyring secret as a temporary file (0600 permissions, wiped on drop) — useful for CLIs that need a credential file path:
-
-```toml
-# manifests/gcloud.toml
-[provider]
-name = "gcloud"
-description = "Google Cloud CLI"
-handler = "cli"
-cli_command = "gcloud"
-cli_default_args = ["--format", "json"]
-auth_type = "none"
-
-[provider.cli_env]
-GOOGLE_APPLICATION_CREDENTIALS = "@{gcp_service_account}"
-```
-
-```bash
-ati run gh pr list --state open --limit 5
-ati run gcloud compute instances list --project my-project
-```
-
-CLI providers get a curated environment (only `PATH`, `HOME`, `TMPDIR`, `LANG`, `USER`, `TERM` from the host) plus any resolved `cli_env` vars. The subprocess can't see your shell's full environment.
+ATI ships with 42 pre-built manifests covering finance, compliance, medical, legal, search, and developer tools. Use them as-is or as templates for your own.
 
 ---
 
 ## Tool Discovery
 
-### Fuzzy Search — Offline, Instant
+Three tiers of finding the right tool.
+
+### Search — Offline, Instant
 
 ```bash
 $ ati tool search "sanctions"
@@ -295,73 +226,66 @@ PROVIDER    TOOL              DESCRIPTION
 finnhub     finnhub_quote     Get real-time stock quote
 ```
 
-Searches across tool names, descriptions, providers, categories, tags, and hints. Works in both local and proxy mode.
+Fuzzy search across tool names, descriptions, providers, categories, tags, and hints.
 
-### LLM-Powered Discovery
+### Inspect — Full Schema
 
 ```bash
-$ ati assist "How do I screen a person for sanctions?"
-1. **ca_person_sanctions_search** — Search sanctions lists for individuals
-   ```
-   ati run ca_person_sanctions_search --search_term "Person Name" --fuzziness 0.6
-   ```
+$ ati tool info clinicaltrials_searchStudies
+Tool:        clinicaltrials_searchStudies
+Provider:    clinicaltrials
+Handler:     openapi
+Description: Search for clinical studies
+Category:    medical
 
-2. **ca_person_pep_search** — Search for PEP matches
-   ```
-   ati run ca_person_pep_search --search_term "Person Name" --fuzziness 0.6
-   ```
+Input Schema:
+  --query.term (string) **required**: Search term
+  --filter.overallStatus (string): RECRUITING, COMPLETED, ...
+  --pageSize (integer): Results per page
+
+Usage:
+  ati run clinicaltrials_searchStudies --query.term "cancer" --pageSize 10
 ```
 
-Recommends tools, generates exact `ati run` commands, and includes resolved skills in its context.
-
-### Tool-Scoped Assist
-
-Scope assist to a specific tool or provider for targeted help:
+### Assist — LLM-Powered Recommendations
 
 ```bash
-# Scoped to a tool — captures the tool's schema for precise commands
-ati assist github__search_repositories "how do I search private repos?"
+# Broad — searches all tools
+$ ati assist "How do I screen a person for sanctions?"
+1. ca_person_sanctions_search — Search sanctions lists for individuals
+   ati run ca_person_sanctions_search --search_term "Person Name" --fuzziness 0.6
+
+2. ca_person_pep_search — Search for PEP matches
+   ati run ca_person_pep_search --search_term "Person Name" --fuzziness 0.6
 
 # Scoped to a provider — captures --help output for CLIs
-ati assist gh "how do I create a pull request?"
-```
+$ ati assist gh "how do I create a pull request?"
 
-### Inspection
-
-```bash
-# Full catalog
-ati tool list
-ati tool list --provider github
-
-# Deep inspection — schema, auth type, transport, usage example
-ati tool info github__search_repositories
-
-# Provider overview
-ati provider list
-ati provider info github
+# Scoped to a tool — uses the full schema for precise commands
+$ ati assist github__search_repositories "search private repos only"
 ```
 
 ---
 
 ## Security
 
-Three tiers of credential protection, matched to your threat model. Pick the one that fits — they all use the same `ati run` interface.
+Three tiers of credential protection, matched to your threat model. All use the same `ati run` interface.
 
-### Dev Mode — `~/.ati/credentials`
+### Dev Mode — Plaintext Credentials
 
-Plaintext JSON file. Quick, no ceremony. For local development where the "agent" is you.
+Quick, no ceremony. For local development.
 
 ```bash
 ati key set github_token ghp_abc123
 ati key set finnhub_api_key your-key-here
-ati key list
+ati key list                              # values masked
 ```
 
-Stored as JSON at `~/.ati/credentials` with 0600 permissions. Also supports environment variables with `ATI_KEY_` prefix (`ATI_KEY_GITHUB_TOKEN=ghp_abc123`).
+Stored at `~/.ati/credentials` with 0600 permissions. Also supports `ATI_KEY_` env var prefix.
 
-### Local Mode — `keyring.enc` + Session Key
+### Local Mode — Encrypted Keyring
 
-AES-256-GCM encrypted keyring. The orchestrator provisions a one-shot session key to `/run/ati/.key` (deleted after first read). Keys are held in mlock'd memory and zeroized on drop. For sandboxed agents where keys should be encrypted at rest.
+AES-256-GCM encrypted keyring. The orchestrator provisions a one-shot session key to `/run/ati/.key` (deleted after first read). Keys held in mlock'd memory, zeroized on drop.
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -369,242 +293,132 @@ AES-256-GCM encrypted keyring. The orchestrator provisions a one-shot session ke
 │                                                      │
 │  ┌──────────┐   ati run my_tool        ┌──────────┐ │
 │  │  Agent    │ ────────────────────────▶│   ATI    │ │
-│  │ (Claude)  │                          │  binary  │ │
-│  │           │◀────────────────────────│          │ │
-│  └──────────┘   structured text result  └────┬─────┘ │
+│  │          │                          │  binary  │ │
+│  │          │◀────────────────────────│          │ │
+│  └──────────┘   structured result      └────┬─────┘ │
 │                                              │       │
-│                    ┌─────────────────────────┘       │
-│                    │  reads encrypted keyring         │
-│                    │  injects auth headers            │
-│                    │  manages MCP subprocesses        │
-│                    │  enforces scopes                 │
-│                    ▼                                  │
-│              ┌───────────┐      HTTPS       ┌──────┐│
-│              │keyring.enc│  ──────────────▶  │ API  ││
-│              └───────────┘                   └──────┘│
+│                    reads encrypted keyring ───┘       │
+│                    injects auth headers               │
+│                    enforces scopes                    │
 │                                                      │
 │  /run/ati/.key  (session key, deleted after read)    │
-│  ~/.ati/manifests/*.toml  (your tool definitions)    │
-│  ATI_SESSION_TOKEN  (JWT with scopes + expiry)       │
 └─────────────────────────────────────────────────────┘
 ```
 
 ### Proxy Mode — Zero Credentials in the Sandbox
 
-ATI forwards all calls to an external proxy server holding the real keys. The sandbox never touches credentials — it only needs manifests and a JWT token.
+ATI forwards all calls to a central proxy server holding the real keys. The sandbox never touches credentials.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Sandbox                                             │
-│                                                      │
-│  ┌──────────┐   ati run my_tool        ┌──────────┐ │
-│  │  Agent    │ ────────────────────────▶│   ATI    │ │
-│  │ (Claude)  │                          │  binary  │ │
-│  │           │◀────────────────────────│          │ │
-│  └──────────┘   structured text result  └────┬─────┘ │
-│                                              │       │
-│              No keyring.enc needed            │       │
-│              No session key needed            │       │
-│              No MCP subprocesses              │       │
-│              Only manifests + scopes          │       │
-│                                              │       │
-└──────────────────────────────────────────────│───────┘
-                                               │
-                                          POST /call (HTTP tools)
-                                          POST /mcp  (MCP tools)
-                                               │
-                                               ▼
-┌─────────────────────────────────────────────────────┐
-│  Proxy Server (ati proxy)                            │
-│                                                      │
-│  Holds real API keys (keyring.enc or --env-keys)     │
-│  Manages MCP server subprocesses (stdio)             │
-│  Connects to remote MCP servers (HTTP)               │
-│  Injects auth, routes by tool name                   │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────┐         ┌────────────────────────────┐
+│  Sandbox                  │         │  Proxy Server (ati proxy)   │
+│                          │         │                            │
+│  Agent → ATI binary ─────│── POST ─│──▶ keyring + MCP servers   │
+│                          │  /call  │     injects auth            │
+│  No keys. No keyring.    │  /mcp   │     routes by tool name     │
+│  Only manifests + JWT.   │         │     calls upstream APIs     │
+└──────────────────────────┘         └────────────────────────────┘
 ```
 
-Switch modes with one environment variable — the agent never changes its commands:
+Switch modes with one env var — the agent never changes its commands:
 
 ```bash
 # Local mode (default)
 ati run my_tool --arg value
 
-# Proxy mode
+# Proxy mode — same command, routed to proxy
 export ATI_PROXY_URL=http://proxy-host:8090
-ati run my_tool --arg value    # same command, routed to proxy
+ati run my_tool --arg value
 ```
 
-| Aspect | Dev Mode | Local Mode | Proxy Mode |
-|--------|----------|-----------|------------|
+| | Dev Mode | Local Mode | Proxy Mode |
+|--|----------|-----------|------------|
 | **Credentials** | Plaintext file | Encrypted keyring | Not in sandbox |
-| **Key exposure** | Readable on disk | In memory (mlock'd) | Never enters sandbox |
-| **Setup** | `ati key set` | Keyring + session key | `ATI_PROXY_URL` env var |
+| **Key exposure** | Readable on disk | mlock'd memory | Never enters sandbox |
+| **Setup** | `ati key set` | Keyring + session key | `ATI_PROXY_URL` |
 | **Use case** | Local dev | Sandboxed agents | Untrusted sandboxes |
 
 ---
 
 ## JWT Scoping
 
-Each agent session gets a JWT carrying identity, permissions, and an expiry. The proxy validates the token on every request — agents only access what they're explicitly granted.
-
-### Scope Format
-
-Scopes are space-delimited strings in the JWT `scope` claim:
+Each agent session gets a JWT with identity, permissions, and an expiry. The proxy validates on every request — agents only access what they're granted.
 
 | Scope | Grants |
 |-------|--------|
-| `tool:web_search` | Access to one specific tool |
+| `tool:web_search` | One specific tool |
 | `tool:github__*` | Wildcard — all GitHub MCP tools |
 | `help` | Access to `ati assist` |
-| `skill:compliance-screening` | Access to a specific skill |
+| `skill:compliance-screening` | A specific skill |
 | `*` | Everything (dev/testing only) |
-
-### Token Lifecycle
 
 ```bash
 # Generate signing keys
-ati token keygen ES256        # Asymmetric (recommended for production)
-ati token keygen HS256        # Symmetric (simpler, single-machine)
+ati token keygen ES256        # Asymmetric (production)
+ati token keygen HS256        # Symmetric (simpler)
 
 # Issue a scoped token
 ati token issue \
   --sub agent-7 \
-  --scope "tool:web_search tool:github__* help skill:compliance-screening" \
+  --scope "tool:web_search tool:github__* help" \
   --ttl 3600
 
-# Inspect what's inside (decode without verification)
-$ ati token inspect $ATI_SESSION_TOKEN
-{
-  "sub": "agent-7",
-  "scope": "tool:web_search tool:github__* help skill:compliance-screening",
-  "aud": "ati-proxy",
-  "exp": 1704070800,
-  "iat": 1704067200,
-  "jti": "a1b2c3d4..."
-}
-
-# Validate (full signature + expiry check)
+# Inspect / validate
+ati token inspect $ATI_SESSION_TOKEN
 ati token validate $ATI_SESSION_TOKEN
 ```
 
-Each agent session gets its own JWT with the minimum scope it needs. A compliance agent gets `tool:ca_*` tools and the `compliance-screening` skill. A research agent gets `tool:arxiv_*` and `tool:deepwiki__*`. Neither can access the other's tools.
+A compliance agent gets `tool:ca_*` and `skill:compliance-screening`. A research agent gets `tool:arxiv_*` and `tool:deepwiki__*`. Neither can access the other's tools.
 
 ---
 
 ## Skills
 
-Skills are methodology documents that teach agents *how* to approach a task. They're not code — they provide context about when to use which tools, how to interpret results, and what workflow to follow.
+Skills are methodology documents that teach agents *how* to approach a task — when to use which tools, how to interpret results, what workflow to follow.
 
 Tools provide **data access**. Skills provide **workflow**.
 
-### Structure
-
-Each skill lives in `~/.ati/skills/<name>/`:
-
 ```
 ~/.ati/skills/compliance-screening/
-├── skill.toml      # Metadata and tool bindings
+├── skill.toml      # Metadata: tool bindings, keywords, dependencies
 └── SKILL.md        # The methodology document
 ```
 
-### skill.toml
-
-```toml
-[skill]
-name = "compliance-screening"
-version = "1.0.0"
-description = "Screen businesses and individuals against sanctions, PEP, and adverse media"
-author = "your-org"
-
-# Tool bindings — auto-load this skill when these tools are in scope
-tools = ["ca_business_sanctions_search", "ca_person_sanctions_search"]
-
-# Provider bindings
-providers = ["complyadvantage"]
-
-# Category bindings
-categories = ["compliance"]
-
-# Discovery metadata
-keywords = ["sanctions", "OFAC", "AML", "PEP", "KYB", "KYC"]
-
-# Dependencies
-depends_on = []
-suggests = ["tin-verification"]
-```
-
-### SKILL.md
-
-Write it like you'd brief a junior analyst:
-
-```markdown
-# Compliance Screening
-
-## Tools Available
-| Tool | Entity | Use When |
-|------|--------|----------|
-| ca_business_sanctions_search | Business | Always for KYB |
-| ca_person_sanctions_search | Person | Always for KYC |
-| ca_person_pep_search | Person | Due diligence |
-
-## Standard Screening Order
-1. `ca_business_sanctions_search` — check the company
-2. `ca_adverse_media_search` — check for negative news
-3. For each beneficial owner:
-   - `ca_person_sanctions_search`
-   - `ca_person_pep_search`
-
-## Interpreting Results
-| match_status | Meaning | Action |
-|-------------|---------|--------|
-| no_match | Clear | Document the check |
-| potential_match | Possible hit | Review required |
-| true_positive | Confirmed | Escalate |
-```
-
-### Auto-Resolution
-
-Skills auto-activate based on the agent's tool scope. If an agent has access to `ca_person_sanctions_search`, ATI automatically loads the `compliance-screening` skill because its `tools` binding includes that tool.
-
-Resolution cascade:
-1. **Tool binding** — exact tool name match
-2. **Provider binding** — provider name match
-3. **Category binding** — category match
-4. **depends_on** — transitively load dependency skills
-
-This bridges the gap between "here are 50 tools" and "here's how to do sanctions screening."
-
-### CLI
+Skills auto-activate based on the agent's tool scope. If an agent has access to `ca_person_sanctions_search`, ATI automatically loads the `compliance-screening` skill because its `tools` binding includes that tool. Resolution walks: tool → provider → category → `depends_on` transitively.
 
 ```bash
-# List and search
-ati skill list
-ati skill search "sanctions"
-ati skill info compliance-screening
-
-# Read the methodology
-ati skill show compliance-screening
-
-# Create a new skill scaffold
-ati skill init my-skill --tools getQuote,getMetrics --provider finnhub
-
-# Validate configuration
-ati skill validate my-skill --check-tools
-
-# Install / remove
-ati skill install ./my-skill/
-ati skill remove my-skill
-
-# See what skills resolve for current scopes
-ati skill resolve
+ati skill list                              # List all skills
+ati skill search "sanctions"                # Search by keyword
+ati skill show compliance-screening         # Read the methodology
+ati skill init my-skill --tools T1,T2       # Scaffold a new skill
+ati skill install ./my-skill/               # Install
+ati skill resolve                           # See what resolves for current scopes
 ```
 
 ---
 
 ## Works on Any Agent Harness
 
-ATI doesn't care what framework you use. If it has a shell/bash tool, ATI works. The pattern is always the same: system prompt + shell access. No custom tool wrappers.
+If your framework has a shell tool, ATI works. The pattern is always the same — system prompt + shell access. No custom tool wrappers, no SDK-specific adapters.
+
+```python
+system_prompt = """
+You have ATI on your PATH. Available commands:
+- `ati tool search <query>` — find tools by keyword
+- `ati tool info <name>` — inspect a tool's schema
+- `ati run <tool> --key value` — execute a tool
+- `ati assist "<question>"` — ask for recommendations
+"""
+
+# Claude Agent SDK
+agent = Agent(model="claude-sonnet-4-20250514", tools=[Bash()], system=system_prompt)
+
+# OpenAI Agents SDK
+agent = Agent(model="gpt-4o", tools=[shell_tool], instructions=system_prompt)
+
+# LangChain
+agent = create_react_agent(llm, [ShellTool()], prompt=system_prompt)
+```
 
 | SDK | Shell Mechanism | Example |
 |-----|----------------|---------|
@@ -612,44 +426,35 @@ ATI doesn't care what framework you use. If it has a shell/bash tool, ATI works.
 | [OpenAI Agents SDK](examples/openai-agents-sdk/) | `@function_tool` async shell | ~100 lines |
 | [Google ADK](examples/google-adk/) | `run_shell()` function tool | ~120 lines |
 | [LangChain](examples/langchain/) | `ShellTool` (zero-config) | ~90 lines |
-| [Codex CLI](examples/codex/) | Built-in (Codex IS a shell agent) | ~60 lines |
+| [Codex CLI](examples/codex/) | Built-in shell agent | ~60 lines |
 | [Pi](examples/pi/) | Built-in `bashTool` | ~100 lines |
 
-Every example uses free, no-auth tools (DeepWiki, arXiv, Crossref, Hacker News) so you can run them immediately with just an LLM API key.
-
-See the [examples/](examples/) directory for complete, runnable code.
+Every example uses free, no-auth tools so you can run them immediately with just an LLM API key. See [examples/](examples/).
 
 ---
 
 ## Proxy Server
 
-For production deployments, run `ati proxy` as a central server that holds secrets and serves sandboxed agents.
+For production, run `ati proxy` as a central server holding secrets:
 
 ```bash
-# Start with API keys from credentials file
-ati proxy --port 8090 --ati-dir ~/.ati
-
-# Start with API keys from environment variables
-ati proxy --port 8090 --ati-dir ~/.ati --env-keys
-
-# Initialize with JWT key generation
-ati init --proxy --es256
+ati proxy --port 8090 --ati-dir ~/.ati            # From credentials file
+ati proxy --port 8090 --ati-dir ~/.ati --env-keys  # From env vars
+ati init --proxy --es256                           # Initialize with JWT keys
 ```
-
-### Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Status — tool/provider/skill counts, version |
+| `/health` | GET | Status — tool/provider/skill counts |
 | `/call` | POST | Execute tool — `{tool_name, args}` |
 | `/mcp` | POST | MCP JSON-RPC pass-through |
-| `/help` | POST | LLM-powered discovery — `{query}` |
+| `/help` | POST | LLM-powered discovery |
 | `/skills` | GET | List/search skills |
-| `/skills/:name` | GET | Show skill content and metadata |
-| `/skills/resolve` | POST | Resolve skills for given scopes |
-| `/.well-known/jwks.json` | GET | JWKS public key for token validation |
+| `/skills/:name` | GET | Skill content and metadata |
+| `/skills/resolve` | POST | Resolve skills for scopes |
+| `/.well-known/jwks.json` | GET | JWKS public key |
 
-All endpoints except `/health` and `/.well-known/jwks.json` require `Authorization: Bearer <JWT>` when JWT is configured.
+All endpoints except `/health` and JWKS require `Authorization: Bearer <JWT>` when JWT is configured.
 
 ---
 
@@ -672,43 +477,39 @@ COMMANDS:
     version    Print version information
 
 OPTIONS:
-    --output <FORMAT>   Output format: json, table, text [default: text]
+    --output <FORMAT>   json, table, text [default: text]
     --verbose           Enable debug output
 ```
 
 ### Provider Management
 
 ```bash
+ati provider import-openapi <spec> --name NAME [--include-tags T1,T2] [--dry-run]
+ati provider inspect-openapi <spec> [--include-tags T1,T2]
 ati provider add-mcp <name> --transport stdio|http [--command CMD] [--url URL] [--env 'KEY=${ref}']
 ati provider add-cli <name> --command CMD [--default-args ARG] [--env 'KEY=${ref}'] [--env 'KEY=@{ref}']
-ati provider import-openapi <spec> --name NAME [--auth-key KEY] [--include-tags T1,T2] [--dry-run]
-ati provider inspect-openapi <spec> [--include-tags T1,T2]
 ati provider list
 ati provider info <name>
 ati provider remove <name>
 ```
 
-### Key Management
+### Key & Token Management
 
 ```bash
-ati key set <name> <value>     # Store a key
-ati key list                   # List keys (values masked)
-ati key remove <name>          # Delete a key
-```
+ati key set <name> <value>                                     # Store a key
+ati key list                                                   # List (values masked)
+ati key remove <name>                                          # Delete
 
-### Token Management
-
-```bash
-ati token keygen ES256|HS256                                    # Generate signing key
-ati token issue --sub ID --scope "..." --ttl SECONDS            # Issue scoped JWT
-ati token inspect <token>                                       # Decode without verification
-ati token validate <token> [--key path|--secret hex]            # Full verification
+ati token keygen ES256|HS256                                   # Generate signing key
+ati token issue --sub ID --scope "..." --ttl SECONDS           # Issue scoped JWT
+ati token inspect <token>                                      # Decode without verification
+ati token validate <token> [--key path|--secret hex]           # Full verification
 ```
 
 ### Output Formats
 
 ```bash
-ati run finnhub_quote --symbol AAPL                    # Default: human-readable text
+ati run finnhub_quote --symbol AAPL                    # Human-readable text (default)
 ati --output json run finnhub_quote --symbol AAPL      # JSON for programmatic use
 ati --output table run finnhub_quote --symbol AAPL     # Table for tabular data
 ```
@@ -718,23 +519,13 @@ ati --output table run finnhub_quote --symbol AAPL     # Table for tabular data
 ## Building
 
 ```bash
-# Debug build
-cargo build
+cargo build                                            # Debug
+cargo build --release                                  # Release
+cargo build --release --target x86_64-unknown-linux-musl  # Static binary (no glibc)
 
-# Release build
-cargo build --release
-
-# Static binary for sandboxes (no glibc dependency)
-cargo build --release --target x86_64-unknown-linux-musl
-
-# Run tests (399 tests — unit, integration, e2e)
-cargo test
-
-# Skill system e2e tests
-bash scripts/test_skills_e2e.sh
-
-# Live MCP tests (requires real API keys)
-cargo test --test mcp_live_test -- --ignored
+cargo test                                             # 399 tests
+bash scripts/test_skills_e2e.sh                        # Skill e2e tests
+cargo test --test mcp_live_test -- --ignored           # Live MCP tests (needs API keys)
 ```
 
 ---
@@ -744,21 +535,9 @@ cargo test --test mcp_live_test -- --ignored
 ```
 ati/
 ├── Cargo.toml
-├── README.md
-├── manifests/              # 42 TOML provider manifests (HTTP, MCP, OpenAPI, CLI)
-│   ├── example.toml        # Annotated template
-│   ├── github-mcp.toml     # GitHub via MCP stdio
-│   ├── linear-mcp.toml     # Linear via MCP HTTP
-│   ├── deepwiki-mcp.toml   # DeepWiki via MCP HTTP (no auth)
-│   ├── clinicaltrials.toml # OpenAPI handler (auto-discovered tools)
-│   └── *.toml              # Finance, compliance, search, medical, legal...
+├── manifests/              # 42 provider manifests (HTTP, MCP, OpenAPI, CLI)
 ├── specs/                  # 17 pre-downloaded OpenAPI 3.0 specs
-│   ├── clinicaltrials.json
-│   ├── finnhub.json
-│   ├── sec_edgar.json
-│   ├── crossref.json
-│   └── *.json
-├── examples/               # 6 SDK integrations (Claude, OpenAI, Google ADK, LangChain, Codex, Pi)
+├── examples/               # 6 SDK integrations (Claude, OpenAI, ADK, LangChain, Codex, Pi)
 ├── scripts/                # E2E test scripts
 ├── docs/
 │   ├── SECURITY.md         # Threat model and security design
@@ -766,13 +545,13 @@ ati/
 ├── src/
 │   ├── main.rs             # CLI entry point (clap)
 │   ├── lib.rs              # Library crate
-│   ├── cli/                # Command handlers (run, tool, provider, skill, assist, key, token, auth)
-│   ├── core/               # Manifest registry, MCP client, OpenAPI parser, HTTP executor,
-│   │                       #   keyring, JWT, scopes, skills, response processing, CLI executor
-│   ├── proxy/              # Client (sandbox → proxy) and server (axum, holds keys)
-│   ├── security/           # mlock/madvise/zeroize, sealed one-shot key file
+│   ├── cli/                # Command handlers
+│   ├── core/               # Registry, MCP client, OpenAPI parser, HTTP executor,
+│   │                       #   keyring, JWT, scopes, skills, response processing
+│   ├── proxy/              # Client + server (axum)
+│   ├── security/           # mlock/madvise/zeroize, sealed key file
 │   └── output/             # JSON, table, text formatters
-└── tests/                  # 399 tests — unit, integration, e2e, live MCP
+└── tests/                  # Unit, integration, e2e, live MCP
 ```
 
 ## License
