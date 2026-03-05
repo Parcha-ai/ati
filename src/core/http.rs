@@ -166,12 +166,34 @@ fn merge_defaults(tool: &Tool, args: &HashMap<String, Value>) -> HashMap<String,
     merged
 }
 
+/// How array query parameters should be serialized.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CollectionFormat {
+    /// Repeated key: ?status=a&status=b
+    Multi,
+    /// Comma-separated: ?status=a,b
+    Csv,
+    /// Space-separated: ?status=a%20b
+    Ssv,
+    /// Pipe-separated: ?status=a|b
+    Pipes,
+}
+
+/// How the request body should be encoded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BodyEncoding {
+    Json,
+    Form,
+}
+
 /// Classified parameter maps, split by location.
 struct ClassifiedParams {
     path: HashMap<String, String>,
     query: HashMap<String, String>,
+    query_arrays: HashMap<String, (Vec<String>, CollectionFormat)>,
     header: HashMap<String, String>,
     body: HashMap<String, Value>,
+    body_encoding: BodyEncoding,
 }
 
 /// Classify parameters by their `x-ati-param-location` metadata in the input schema.
@@ -192,16 +214,24 @@ fn classify_params(
         return None;
     }
 
+    // Detect body encoding from schema-level metadata
+    let body_encoding = match schema.get("x-ati-body-encoding").and_then(|v| v.as_str()) {
+        Some("form") => BodyEncoding::Form,
+        _ => BodyEncoding::Json,
+    };
+
     let mut classified = ClassifiedParams {
         path: HashMap::new(),
         query: HashMap::new(),
+        query_arrays: HashMap::new(),
         header: HashMap::new(),
         body: HashMap::new(),
+        body_encoding,
     };
 
     for (key, value) in args {
-        let location = props
-            .get(key)
+        let prop_def = props.get(key);
+        let location = prop_def
             .and_then(|p| p.get("x-ati-param-location"))
             .and_then(|l| l.as_str())
             .unwrap_or("body"); // default to body if no location specified
@@ -211,7 +241,23 @@ fn classify_params(
                 classified.path.insert(key.clone(), value_to_string(value));
             }
             "query" => {
-                classified.query.insert(key.clone(), value_to_string(value));
+                // Check if this is an array value with a collection format
+                if let Value::Array(arr) = value {
+                    let cf_str = prop_def
+                        .and_then(|p| p.get("x-ati-collection-format"))
+                        .and_then(|v| v.as_str());
+                    let cf = match cf_str {
+                        Some("multi") => CollectionFormat::Multi,
+                        Some("csv") => CollectionFormat::Csv,
+                        Some("ssv") => CollectionFormat::Ssv,
+                        Some("pipes") => CollectionFormat::Pipes,
+                        _ => CollectionFormat::Multi, // default for arrays
+                    };
+                    let values: Vec<String> = arr.iter().map(|v| value_to_string(v)).collect();
+                    classified.query_arrays.insert(key.clone(), (values, cf));
+                } else {
+                    classified.query.insert(key.clone(), value_to_string(value));
+                }
             }
             "header" => {
                 classified.header.insert(key.clone(), value_to_string(value));
@@ -279,6 +325,36 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
+/// Apply array query parameters to a request builder using the specified collection format.
+fn apply_query_arrays(
+    mut req: reqwest::RequestBuilder,
+    arrays: &HashMap<String, (Vec<String>, CollectionFormat)>,
+) -> reqwest::RequestBuilder {
+    for (key, (values, format)) in arrays {
+        match format {
+            CollectionFormat::Multi => {
+                // Repeated key: ?status=a&status=b
+                for val in values {
+                    req = req.query(&[(key.as_str(), val.as_str())]);
+                }
+            }
+            CollectionFormat::Csv => {
+                let joined = values.join(",");
+                req = req.query(&[(key.as_str(), joined.as_str())]);
+            }
+            CollectionFormat::Ssv => {
+                let joined = values.join(" ");
+                req = req.query(&[(key.as_str(), joined.as_str())]);
+            }
+            CollectionFormat::Pipes => {
+                let joined = values.join("|");
+                req = req.query(&[(key.as_str(), joined.as_str())]);
+            }
+        }
+    }
+    req
+}
+
 /// Execute an HTTP tool call against a provider's API.
 ///
 /// Supports two modes:
@@ -328,6 +404,7 @@ pub async fn execute_tool(
                 for (k, v) in &classified.query {
                     r = r.query(&[(k.as_str(), v.as_str())]);
                 }
+                r = apply_query_arrays(r, &classified.query_arrays);
                 r
             }
             HttpMethod::Post | HttpMethod::Put => {
@@ -336,15 +413,27 @@ pub async fn execute_tool(
                     HttpMethod::Put => client.put(&url),
                     _ => unreachable!(),
                 };
-                // Body params to JSON body, query params still to query string
+                // Body params: encode as JSON or form-urlencoded based on metadata
                 let mut r = if classified.body.is_empty() {
                     base_req
                 } else {
-                    base_req.json(&classified.body)
+                    match classified.body_encoding {
+                        BodyEncoding::Json => base_req.json(&classified.body),
+                        BodyEncoding::Form => {
+                            let pairs: Vec<(String, String)> = classified
+                                .body
+                                .iter()
+                                .map(|(k, v)| (k.clone(), value_to_string(v)))
+                                .collect();
+                            base_req.form(&pairs)
+                        }
+                    }
                 };
+                // Query params still go to query string
                 for (k, v) in &classified.query {
                     r = r.query(&[(k.as_str(), v.as_str())]);
                 }
+                r = apply_query_arrays(r, &classified.query_arrays);
                 r
             }
         };

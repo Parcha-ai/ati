@@ -829,6 +829,340 @@ fn test_list_operations() {
 }
 
 // ---------------------------------------------------------------------------
+// Test: collection format metadata injection — array with default style (multi)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_openapi_collection_format_multi_default() {
+    let spec_json = r#"{
+        "openapi": "3.0.3",
+        "info": { "title": "Test", "version": "1.0.0" },
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "findPets",
+                    "summary": "Find pets",
+                    "parameters": [
+                        {
+                            "name": "status",
+                            "in": "query",
+                            "schema": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        }
+                    ],
+                    "responses": { "200": { "description": "OK" } }
+                }
+            }
+        }
+    }"#;
+
+    let manifest = r#"
+[provider]
+name = "test"
+description = "Test API"
+handler = "openapi"
+base_url = "https://example.com"
+openapi_spec = "test.json"
+auth_type = "none"
+"#;
+
+    let dir = create_test_ati_dir(manifest, spec_json, "test.json");
+    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let (_, tool) = registry.get_tool("test__findPets").unwrap();
+    let schema = tool.input_schema.as_ref().unwrap();
+    let props = schema.get("properties").unwrap().as_object().unwrap();
+    let status = props.get("status").unwrap();
+
+    // Default style=form + explode=true → "multi"
+    assert_eq!(
+        status.get("x-ati-collection-format").unwrap().as_str().unwrap(),
+        "multi"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: collection format — explode:false → csv
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_openapi_collection_format_csv() {
+    let spec_json = r#"{
+        "openapi": "3.0.3",
+        "info": { "title": "Test", "version": "1.0.0" },
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "findPets",
+                    "summary": "Find pets",
+                    "parameters": [
+                        {
+                            "name": "ids",
+                            "in": "query",
+                            "explode": false,
+                            "schema": {
+                                "type": "array",
+                                "items": { "type": "integer" }
+                            }
+                        }
+                    ],
+                    "responses": { "200": { "description": "OK" } }
+                }
+            }
+        }
+    }"#;
+
+    let manifest = r#"
+[provider]
+name = "test"
+description = "Test API"
+handler = "openapi"
+base_url = "https://example.com"
+openapi_spec = "test.json"
+auth_type = "none"
+"#;
+
+    let dir = create_test_ati_dir(manifest, spec_json, "test.json");
+    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let (_, tool) = registry.get_tool("test__findPets").unwrap();
+    let schema = tool.input_schema.as_ref().unwrap();
+    let props = schema.get("properties").unwrap().as_object().unwrap();
+    let ids = props.get("ids").unwrap();
+
+    assert_eq!(
+        ids.get("x-ati-collection-format").unwrap().as_str().unwrap(),
+        "csv"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: collection format — spaceDelimited → ssv
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_openapi_collection_format_ssv() {
+    let spec_json = r#"{
+        "openapi": "3.0.3",
+        "info": { "title": "Test", "version": "1.0.0" },
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "findPets",
+                    "summary": "Find pets",
+                    "parameters": [
+                        {
+                            "name": "tags",
+                            "in": "query",
+                            "style": "spaceDelimited",
+                            "schema": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        }
+                    ],
+                    "responses": { "200": { "description": "OK" } }
+                }
+            }
+        }
+    }"#;
+
+    let manifest = r#"
+[provider]
+name = "test"
+description = "Test API"
+handler = "openapi"
+base_url = "https://example.com"
+openapi_spec = "test.json"
+auth_type = "none"
+"#;
+
+    let dir = create_test_ati_dir(manifest, spec_json, "test.json");
+    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let (_, tool) = registry.get_tool("test__findPets").unwrap();
+    let schema = tool.input_schema.as_ref().unwrap();
+    let props = schema.get("properties").unwrap().as_object().unwrap();
+    let tags = props.get("tags").unwrap();
+
+    assert_eq!(
+        tags.get("x-ati-collection-format").unwrap().as_str().unwrap(),
+        "ssv"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: collection format — pipeDelimited → pipes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_openapi_collection_format_pipes() {
+    let spec_json = r#"{
+        "openapi": "3.0.3",
+        "info": { "title": "Test", "version": "1.0.0" },
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "findPets",
+                    "summary": "Find pets",
+                    "parameters": [
+                        {
+                            "name": "colors",
+                            "in": "query",
+                            "style": "pipeDelimited",
+                            "schema": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        }
+                    ],
+                    "responses": { "200": { "description": "OK" } }
+                }
+            }
+        }
+    }"#;
+
+    let manifest = r#"
+[provider]
+name = "test"
+description = "Test API"
+handler = "openapi"
+base_url = "https://example.com"
+openapi_spec = "test.json"
+auth_type = "none"
+"#;
+
+    let dir = create_test_ati_dir(manifest, spec_json, "test.json");
+    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let (_, tool) = registry.get_tool("test__findPets").unwrap();
+    let schema = tool.input_schema.as_ref().unwrap();
+    let props = schema.get("properties").unwrap().as_object().unwrap();
+    let colors = props.get("colors").unwrap();
+
+    assert_eq!(
+        colors.get("x-ati-collection-format").unwrap().as_str().unwrap(),
+        "pipes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: no collection format for scalar query params
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_openapi_no_collection_format_for_scalar() {
+    let manifest = r#"
+[provider]
+name = "petstore"
+description = "Petstore API"
+handler = "openapi"
+base_url = "https://petstore.example.com/v3"
+openapi_spec = "petstore.json"
+auth_type = "none"
+"#;
+
+    let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
+    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+
+    // findPetsByStatus has a scalar string query param "status" (not array)
+    let (_, tool) = registry.get_tool("petstore__findPetsByStatus").unwrap();
+    let schema = tool.input_schema.as_ref().unwrap();
+    let props = schema.get("properties").unwrap().as_object().unwrap();
+    let status = props.get("status").unwrap();
+
+    // Scalar params should NOT have collection format
+    assert!(
+        status.get("x-ati-collection-format").is_none(),
+        "Scalar query params should not have x-ati-collection-format"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: form-urlencoded body encoding metadata
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_openapi_form_urlencoded_body() {
+    let spec_json = r#"{
+        "openapi": "3.0.3",
+        "info": { "title": "Test", "version": "1.0.0" },
+        "paths": {
+            "/token": {
+                "post": {
+                    "operationId": "getToken",
+                    "summary": "Get OAuth token",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/x-www-form-urlencoded": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["grant_type"],
+                                    "properties": {
+                                        "grant_type": { "type": "string" },
+                                        "client_id": { "type": "string" },
+                                        "client_secret": { "type": "string" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": { "200": { "description": "OK" } }
+                }
+            }
+        }
+    }"#;
+
+    let manifest = r#"
+[provider]
+name = "test"
+description = "Test API"
+handler = "openapi"
+base_url = "https://example.com"
+openapi_spec = "test.json"
+auth_type = "none"
+"#;
+
+    let dir = create_test_ati_dir(manifest, spec_json, "test.json");
+    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let (_, tool) = registry.get_tool("test__getToken").unwrap();
+    let schema = tool.input_schema.as_ref().unwrap();
+
+    assert_eq!(
+        schema.get("x-ati-body-encoding").unwrap().as_str().unwrap(),
+        "form"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: JSON body does NOT get encoding flag
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_openapi_json_body_no_encoding_flag() {
+    let manifest = r#"
+[provider]
+name = "petstore"
+description = "Petstore API"
+handler = "openapi"
+base_url = "https://petstore.example.com/v3"
+openapi_spec = "petstore.json"
+auth_type = "none"
+"#;
+
+    let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
+    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+
+    // addPet has a JSON body
+    let (_, tool) = registry.get_tool("petstore__addPet").unwrap();
+    let schema = tool.input_schema.as_ref().unwrap();
+
+    assert!(
+        schema.get("x-ati-body-encoding").is_none(),
+        "JSON body should not have x-ati-body-encoding flag"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test: base URL extraction from spec
 // ---------------------------------------------------------------------------
 

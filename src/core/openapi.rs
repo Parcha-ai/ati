@@ -10,7 +10,7 @@
 /// Filters: include/exclude by tags and operationIds, max operations cap.
 
 use openapiv3::{
-    OpenAPI, Operation, Parameter, ParameterData, ParameterSchemaOrContent,
+    OpenAPI, Operation, Parameter, ParameterData, ParameterSchemaOrContent, QueryStyle,
     ReferenceOr, Schema, SchemaKind, Type as OAType,
 };
 use serde_json::{json, Map, Value};
@@ -363,6 +363,56 @@ fn param_location_from_ref(param_ref: &ReferenceOr<Parameter>, spec: &OpenAPI) -
     }
 }
 
+/// Determine the collection format for an array query parameter.
+/// Returns None for non-array or non-query params.
+///
+/// Mapping from OpenAPI 3.0 style/explode to ATI collection format:
+/// - Form + explode:true (default) → "multi" (?status=a&status=b)
+/// - Form + explode:false → "csv" (?status=a,b)
+/// - SpaceDelimited → "ssv" (?status=a%20b)
+/// - PipeDelimited → "pipes" (?status=a|b)
+fn collection_format_for_param(param: &Parameter) -> Option<&'static str> {
+    let (style, data) = match param {
+        Parameter::Query { style, parameter_data, .. } => (style, parameter_data),
+        _ => return None,
+    };
+
+    // Check if the parameter schema is an array type
+    let is_array = match &data.format {
+        ParameterSchemaOrContent::Schema(schema_ref) => match schema_ref {
+            ReferenceOr::Item(schema) => matches!(&schema.schema_kind, SchemaKind::Type(OAType::Array(_))),
+            ReferenceOr::Reference { .. } => false, // Can't resolve inline, skip
+        },
+        _ => false,
+    };
+
+    if !is_array {
+        return None;
+    }
+
+    match style {
+        QueryStyle::Form => {
+            // Default explode for form is true
+            let explode = data.explode.unwrap_or(true);
+            if explode { Some("multi") } else { Some("csv") }
+        }
+        QueryStyle::SpaceDelimited => Some("ssv"),
+        QueryStyle::PipeDelimited => Some("pipes"),
+        QueryStyle::DeepObject => None, // Not a simple collection format
+    }
+}
+
+/// Resolve a $ref to a full Parameter (preserving style info, unlike resolve_parameter_ref
+/// which only returns ParameterData and loses style).
+fn resolve_parameter_full_ref<'a>(reference: &str, spec: &'a OpenAPI) -> Option<&'a Parameter> {
+    let name = reference.strip_prefix("#/components/parameters/")?;
+    let param = spec.components.as_ref()?.parameters.get(name)?;
+    match param {
+        ReferenceOr::Item(p) => Some(p),
+        _ => None,
+    }
+}
+
 /// Build a unified input schema that preserves parameter locations.
 /// This is the version called from extract_tools() with full context.
 pub fn build_input_schema_with_locations(
@@ -379,15 +429,24 @@ pub fn build_input_schema_with_locations(
 
     for param_ref in &all_param_refs {
         let location = param_location_from_ref(param_ref, spec);
-        let data = match param_ref {
-            ReferenceOr::Item(p) => parameter_data(p),
-            ReferenceOr::Reference { reference } => resolve_parameter_ref(reference, spec),
+        let (data, collection_fmt) = match param_ref {
+            ReferenceOr::Item(p) => (parameter_data(p), collection_format_for_param(p)),
+            ReferenceOr::Reference { reference } => {
+                let full = resolve_parameter_full_ref(reference, spec);
+                (
+                    full.and_then(parameter_data),
+                    full.and_then(collection_format_for_param),
+                )
+            }
         };
         if let Some(data) = data {
             let mut prop = parameter_data_to_schema(data);
             // Inject location metadata
             if let Some(obj) = prop.as_object_mut() {
                 obj.insert("x-ati-param-location".into(), json!(location));
+                if let Some(cf) = collection_fmt {
+                    obj.insert("x-ati-collection-format".into(), json!(cf));
+                }
             }
             properties.insert(data.name.clone(), prop);
             if data.required {
@@ -397,6 +456,8 @@ pub fn build_input_schema_with_locations(
     }
 
     // Add request body properties
+    let mut body_encoding = "json";
+
     if let Some(body_ref) = request_body {
         let body = match body_ref {
             ReferenceOr::Item(b) => Some(b),
@@ -404,11 +465,16 @@ pub fn build_input_schema_with_locations(
         };
 
         if let Some(body) = body {
-            let media_type = body
-                .content
-                .get("application/json")
-                .or_else(|| body.content.get("application/x-www-form-urlencoded"))
-                .or_else(|| body.content.values().next());
+            // Detect content-type: prefer JSON, then form-urlencoded, then whatever's first
+            let (media_type, detected_encoding) =
+                if let Some(mt) = body.content.get("application/json") {
+                    (Some(mt), "json")
+                } else if let Some(mt) = body.content.get("application/x-www-form-urlencoded") {
+                    (Some(mt), "form")
+                } else {
+                    (body.content.values().next(), "json")
+                };
+            body_encoding = detected_encoding;
 
             if let Some(mt) = media_type {
                 if let Some(schema_ref) = &mt.schema {
@@ -450,6 +516,14 @@ pub fn build_input_schema_with_locations(
             .as_object_mut()
             .unwrap()
             .insert("required".into(), json!(required_fields));
+    }
+
+    // Inject body encoding metadata for non-JSON content types
+    if body_encoding == "form" {
+        schema
+            .as_object_mut()
+            .unwrap()
+            .insert("x-ati-body-encoding".into(), json!("form"));
     }
 
     schema
