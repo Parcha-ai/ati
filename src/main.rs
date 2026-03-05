@@ -24,10 +24,22 @@ pub enum OutputFormat {
                    Keys are encrypted and never exposed to the agent or environment."
 )]
 pub struct Cli {
-    #[arg(long, value_enum, default_value = "text", global = true, env = "ATI_OUTPUT")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "text",
+        global = true,
+        env = "ATI_OUTPUT",
+        alias = "format"
+    )]
     pub output: OutputFormat,
 
-    #[arg(short = 'J', long = "json", global = true, help = "Shorthand for --output json")]
+    #[arg(
+        short = 'J',
+        long = "json",
+        global = true,
+        help = "Shorthand for --output json"
+    )]
     pub json: bool,
 
     #[arg(long, global = true, help = "Enable verbose/debug output")]
@@ -65,7 +77,20 @@ pub enum Commands {
         /// Optional tool/provider scope, followed by the query
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
+        /// Return a structured plan of tool calls instead of prose
+        #[arg(long)]
+        plan: bool,
+        /// Save the plan to a file (implies --plan)
+        #[arg(long)]
+        save: Option<String>,
+        /// Use local LLM (ollama/llama.cpp) — no API key needed
+        #[arg(long)]
+        local: bool,
     },
+
+    /// Execute a saved tool plan
+    #[command(subcommand)]
+    Plan(PlanCommands),
 
     /// Unified provider management — MCP, OpenAPI, and HTTP providers
     #[command(
@@ -96,6 +121,10 @@ pub enum Commands {
     /// Manage API keys in ~/.ati/credentials
     #[command(subcommand)]
     Key(KeyCommands),
+
+    /// Query the audit log
+    #[command(subcommand)]
+    Audit(AuditCommands),
 
     /// Run ATI as a proxy server (holds keys, serves sandbox agents)
     Proxy {
@@ -182,6 +211,9 @@ pub enum SkillCommands {
         /// Install all skills from a multi-skill directory
         #[arg(long)]
         all: bool,
+        /// Use local LLM (ollama) for manifest generation — zero network calls
+        #[arg(long)]
+        local: bool,
     },
     /// Remove an installed skill
     Remove {
@@ -223,6 +255,24 @@ pub enum SkillCommands {
         /// Path to custom scopes.json
         #[arg(long)]
         scopes: Option<String>,
+    },
+    /// Verify integrity of an installed skill
+    Verify {
+        /// Skill name
+        name: String,
+    },
+    /// Show diff between installed and source skill
+    Diff {
+        /// Skill source (URL or path, with optional @SHA)
+        source: String,
+    },
+    /// Update an installed skill from its source
+    Update {
+        /// Skill name
+        name: String,
+        /// Force update even if content hash changed
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -451,6 +501,9 @@ pub enum TokenCommands {
         /// HS256 shared secret (hex string)
         #[arg(long)]
         secret: Option<String>,
+        /// Rate limits as pattern=spec (e.g. "tool:github__*=10/hour")
+        #[arg(long)]
+        rate: Vec<String>,
     },
     /// Decode a JWT without verification (show claims)
     Inspect {
@@ -470,6 +523,37 @@ pub enum TokenCommands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum AuditCommands {
+    /// Show recent audit entries
+    Tail {
+        /// Number of entries to show (default: 20)
+        #[arg(short, long, default_value = "20")]
+        n: usize,
+    },
+    /// Search audit entries
+    Search {
+        /// Filter by tool name (supports trailing wildcard, e.g. github__*)
+        #[arg(long)]
+        tool: Option<String>,
+        /// Show entries since duration ago (e.g. 1h, 30m, 7d)
+        #[arg(long)]
+        since: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PlanCommands {
+    /// Execute a saved plan file
+    Execute {
+        /// Path to the plan JSON file
+        file: String,
+        /// Confirm each step before executing
+        #[arg(long)]
+        confirm_each: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     let mut cli = Cli::parse();
@@ -485,13 +569,24 @@ async fn main() {
         Commands::Run { tool_name, args } => cli::call::execute(&cli, tool_name, args).await,
         Commands::Tool(subcmd) => cli::tools::execute(&cli, subcmd).await,
         Commands::Skill(subcmd) => cli::skills::execute(&cli, subcmd).await,
-        Commands::Assist { args } => cli::help::execute(&cli, args).await,
+        Commands::Assist { args, plan, save, local } => {
+            cli::help::execute_with_plan(&cli, args, *plan, save.as_deref(), *local).await
+        }
+        Commands::Plan(subcmd) => cli::plan::execute(&cli, subcmd).await,
         Commands::Provider(subcmd) => cli::provider::execute(&cli, subcmd).await,
         Commands::Auth(subcmd) => cli::auth::execute(&cli, subcmd).await,
-        Commands::Token(subcmd) => cli::token::execute(subcmd).map_err(|e| e as Box<dyn std::error::Error>),
+        Commands::Token(subcmd) => {
+            cli::token::execute(subcmd).map_err(|e| e as Box<dyn std::error::Error>)
+        }
         Commands::Init { proxy, es256 } => cli::init::execute(*proxy, *es256),
         Commands::Key(subcmd) => cli::keys::execute(subcmd),
-        Commands::Proxy { port, bind, ati_dir, env_keys } => {
+        Commands::Audit(subcmd) => cli::audit::execute(&cli, subcmd),
+        Commands::Proxy {
+            port,
+            bind,
+            ati_dir,
+            env_keys,
+        } => {
             let dir = ati_dir
                 .as_deref()
                 .map(std::path::PathBuf::from)

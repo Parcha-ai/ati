@@ -1,7 +1,6 @@
 /// Integration tests for `ati assist` (local mode) and proxy `/help` endpoint.
 ///
 /// Uses wiremock to mock the Cerebras LLM API so tests run without real API keys.
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -89,8 +88,7 @@ method = "POST"
 
     std::fs::write(manifests_dir.join("test_finance.toml"), tool_manifest)
         .expect("write tool manifest");
-    std::fs::write(manifests_dir.join("_llm.toml"), llm_manifest)
-        .expect("write _llm manifest");
+    std::fs::write(manifests_dir.join("_llm.toml"), llm_manifest).expect("write _llm manifest");
 
     dir
 }
@@ -114,14 +112,10 @@ fn create_test_keyring(dir: &std::path::Path) -> (std::path::PathBuf, Keyring, s
 
     // Write the session key as base64 to a .key file (for sealed_file::read_and_delete_key)
     let key_file_path = dir.join(".key");
-    let key_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        &session_key,
-    );
+    let key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &session_key);
     std::fs::write(&key_file_path, &key_b64).expect("write .key file");
 
-    let keyring =
-        Keyring::load_with_key(&keyring_path, &session_key).expect("load test keyring");
+    let keyring = Keyring::load_with_key(&keyring_path, &session_key).expect("load test keyring");
 
     (keyring_path, keyring, key_file_path)
 }
@@ -206,8 +200,7 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(mock_llm_response("Use get_stock_quote")),
+            ResponseTemplate::new(200).set_body_json(mock_llm_response("Use get_stock_quote")),
         )
         .expect(1)
         .mount(&llm_mock)
@@ -292,11 +285,9 @@ async fn test_proxy_help_llm_error_returns_502() {
 
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(429).set_body_json(serde_json::json!({
-                "error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}
-            })),
-        )
+        .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+            "error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}
+        })))
         .mount(&llm_mock)
         .await;
 
@@ -462,10 +453,7 @@ method = "GET"
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(
-        !output.status.success(),
-        "Should fail without _llm.toml"
-    );
+    assert!(!output.status.success(), "Should fail without _llm.toml");
     assert!(
         stderr.contains("_llm.toml") || stderr.contains("LLM"),
         "Error should mention missing LLM config. stderr: {stderr}"
@@ -489,13 +477,10 @@ async fn test_assist_local_mode_no_keyring_fails() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
+    assert!(!output.status.success(), "Should fail without keyring/LLM");
     assert!(
-        !output.status.success(),
-        "Should fail without keyring"
-    );
-    assert!(
-        stderr.contains("keyring") || stderr.contains("No keyring"),
-        "Error should mention missing keyring. stderr: {stderr}"
+        stderr.contains("keyring") || stderr.contains("No keyring") || stderr.contains("No LLM available"),
+        "Error should mention missing keyring or no LLM. stderr: {stderr}"
     );
 }
 

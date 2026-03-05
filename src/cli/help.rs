@@ -42,16 +42,31 @@ const CLI_HELP_MAX_CHARS: usize = 3000;
 const CLI_HELP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Execute: ati assist [tool_or_provider] "natural language query"
+/// With optional plan mode (--plan / --save).
+pub async fn execute_with_plan(
+    cli: &Cli,
+    args: &[String],
+    plan: bool,
+    save: Option<&str>,
+    local: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let plan_mode = plan || save.is_some();
+
+    if plan_mode {
+        return execute_plan_mode(cli, args, save, local).await;
+    }
+
+    execute(cli, args, local).await
+}
+
+/// Execute: ati assist [tool_or_provider] "natural language query"
 ///
 /// Auto-detects mode:
 /// - If ATI_PROXY_URL is set -> forwards to proxy's /help endpoint
 /// - Otherwise -> loads local keyring, calls LLM directly
 ///
 /// If the first positional arg matches a tool or provider name, scopes to that tool/provider.
-pub async fn execute(
-    cli: &Cli,
-    args: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(cli: &Cli, args: &[String], local: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Auto-detect: proxy mode if ATI_PROXY_URL is set
     if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
         if cli.verbose {
@@ -60,7 +75,8 @@ pub async fn execute(
         // In proxy mode, we need to load registry to resolve scope (if any)
         let ati_dir = common::ati_dir();
         let manifests_dir = ati_dir.join("manifests");
-        let registry = ManifestRegistry::load(&manifests_dir).unwrap_or_else(|_| ManifestRegistry::empty());
+        let registry =
+            ManifestRegistry::load(&manifests_dir).unwrap_or_else(|_| ManifestRegistry::empty());
         let (scope_name, query) = resolve_assist_scope(args, &registry);
         if cli.verbose {
             if let Some(ref s) = scope_name {
@@ -73,17 +89,14 @@ pub async fn execute(
     if cli.verbose {
         eprintln!("Mode: local (no ATI_PROXY_URL)");
     }
-    execute_local(cli, args).await
+    execute_local(cli, args, local).await
 }
 
 /// Parse the args to detect tool/provider scoping.
 ///
 /// If the first arg matches a tool name or provider name, it's treated as a scope.
 /// Returns (scope, query).
-fn resolve_assist_scope(
-    args: &[String],
-    registry: &ManifestRegistry,
-) -> (Option<String>, String) {
+fn resolve_assist_scope(args: &[String], registry: &ManifestRegistry) -> (Option<String>, String) {
     if args.len() >= 2 {
         let candidate = &args[0];
         if registry.get_tool(candidate).is_some() || registry.has_provider(candidate) {
@@ -165,10 +178,7 @@ fn truncate_help_text(text: &str, max_chars: usize) -> String {
 }
 
 /// Local mode: load manifests + keyring, call LLM directly.
-async fn execute_local(
-    cli: &Cli,
-    args: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_local(cli: &Cli, args: &[String], local: bool) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = common::ati_dir();
 
     // Load manifests
@@ -190,33 +200,31 @@ async fn execute_local(
 
     // Load scopes from JWT
     let scopes = match std::env::var("ATI_SESSION_TOKEN") {
-        Ok(token) if !token.is_empty() => match jwt::inspect(&token) {
-            Ok(claims) => {
-                let s = ScopeConfig::from_jwt(&claims);
-                if !s.help_enabled() {
-                    return Err("Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into());
+        Ok(token) if !token.is_empty() => {
+            match jwt::inspect(&token) {
+                Ok(claims) => {
+                    let s = ScopeConfig::from_jwt(&claims);
+                    if !s.help_enabled() {
+                        return Err("Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into());
+                    }
+                    s
                 }
-                s
+                Err(_) => ScopeConfig::unrestricted(),
             }
-            Err(_) => ScopeConfig::unrestricted(),
-        },
+        }
         _ => ScopeConfig::unrestricted(),
     };
 
     // Load skills
     let skills_dir = ati_dir.join("skills");
-    let skill_registry = SkillRegistry::load(&skills_dir).unwrap_or_else(|_| {
-        SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap()
-    });
+    let skill_registry = SkillRegistry::load(&skills_dir)
+        .unwrap_or_else(|_| SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap());
 
     // Build system prompt — scoped vs unscoped
     let (system_prompt, scoped_tools) = if let Some(ref tool_name) = scope_name {
         // For scoped mode, find skills for the specific tool/provider
-        let skills_section = build_skills_for_tools(
-            &skill_registry,
-            &[tool_name.as_str()],
-            cli.verbose,
-        );
+        let skills_section =
+            build_skills_for_tools(&skill_registry, &[tool_name.as_str()], cli.verbose);
         build_scoped_context(tool_name, &registry, &skills_section, cli.verbose)?
     } else {
         // Unscoped: all public tools, pre-filtered by query
@@ -242,9 +250,27 @@ async fn execute_local(
     }
 
     // Call LLM and print result
-    let content = call_llm(cli, &registry, &keyring, &system_prompt, &query).await?;
-    println!("{content}");
-    print_tool_reference(&content, &scoped_tools);
+    let content = call_llm(cli, &registry, &keyring, &system_prompt, &query, local).await?;
+
+    match cli.output {
+        crate::OutputFormat::Json => {
+            // Collect tool names mentioned in the response
+            let tools_referenced: Vec<&str> = scoped_tools
+                .iter()
+                .filter(|(_, t)| content.contains(&t.name))
+                .map(|(_, t)| t.name.as_str())
+                .collect();
+            let json = serde_json::json!({
+                "content": content,
+                "tools_referenced": tools_referenced,
+            });
+            println!("{}", serde_json::to_string(&json)?);
+        }
+        _ => {
+            println!("{content}");
+            print_tool_reference(&content, &scoped_tools);
+        }
+    }
 
     Ok(())
 }
@@ -294,7 +320,10 @@ fn build_scoped_tool_details(provider: &Provider, tool: &Tool, verbose: bool) ->
 
     // Basic info
     details.push_str(&format!("**Name**: `{}`\n", tool.name));
-    details.push_str(&format!("**Provider**: {} (handler: {})\n", provider.name, provider.handler));
+    details.push_str(&format!(
+        "**Provider**: {} (handler: {})\n",
+        provider.name, provider.handler
+    ));
     details.push_str(&format!("**Description**: {}\n", tool.description));
 
     if let Some(cat) = &provider.category {
@@ -312,7 +341,10 @@ fn build_scoped_tool_details(provider: &Provider, tool: &Tool, verbose: bool) ->
         let cmd = provider.cli_command.as_deref().unwrap_or("?");
         details.push_str(&format!("\n**CLI Command**: `{}`\n", cmd));
         if !provider.cli_default_args.is_empty() {
-            details.push_str(&format!("**Default Args**: {}\n", provider.cli_default_args.join(" ")));
+            details.push_str(&format!(
+                "**Default Args**: {}\n",
+                provider.cli_default_args.join(" ")
+            ));
         }
         if let Some(timeout) = provider.cli_timeout_secs {
             details.push_str(&format!("**Timeout**: {}s\n", timeout));
@@ -322,7 +354,11 @@ fn build_scoped_tool_details(provider: &Provider, tool: &Tool, verbose: bool) ->
         // Capture live --help output
         if let Some(help_text) = capture_cli_help(provider) {
             if verbose {
-                eprintln!("Captured CLI help for '{}' ({} chars)", tool.name, help_text.len());
+                eprintln!(
+                    "Captured CLI help for '{}' ({} chars)",
+                    tool.name,
+                    help_text.len()
+                );
             }
             details.push_str("\n**CLI Help Output** (from `--help`):\n```\n");
             details.push_str(&help_text);
@@ -344,7 +380,11 @@ fn build_scoped_tool_details(provider: &Provider, tool: &Tool, verbose: bool) ->
                 let required: Vec<String> = schema
                     .get("required")
                     .and_then(|r| r.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 for key in props.keys() {
@@ -361,19 +401,39 @@ fn build_scoped_tool_details(provider: &Provider, tool: &Tool, verbose: bool) ->
                 let required: Vec<String> = schema
                     .get("required")
                     .and_then(|r| r.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 details.push_str("\n**Parameters**:\n");
                 for (key, val) in props {
                     let type_str = val.get("type").and_then(|t| t.as_str()).unwrap_or("string");
-                    let desc = val.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                    let req = if required.contains(key) { " **(required)**" } else { "" };
-                    let enum_vals = val.get("enum").and_then(|e| e.as_array()).map(|arr| {
-                        let vals: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-                        format!(" [values: {}]", vals.join(", "))
-                    }).unwrap_or_default();
-                    details.push_str(&format!("- `--{key}` ({type_str}{req}){enum_vals}: {desc}\n"));
+                    let desc = val
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
+                    let req = if required.contains(key) {
+                        " **(required)**"
+                    } else {
+                        ""
+                    };
+                    let enum_vals = val
+                        .get("enum")
+                        .and_then(|e| e.as_array())
+                        .map(|arr| {
+                            let vals: Vec<String> = arr
+                                .iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect();
+                            format!(" [values: {}]", vals.join(", "))
+                        })
+                        .unwrap_or_default();
+                    details.push_str(&format!(
+                        "- `--{key}` ({type_str}{req}){enum_vals}: {desc}\n"
+                    ));
                 }
             }
         }
@@ -397,7 +457,15 @@ async fn call_llm(
     keyring: &crate::core::keyring::Keyring,
     system_prompt: &str,
     query: &str,
+    local: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // Check if local LLM is forced via --local flag or ATI_ASSIST_PROVIDER=local
+    let force_local = local
+        || std::env::var("ATI_ASSIST_PROVIDER").ok().as_deref() == Some("local");
+    if force_local {
+        return call_local_llm(system_prompt, query, cli.verbose).await;
+    }
+
     // Priority: CEREBRAS_API_KEY (10x faster) -> keyring (credentials + keyring.enc) -> ANTHROPIC_API_KEY
     let cerebras_key = std::env::var("CEREBRAS_API_KEY").ok();
 
@@ -501,10 +569,65 @@ async fn call_llm(
 
         Ok(content.to_string())
     } else {
-        Err(
-            "No LLM configured for ati assist. Set ANTHROPIC_API_KEY or configure a keyring with an LLM provider.".into()
-        )
+        // Auto-fallback to local LLM (ollama, llama.cpp, etc.)
+        if cli.verbose {
+            eprintln!("LLM: no cloud keys found, falling back to local LLM");
+        }
+        call_local_llm(system_prompt, query, cli.verbose).await.map_err(|e| {
+            format!(
+                "No LLM available. Options:\n\
+                 1. Set ANTHROPIC_API_KEY or CEREBRAS_API_KEY for cloud\n\
+                 2. Install a local LLM: ollama pull smollm3:3b && ollama serve\n\
+                 3. Use any OpenAI-compatible server: OLLAMA_HOST=http://host:port ati assist ...\n\n\
+                 Local LLM error: {e}"
+            ).into()
+        })
     }
+}
+
+/// Call a local OpenAI-compatible LLM server (ollama, llama.cpp, llamafile, etc.).
+async fn call_local_llm(
+    system_prompt: &str,
+    query: &str,
+    verbose: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let host = std::env::var("OLLAMA_HOST")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let model = std::env::var("ATI_OLLAMA_MODEL")
+        .unwrap_or_else(|_| "smollm3:3b".to_string());
+    let url = format!("{}/v1/chat/completions", host.trim_end_matches('/'));
+
+    if verbose {
+        eprintln!("LLM: local ({host}, model={model})");
+    }
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query}
+        ],
+        "temperature": 0.3
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+    let resp = client.post(&url).json(&body).send().await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Local LLM error ({status}): {body}").into());
+    }
+
+    let resp_body: serde_json::Value = resp.json().await?;
+    let content = resp_body
+        .pointer("/choices/0/message/content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("No response from local LLM");
+
+    Ok(content.to_string())
 }
 
 /// Proxy mode: forward the help query to the proxy server.
@@ -523,7 +646,19 @@ async fn execute_via_proxy(
     }
 
     let content = proxy_client::call_help(proxy_url, query, tool).await?;
-    println!("{content}");
+
+    match cli.output {
+        crate::OutputFormat::Json => {
+            let json = serde_json::json!({
+                "content": content,
+                "tools_referenced": [],
+            });
+            println!("{}", serde_json::to_string(&json)?);
+        }
+        _ => {
+            println!("{content}");
+        }
+    }
     Ok(())
 }
 
@@ -558,10 +693,20 @@ fn build_skills_for_tools(
             if !seen_skills.insert(skill_meta.name.clone()) {
                 continue;
             }
-            add_skill_content(skill_registry, skill_meta, &mut skill_entries, &mut total_chars, verbose);
-            if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+            add_skill_content(
+                skill_registry,
+                skill_meta,
+                &mut skill_entries,
+                &mut total_chars,
+                verbose,
+            );
+            if total_chars > MAX_SKILL_CONTENT_CHARS {
+                break;
+            }
         }
-        if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+        if total_chars > MAX_SKILL_CONTENT_CHARS {
+            break;
+        }
     }
 
     // Phase 2: Skills bound to providers of matched tools
@@ -586,10 +731,20 @@ fn build_skills_for_tools(
                 if !seen_skills.insert(skill_meta.name.clone()) {
                     continue;
                 }
-                add_skill_content(skill_registry, skill_meta, &mut skill_entries, &mut total_chars, verbose);
-                if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+                add_skill_content(
+                    skill_registry,
+                    skill_meta,
+                    &mut skill_entries,
+                    &mut total_chars,
+                    verbose,
+                );
+                if total_chars > MAX_SKILL_CONTENT_CHARS {
+                    break;
+                }
             }
-            if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+            if total_chars > MAX_SKILL_CONTENT_CHARS {
+                break;
+            }
         }
     }
 
@@ -606,10 +761,20 @@ fn build_skills_for_tools(
                 if !seen_skills.insert(skill_meta.name.clone()) {
                     continue;
                 }
-                add_skill_content(skill_registry, skill_meta, &mut skill_entries, &mut total_chars, verbose);
-                if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+                add_skill_content(
+                    skill_registry,
+                    skill_meta,
+                    &mut skill_entries,
+                    &mut total_chars,
+                    verbose,
+                );
+                if total_chars > MAX_SKILL_CONTENT_CHARS {
+                    break;
+                }
             }
-            if total_chars > MAX_SKILL_CONTENT_CHARS { break; }
+            if total_chars > MAX_SKILL_CONTENT_CHARS {
+                break;
+            }
         }
     }
 
@@ -676,14 +841,13 @@ fn prefilter_tools_by_query<'a>(
     let query_lower = query.to_lowercase();
     let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
 
-    let mut scored: Vec<(f64, &Provider, &Tool)> =
-        tools
-            .iter()
-            .map(|(p, t)| {
-                let score = crate::cli::tools::score_tool_match(p, t, &query_terms);
-                (score, *p, *t)
-            })
-            .collect();
+    let mut scored: Vec<(f64, &Provider, &Tool)> = tools
+        .iter()
+        .map(|(p, t)| {
+            let score = crate::cli::tools::score_tool_match(p, t, &query_terms);
+            (score, *p, *t)
+        })
+        .collect();
 
     // Sort by score descending
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -705,10 +869,7 @@ fn prefilter_tools_by_query<'a>(
 }
 
 /// Scan LLM output for tool names mentioned, append ground-truth usage reference.
-fn print_tool_reference(
-    llm_output: &str,
-    scoped_tools: &[(&Provider, &Tool)],
-) {
+fn print_tool_reference(llm_output: &str, scoped_tools: &[(&Provider, &Tool)]) {
     let mut mentioned = Vec::new();
     for (_, tool) in scoped_tools {
         if llm_output.contains(&tool.name) {
@@ -812,14 +973,79 @@ fn build_param_table(tool: &Tool) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// Plan mode: ask the LLM for a structured plan of tool calls.
+async fn execute_plan_mode(
+    cli: &Cli,
+    args: &[String],
+    save: Option<&str>,
+    local: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ati_dir = common::ati_dir();
+    let manifests_dir = ati_dir.join("manifests");
+    let mut registry = ManifestRegistry::load(&manifests_dir)?;
+    let keyring = crate::cli::call::load_keyring(&ati_dir, cli.verbose);
+    crate::cli::tools::discover_mcp_tools(&mut registry, &keyring, cli.verbose).await;
+
+    let (scope_name, query) = resolve_assist_scope(args, &registry);
+
+    // Load skills
+    let skills_dir = ati_dir.join("skills");
+    let skill_registry = crate::core::skill::SkillRegistry::load(&skills_dir)
+        .unwrap_or_else(|_| crate::core::skill::SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap());
+
+    // Build system prompt — similar to normal assist but with plan suffix
+    let (system_prompt, _scoped_tools) = if let Some(ref tool_name) = scope_name {
+        let skills_section =
+            build_skills_for_tools(&skill_registry, &[tool_name.as_str()], cli.verbose);
+        build_scoped_context(tool_name, &registry, &skills_section, cli.verbose)?
+    } else {
+        let all_tools = registry.list_public_tools();
+        let scoped = crate::core::scope::filter_tools_by_scope(
+            all_tools,
+            &ScopeConfig::unrestricted(),
+        );
+        let scoped = prefilter_tools_by_query(&scoped, &query, 50);
+        let tools_context = build_tool_context(&scoped, false);
+        let tool_names: Vec<&str> = scoped.iter().map(|(_, t)| t.name.as_str()).collect();
+        let skills_section = build_skills_for_tools(&skill_registry, &tool_names, cli.verbose);
+        let prompt = HELP_SYSTEM_PROMPT
+            .replace("{tools}", &tools_context)
+            .replace("{skills_section}", &skills_section);
+        (prompt, scoped)
+    };
+
+    // Add plan mode suffix to system prompt
+    let plan_prompt = format!(
+        "{}{}",
+        system_prompt,
+        crate::cli::plan::PLAN_SYSTEM_PROMPT_SUFFIX
+    );
+
+    let content = call_llm(cli, &registry, &keyring, &plan_prompt, &query, local).await?;
+
+    // Parse the LLM response as a plan
+    let plan = crate::cli::plan::parse_plan_response(&content, &query)
+        .map_err(|e| format!("Failed to parse plan from LLM response: {e}\n\nRaw response:\n{content}"))?;
+
+    let json = serde_json::to_string_pretty(&plan)?;
+
+    // Save to file if requested
+    if let Some(path) = save {
+        std::fs::write(path, &json)?;
+        eprintln!("Plan saved to {path}");
+    }
+
+    // Output the plan
+    println!("{json}");
+
+    Ok(())
+}
+
 /// Build tool context string from scoped tools for the LLM system prompt.
 /// Includes category and tags for better semantic matching in `ati assist`.
 ///
 /// If `include_cli_help` is true, captures --help output for CLI tools.
-pub fn build_tool_context(
-    scoped_tools: &[(&Provider, &Tool)],
-    include_cli_help: bool,
-) -> String {
+pub fn build_tool_context(scoped_tools: &[(&Provider, &Tool)], include_cli_help: bool) -> String {
     // Count CLI tools to decide whether to capture help (avoid slowdown with many CLIs)
     let cli_count = scoped_tools.iter().filter(|(p, _)| p.is_cli()).count();
     let capture_cli = include_cli_help || cli_count <= 5;
@@ -888,7 +1114,8 @@ pub fn build_tool_context(
                                 || v.get("description").is_some()
                         })
                         .map(|(k, v)| {
-                            let type_str = v.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+                            let type_str =
+                                v.get("type").and_then(|t| t.as_str()).unwrap_or("string");
                             let desc = v.get("description").and_then(|d| d.as_str()).unwrap_or("");
                             let req_label = if required.iter().any(|r| r == k) {
                                 " [REQUIRED]"
