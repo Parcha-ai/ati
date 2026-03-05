@@ -48,16 +48,18 @@ ati tool info clinicaltrials__searchStudies
 #   --filter.phase (string): Filter by study phase
 #   --pageSize (integer, default: 10): Results per page
 
-# Ask the LLM for help — scoped to this provider
+# Ask for help — scoped to this provider
 ati assist clinicaltrials "find phase 3 cancer trials"
-# ati run clinicaltrials__searchStudies --query.term "cancer" --filter.phase "Phase 3"
+# For phase 3 cancer trials, use `clinicaltrials__searchStudies` with a phase filter:
 #
-# Optional parameters you can add:
-#   --filter.overallStatus "Recruiting": Show only actively recruiting trials
-#   --pageSize 50: Increase results per page
+#   ati run clinicaltrials__searchStudies \
+#     --query.term "cancer" --filter.phase "Phase 3"
+#
+# To narrow to actively recruiting trials, add `--filter.overallStatus "Recruiting"`.
+# Bump `--pageSize 50` if you need more than 10 results.
 ```
 
-`ati assist` reads the tool schemas and returns exact `ati run` commands you can copy-paste.
+`ati assist` answers like a knowledgeable colleague — which tools, what order, key params, gotchas — with commands you can run immediately.
 
 ### Run it
 
@@ -152,19 +154,19 @@ This is the key part. The agent now has dozens of providers and hundreds of tool
 
 ```bash
 ati assist "do we have a tool to search for stock prices?"
-# Yes, you have several tools for searching stock prices:
+# Yes, we have several tools for stock prices:
 #
-# 1. financial_datasets__getStockPriceSnapshot
-#    Get the latest stock price snapshot for a given ticker.
-#    ati run financial_datasets__getStockPriceSnapshot --ticker AAPL
+# **For current/latest prices:**
+# - `financial_datasets__getStockPriceSnapshot` — latest price snapshot
+# - `finnhub__quote` — real-time quote data (US stocks)
 #
-# 2. financial_datasets__getStockPrices
-#    Get historical stock prices with customizable date ranges.
-#    ati run financial_datasets__getStockPrices --ticker AAPL --start_date 2024-01-01
+# **For historical data:**
+# - `financial_datasets__getStockPrices` — OHLCV data with date ranges
 #
-# 3. finnhub__quote
-#    Get real-time quote data for US stocks.
-#    ati run finnhub__quote --symbol AAPL
+#   ati run financial_datasets__getStockPriceSnapshot --ticker AAPL
+#   ati run finnhub__quote --symbol AAPL
+#   ati run financial_datasets__getStockPrices --ticker AAPL \
+#     --start_date 2024-12-01 --end_date 2024-12-31 --interval day
 
 ati tool search "sanctions"
 # PROVIDER          TOOL                            DESCRIPTION
@@ -172,7 +174,7 @@ ati tool search "sanctions"
 # complyadvantage   ca_person_sanctions_search      Search sanctions lists for individuals
 ```
 
-`ati assist` returns copy-pasteable `ati run` commands. `ati tool search` is instant and offline. The agent picks the right tool and runs it — no human in the loop.
+`ati assist` answers naturally — which tools, why, and exact commands — like asking a colleague. `ati tool search` is instant and offline. The agent picks the right tool and runs it — no human in the loop.
 
 ### 5. It works with CLIs too
 
@@ -184,9 +186,10 @@ ati provider add-cli gh --command gh \
 
 # Agent asks how to use it
 ati assist gh "how do I create a pull request?"
-# ati run gh -- pr create --title "Fix login bug" --body "Resolves #123"
-# ati run gh -- pr create --draft --title "WIP: New feature"
-# ati run gh -- pr create --base main --head feature/new-auth
+# Use the `pr create` subcommand:
+#   ati run gh -- pr create --title "Fix login bug" --body "Resolves #123"
+# Your branch must be pushed first. Add --draft to open as draft,
+# or --base main --head feature/new-auth to target specific branches.
 
 # Agent runs it
 ati run gh -- repo view anthropics/claude-code --json name,stargazerCount
@@ -432,19 +435,30 @@ Usage:
   ati run clinicaltrials__searchStudies --query.term "cancer" --pageSize 10
 ```
 
-### Assist — LLM-Powered Recommendations
+### Assist — Like Asking a Colleague
+
+`ati assist` answers naturally — which tools, what order, gotchas — not a numbered command list.
 
 ```bash
 # Broad — searches all tools
 $ ati assist "How do I screen a person for sanctions?"
-1. ca_person_sanctions_search — Search sanctions lists for individuals
-   ati run ca_person_sanctions_search --search_term "Person Name" --fuzziness 0.6
-
-2. ca_person_pep_search — Search for PEP matches
-   ati run ca_person_pep_search --search_term "Person Name" --fuzziness 0.6
+# For sanctions screening, use `ca_person_sanctions_search`:
+#
+#   ati run ca_person_sanctions_search --search_term "John Smith" --fuzziness 0.6
+#
+# Set fuzziness between 0.4–0.8 depending on how strict you need matching.
+# You'll also want to check PEP lists in the same pass:
+#
+#   ati run ca_person_pep_search --search_term "John Smith" --fuzziness 0.6
 
 # Scoped to a provider — captures --help output for CLIs
 $ ati assist gh "how do I create a pull request?"
+# Use the `pr create` subcommand:
+#
+#   ati run gh -- pr create --title "Fix login bug" --body "Resolves #123"
+#
+# Your branch must be pushed to the remote first. Use `--base main` to
+# target a specific branch, or `--draft` to open as a draft PR.
 
 # Scoped to a tool — uses the full schema for precise commands
 $ ati assist github__search_repositories "search private repos only"
@@ -694,7 +708,7 @@ You have ATI on your PATH. Available commands:
 - `ati tool search <query>` — find tools by keyword
 - `ati tool info <name>` — inspect a tool's schema
 - `ati run <tool> --key value` — execute a tool
-- `ati assist "<question>"` — ask for recommendations
+- `ati assist "<question>"` — ask which tools to use and how
 """
 
 # Claude Agent SDK
@@ -735,7 +749,7 @@ ati init --proxy --es256                           # Initialize with JWT keys
 | `/health` | GET | Status — tool/provider/skill counts |
 | `/call` | POST | Execute tool — `{tool_name, args}` |
 | `/mcp` | POST | MCP JSON-RPC pass-through |
-| `/help` | POST | LLM-powered discovery |
+| `/help` | POST | LLM-powered tool guidance |
 | `/skills` | GET | List/search skills |
 | `/skills/:name` | GET | Skill content and metadata |
 | `/skills/resolve` | POST | Resolve skills for scopes |
@@ -756,7 +770,7 @@ COMMANDS:
     tool       List, inspect, search, and discover tools
     provider   Add, list, remove, inspect, and import providers
     skill      Manage skills (methodology docs for agents)
-    assist     LLM-powered tool discovery and recommendations
+    assist     Ask which tools to use and how (LLM-powered)
     key        Manage API keys in the credentials store
     token      JWT token management (keygen, issue, inspect, validate)
     auth       Show authentication and scope information
