@@ -1,0 +1,8 @@
+[skill]
+name = "google-workspace"
+version = "0.1.0"
+description = "How to use Google Workspace APIs through the gws CLI via ATI"
+author = "Parcha"
+providers = ["google_workspace"]
+categories = ["productivity"]
+keywords = ["google", "workspace", "drive", "gmail", "calendar", "sheets", "docs", "chat", "admin"]

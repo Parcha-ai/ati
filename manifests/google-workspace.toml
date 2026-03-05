@@ -1,0 +1,18 @@
+[provider]
+name = "google_workspace"
+description = "Google Workspace CLI (gws) — Drive, Gmail, Calendar, Sheets, Docs, Chat, Admin, and 18 more services"
+handler = "cli"
+cli_command = "gws"
+cli_default_args = []
+cli_timeout_secs = 120
+auth_type = "none"
+category = "productivity"
+tags = ["google", "workspace", "drive", "gmail", "calendar", "sheets", "docs"]
+
+# gws manages its own auth natively via `gws auth setup`.
+# For headless/service-account use, ATI materializes credentials as a temp file.
+[provider.cli_env]
+GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = "@{google_workspace_credentials}"
+# Domain-wide delegation: uncomment and set `ati key set google_workspace_user user@domain.com`
+# so files are created in the user's Drive, not the service account's invisible Drive.
+# GOOGLE_WORKSPACE_CLI_IMPERSONATED_USER = "${google_workspace_user}"

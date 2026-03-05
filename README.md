@@ -1,3 +1,8 @@
+[![CI](https://img.shields.io/github/actions/workflow/status/Parcha-ai/ati/ci.yml?branch=main&label=CI)](https://github.com/Parcha-ai/ati/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/Parcha-ai/ati)](LICENSE)
+[![443 tests](https://img.shields.io/badge/tests-443-brightgreen)](#building)
+[![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-blue)](#building)
+
 # ATI — Agent Tools Interface
 
 **Let your agents cook.**
@@ -325,6 +330,43 @@ ati run gcloud compute instances list --project my-project
 The `${key}` syntax injects a keyring secret as an env var. The `@{key}` syntax materializes it as a temporary file (0600 permissions, wiped on process exit) — for CLIs that need a credential file path.
 
 CLI providers get a curated environment (only `PATH`, `HOME`, `TMPDIR`, `LANG`, `USER`, `TERM` from the host). The subprocess can't see your shell's full environment.
+
+**Example: Google Workspace — 25 APIs, one CLI.** ATI ships a pre-built manifest for [`gws`](https://github.com/googleworkspace/cli) (Google Workspace CLI). It covers Drive, Gmail, Calendar, Sheets, Docs, Slides, Chat, Admin, and 18 more services — all auto-discovered from Google's Discovery Service.
+
+```bash
+# Install gws, store your service account, go
+npm install -g @googleworkspace/cli
+ati key set google_workspace_credentials "$(cat service-account.json)"
+
+# Agent asks how to create a presentation
+ati assist google_workspace "how do I create a new Google Slides presentation?"
+# Create a new presentation with:
+#
+#   ati run google_workspace -- slides presentations create \
+#     --json '{"title": "My Presentation"}'
+#
+# --json is required for the request body (POST). title is the only required field.
+# Returns the presentation ID and URL.
+#
+# Check the schema first for all available fields:
+#   ati run google_workspace -- schema slides.presentations.create
+
+# Agent runs it
+ati run google_workspace -- slides presentations create \
+  --json '{"title": "Q1 Review"}'
+
+# List Drive files, search Gmail, check calendar
+ati run google_workspace -- drive files list --params '{"pageSize": 10}'
+ati run google_workspace -- gmail messages list \
+  --params '{"userId": "me", "q": "from:ceo@company.com is:unread"}'
+```
+
+ATI materializes the service account JSON as a temp file (0600, wiped on exit) via the `@{key}` syntax — the agent never sees raw credentials. In proxy mode, service accounts create files in their own invisible Drive. To have files appear in a real user's Drive, enable [domain-wide delegation](https://developers.google.com/identity/protocols/oauth2/service-account#delegatingauthority) and set the impersonated user:
+
+```bash
+ati key set google_workspace_user analyst@company.com
+# Now slides, docs, sheets are created in the analyst's Drive
+```
 
 ### HTTP Tools — Hand-written TOML for full control
 
