@@ -1,10 +1,13 @@
 /// Skill management — structured metadata, registry, and scope-driven resolution.
 ///
 /// Each skill directory contains:
-///   - `skill.toml`  — structured metadata + tool/provider/category bindings
-///   - `SKILL.md`    — methodology content (injected into agent prompts)
+///   - `SKILL.md`    — methodology content with optional YAML frontmatter (Anthropic spec)
+///   - `skill.toml`  — optional ATI extension for tool/provider/category bindings
 ///   - `references/` — optional supporting documentation
+///   - `scripts/`    — optional helper scripts
+///   - `assets/`     — optional templates, configs, data files
 ///
+/// Metadata priority: YAML frontmatter in SKILL.md > skill.toml > inferred from content.
 /// Skills reference manifests (tools, providers, categories), never the reverse.
 /// Installing a skill never requires editing existing manifests.
 
@@ -30,7 +33,111 @@ pub enum SkillError {
     Invalid(String),
 }
 
-/// Structured metadata from `skill.toml`.
+/// Anthropic Agent Skills spec frontmatter (YAML in SKILL.md).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AnthropicFrontmatter {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub license: Option<String>,
+    pub compatibility: Option<String>,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    /// Space-delimited allowed tools string, e.g. "Bash(git:*) Read"
+    #[serde(rename = "allowed-tools")]
+    pub allowed_tools: Option<String>,
+}
+
+/// Parse YAML frontmatter from SKILL.md content.
+///
+/// Returns `(Some(frontmatter), body)` if `---` delimiters found and YAML parses,
+/// or `(None, original_content)` on any failure (graceful fallback).
+pub fn parse_frontmatter(content: &str) -> (Option<AnthropicFrontmatter>, &str) {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return (None, content);
+    }
+
+    // Find the closing `---` after the opening one
+    let after_open = &trimmed[3..];
+    // Skip the rest of the opening `---` line
+    let after_open = match after_open.find('\n') {
+        Some(pos) => &after_open[pos + 1..],
+        None => return (None, content),
+    };
+
+    match after_open.find("\n---") {
+        Some(end_pos) => {
+            let yaml_str = &after_open[..end_pos];
+            let body_start = &after_open[end_pos + 4..]; // skip \n---
+            // Skip rest of closing --- line
+            let body = match body_start.find('\n') {
+                Some(pos) => &body_start[pos + 1..],
+                None => "",
+            };
+
+            match serde_yaml::from_str::<AnthropicFrontmatter>(yaml_str) {
+                Ok(fm) => (Some(fm), body),
+                Err(_) => (None, content), // Malformed YAML → treat as no frontmatter
+            }
+        }
+        None => (None, content),
+    }
+}
+
+/// Strip YAML frontmatter from SKILL.md content, returning only the body.
+pub fn strip_frontmatter(content: &str) -> &str {
+    let (_, body) = parse_frontmatter(content);
+    body
+}
+
+/// Validate a skill name against the Anthropic Agent Skills naming rules.
+///
+/// Rules: 1-64 chars, lowercase letters + digits + hyphens, no consecutive hyphens,
+/// must start/end with a letter or digit.
+pub fn is_anthropic_valid_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    // Must start and end with alphanumeric
+    if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
+        return false;
+    }
+    if !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit() {
+        return false;
+    }
+    // Only lowercase, digits, hyphens; no consecutive hyphens
+    let mut prev_hyphen = false;
+    for &b in bytes {
+        if b == b'-' {
+            if prev_hyphen {
+                return false;
+            }
+            prev_hyphen = true;
+        } else if b.is_ascii_lowercase() || b.is_ascii_digit() {
+            prev_hyphen = false;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Skill metadata format — indicates how the metadata was sourced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SkillFormat {
+    /// Anthropic spec: YAML frontmatter in SKILL.md
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// ATI legacy: skill.toml only
+    #[serde(rename = "legacy-toml")]
+    LegacyToml,
+    /// Inferred: SKILL.md without frontmatter or skill.toml
+    #[serde(rename = "inferred")]
+    Inferred,
+}
+
+/// Structured metadata from `skill.toml` and/or YAML frontmatter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillMeta {
     pub name: String,
@@ -69,11 +176,61 @@ pub struct SkillMeta {
     #[serde(default)]
     pub suggests: Vec<String>,
 
+    // --- Anthropic spec fields ---
+
+    /// SPDX license identifier (from frontmatter)
+    #[serde(default)]
+    pub license: Option<String>,
+    /// Compatibility notes (from frontmatter, max 500 chars)
+    #[serde(default)]
+    pub compatibility: Option<String>,
+    /// Arbitrary metadata key-value pairs (from frontmatter `metadata:` block)
+    #[serde(default)]
+    pub extra_metadata: HashMap<String, String>,
+    /// Space-delimited allowed tools (from frontmatter `allowed-tools:`)
+    #[serde(default)]
+    pub allowed_tools: Option<String>,
+    /// Whether the skill has YAML frontmatter in SKILL.md
+    #[serde(default)]
+    pub has_frontmatter: bool,
+    /// How metadata was sourced
+    #[serde(default = "default_format")]
+    pub format: SkillFormat,
+
     // --- Runtime (not in TOML, set after loading) ---
 
     /// Absolute path to the skill directory
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+impl Default for SkillMeta {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            version: default_version(),
+            description: String::new(),
+            author: None,
+            tools: Vec::new(),
+            providers: Vec::new(),
+            categories: Vec::new(),
+            keywords: Vec::new(),
+            hint: None,
+            depends_on: Vec::new(),
+            suggests: Vec::new(),
+            license: None,
+            compatibility: None,
+            extra_metadata: HashMap::new(),
+            allowed_tools: None,
+            has_frontmatter: false,
+            format: SkillFormat::Inferred,
+            dir: PathBuf::new(),
+        }
+    }
+}
+
+fn default_format() -> SkillFormat {
+    SkillFormat::Inferred
 }
 
 fn default_version() -> String {
@@ -276,7 +433,7 @@ impl SkillRegistry {
         scored.into_iter().map(|(_, skill)| skill).collect()
     }
 
-    /// Read the SKILL.md content for a skill.
+    /// Read the SKILL.md content for a skill, stripping any YAML frontmatter.
     pub fn read_content(&self, name: &str) -> Result<String, SkillError> {
         let skill = self
             .get_skill(name)
@@ -285,8 +442,9 @@ impl SkillRegistry {
         if !skill_md.exists() {
             return Ok(String::new());
         }
-        std::fs::read_to_string(&skill_md)
-            .map_err(|e| SkillError::Io(skill_md.display().to_string(), e))
+        let raw = std::fs::read_to_string(&skill_md)
+            .map_err(|e| SkillError::Io(skill_md.display().to_string(), e))?;
+        Ok(strip_frontmatter(&raw).to_string())
     }
 
     /// List reference files for a skill.
@@ -504,6 +662,11 @@ pub fn build_skill_context(skills: &[&SkillMeta]) -> String {
 // --- Private helpers ---
 
 /// Load a single skill from a directory.
+///
+/// Priority:
+///   (A) SKILL.md with YAML frontmatter → primary source; merge ATI extensions from skill.toml
+///   (B) No frontmatter + skill.toml → current legacy behavior
+///   (C) No frontmatter + no skill.toml + SKILL.md exists → infer from content
 fn load_skill_from_dir(dir: &Path) -> Result<SkillMeta, SkillError> {
     let skill_toml_path = dir.join("skill.toml");
     let skill_md_path = dir.join("SKILL.md");
@@ -514,24 +677,75 @@ fn load_skill_from_dir(dir: &Path) -> Result<SkillMeta, SkillError> {
         .unwrap_or("unknown")
         .to_string();
 
-    if skill_toml_path.exists() {
-        // Full metadata from skill.toml
+    // Try to read and parse frontmatter from SKILL.md
+    let (frontmatter, _body) = if skill_md_path.exists() {
+        let content = std::fs::read_to_string(&skill_md_path)
+            .map_err(|e| SkillError::Io(skill_md_path.display().to_string(), e))?;
+        let (fm, body) = parse_frontmatter(&content);
+        // We need owned body for description inference later
+        let body_owned = body.to_string();
+        (fm, Some((content, body_owned)))
+    } else {
+        (None, None)
+    };
+
+    if let Some(fm) = frontmatter {
+        // --- (A) Frontmatter exists → primary source ---
+        let mut meta = SkillMeta {
+            name: fm.name.unwrap_or_else(|| dir_name.clone()),
+            description: fm.description.unwrap_or_default(),
+            license: fm.license,
+            compatibility: fm.compatibility,
+            extra_metadata: fm.metadata,
+            allowed_tools: fm.allowed_tools,
+            has_frontmatter: true,
+            format: SkillFormat::Anthropic,
+            dir: dir.to_path_buf(),
+            ..Default::default()
+        };
+
+        // Extract author/version from frontmatter metadata if present
+        if let Some(author) = meta.extra_metadata.get("author").cloned() {
+            meta.author = Some(author);
+        }
+        if let Some(version) = meta.extra_metadata.get("version").cloned() {
+            meta.version = version;
+        }
+
+        // Merge ATI-extension fields from skill.toml if it exists
+        if skill_toml_path.exists() {
+            let contents = std::fs::read_to_string(&skill_toml_path)
+                .map_err(|e| SkillError::Io(skill_toml_path.display().to_string(), e))?;
+            if let Ok(parsed) = toml::from_str::<SkillToml>(&contents) {
+                let ext = parsed.skill;
+                // ATI-specific fields not in frontmatter
+                meta.tools = ext.tools;
+                meta.providers = ext.providers;
+                meta.categories = ext.categories;
+                meta.keywords = ext.keywords;
+                meta.hint = ext.hint;
+                meta.depends_on = ext.depends_on;
+                meta.suggests = ext.suggests;
+            }
+        }
+
+        Ok(meta)
+    } else if skill_toml_path.exists() {
+        // --- (B) No frontmatter + skill.toml → legacy behavior ---
         let contents = std::fs::read_to_string(&skill_toml_path)
             .map_err(|e| SkillError::Io(skill_toml_path.display().to_string(), e))?;
         let parsed: SkillToml = toml::from_str(&contents)
             .map_err(|e| SkillError::Parse(skill_toml_path.display().to_string(), e))?;
         let mut meta = parsed.skill;
         meta.dir = dir.to_path_buf();
-        // Ensure name matches directory
+        meta.format = SkillFormat::LegacyToml;
         if meta.name.is_empty() {
             meta.name = dir_name;
         }
         Ok(meta)
-    } else if skill_md_path.exists() {
-        // Backward compatibility: SKILL.md only
-        let content = std::fs::read_to_string(&skill_md_path)
-            .map_err(|e| SkillError::Io(skill_md_path.display().to_string(), e))?;
-        let description = content
+    } else if let Some((_full_content, body)) = _body {
+        // --- (C) No frontmatter + no skill.toml + SKILL.md exists → infer ---
+        let description = body
             .lines()
             .find(|l| !l.is_empty() && !l.starts_with('#'))
             .map(|l| l.trim().to_string())
@@ -539,17 +753,10 @@ fn load_skill_from_dir(dir: &Path) -> Result<SkillMeta, SkillError> {
 
         Ok(SkillMeta {
             name: dir_name,
-            version: default_version(),
             description,
-            author: None,
-            tools: Vec::new(),
-            providers: Vec::new(),
-            categories: Vec::new(),
-            keywords: Vec::new(),
-            hint: None,
-            depends_on: Vec::new(),
-            suggests: Vec::new(),
+            format: SkillFormat::Inferred,
             dir: dir.to_path_buf(),
+            ..Default::default()
         })
     } else {
         Err(SkillError::Invalid(format!(
@@ -598,7 +805,7 @@ suggests = []
     toml
 }
 
-/// Generate a skeleton `SKILL.md`.
+/// Generate a skeleton `SKILL.md` (legacy format without frontmatter).
 pub fn scaffold_skill_md(name: &str) -> String {
     let title = name
         .split('-')
@@ -630,6 +837,87 @@ TODO: Describe what this skill does and when to use it.
 TODO: Add example workflows
 "#
     )
+}
+
+/// Generate a skeleton `SKILL.md` with Anthropic-spec YAML frontmatter.
+pub fn scaffold_skill_md_with_frontmatter(name: &str, description: &str) -> String {
+    let title = name
+        .split('-')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().to_string() + c.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    format!(
+        r#"---
+name: {name}
+description: {description}
+metadata:
+  version: "0.1.0"
+---
+
+# {title} Skill
+
+TODO: Describe what this skill does and when to use it.
+
+## Tools Available
+
+- TODO: List the tools this skill covers
+
+## Decision Tree
+
+1. TODO: Step-by-step methodology
+
+## Examples
+
+TODO: Add example workflows
+"#
+    )
+}
+
+/// Generate an ATI extension `skill.toml` for fields not in the Anthropic spec.
+/// Used alongside a SKILL.md with frontmatter.
+pub fn scaffold_ati_extension_toml(
+    name: &str,
+    tools: &[String],
+    provider: Option<&str>,
+) -> String {
+    let mut toml = format!(
+        r#"# ATI extension fields for skill '{name}'
+# Core metadata (name, description, license) lives in SKILL.md frontmatter.
+
+[skill]
+name = "{name}"
+"#
+    );
+
+    if !tools.is_empty() {
+        let tools_str: Vec<String> = tools.iter().map(|t| format!("\"{t}\"")).collect();
+        toml.push_str(&format!("tools = [{}]\n", tools_str.join(", ")));
+    } else {
+        toml.push_str("tools = []\n");
+    }
+
+    if let Some(p) = provider {
+        toml.push_str(&format!("providers = [\"{p}\"]\n"));
+    } else {
+        toml.push_str("providers = []\n");
+    }
+
+    toml.push_str(
+        r#"categories = []
+keywords = []
+depends_on = []
+suggests = []
+"#,
+    );
+
+    toml
 }
 
 #[cfg(test)]
@@ -957,15 +1245,10 @@ tools = ["tool_b"]
             name: "test-skill".to_string(),
             version: "1.0.0".to_string(),
             description: "A test skill".to_string(),
-            author: None,
             tools: vec!["tool_a".to_string(), "tool_b".to_string()],
-            providers: Vec::new(),
-            categories: Vec::new(),
-            keywords: Vec::new(),
             hint: Some("Use for testing".to_string()),
-            depends_on: Vec::new(),
             suggests: vec!["other-skill".to_string()],
-            dir: PathBuf::new(),
+            ..Default::default()
         };
 
         let ctx = build_skill_context(&[&skill]);

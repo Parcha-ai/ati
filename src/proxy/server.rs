@@ -682,6 +682,10 @@ async fn handle_skill_detail(
                 "hint": skill_meta.hint,
                 "depends_on": skill_meta.depends_on,
                 "suggests": skill_meta.suggests,
+                "license": skill_meta.license,
+                "compatibility": skill_meta.compatibility,
+                "allowed_tools": skill_meta.allowed_tools,
+                "format": skill_meta.format,
             })),
         );
     }

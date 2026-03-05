@@ -15,7 +15,7 @@ use tower::ServiceExt;
 use ati::core::keyring::Keyring;
 use ati::core::manifest::ManifestRegistry;
 use ati::core::scope::ScopeConfig;
-use ati::core::skill::{self, SkillMeta, SkillRegistry};
+use ati::core::skill::{self, SkillFormat, SkillMeta, SkillRegistry};
 use ati::proxy::server::{build_router, ProxyState};
 
 // --- Helpers ---
@@ -720,15 +720,9 @@ fn test_build_skill_context_for_llm() {
             name: "sanctions".to_string(),
             version: "1.0.0".to_string(),
             description: "Screen against sanctions".to_string(),
-            author: None,
             tools: vec!["ca_sanctions_search".to_string()],
-            providers: Vec::new(),
-            categories: Vec::new(),
-            keywords: Vec::new(),
             hint: Some("Use when checking sanctions".to_string()),
-            depends_on: Vec::new(),
-            suggests: Vec::new(),
-            dir: std::path::PathBuf::new(),
+            ..Default::default()
         },
     ];
 
@@ -1028,4 +1022,314 @@ tools = ["tool_z"]
     assert!(content_a.contains("Content for A"));
     let content_b = registry.read_content("skill-b").unwrap();
     assert!(content_b.contains("Content for B"));
+}
+
+// --- Anthropic Frontmatter Tests ---
+
+#[test]
+fn test_parse_frontmatter_basic() {
+    let content = r#"---
+name: my-skill
+description: A test skill
+---
+
+# My Skill
+
+Body content here.
+"#;
+    let (fm, body) = skill::parse_frontmatter(content);
+    let fm = fm.expect("should parse frontmatter");
+    assert_eq!(fm.name.unwrap(), "my-skill");
+    assert_eq!(fm.description.unwrap(), "A test skill");
+    assert!(body.contains("Body content here."));
+    assert!(!body.contains("---"));
+    assert!(!body.contains("name: my-skill"));
+}
+
+#[test]
+fn test_parse_frontmatter_with_metadata() {
+    let content = r#"---
+name: test-skill
+description: Testing metadata
+license: MIT
+compatibility: Requires Python 3.10+
+metadata:
+  author: test-author
+  version: "2.0.0"
+allowed-tools: Bash(git:*) Read
+---
+
+# Test
+"#;
+    let (fm, _body) = skill::parse_frontmatter(content);
+    let fm = fm.expect("should parse");
+    assert_eq!(fm.name.unwrap(), "test-skill");
+    assert_eq!(fm.license.unwrap(), "MIT");
+    assert_eq!(fm.compatibility.unwrap(), "Requires Python 3.10+");
+    assert_eq!(fm.metadata.get("author").unwrap(), "test-author");
+    assert_eq!(fm.metadata.get("version").unwrap(), "2.0.0");
+    assert_eq!(fm.allowed_tools.unwrap(), "Bash(git:*) Read");
+}
+
+#[test]
+fn test_parse_frontmatter_none() {
+    let content = "# No Frontmatter\n\nJust regular markdown.\n";
+    let (fm, body) = skill::parse_frontmatter(content);
+    assert!(fm.is_none());
+    assert_eq!(body, content);
+}
+
+#[test]
+fn test_parse_frontmatter_malformed() {
+    let content = "---\ninvalid: yaml: [broken\n---\n\n# Body\n";
+    let (fm, body) = skill::parse_frontmatter(content);
+    assert!(fm.is_none());
+    assert_eq!(body, content); // Graceful fallback to original content
+}
+
+#[test]
+fn test_load_skill_frontmatter_primary() {
+    // Frontmatter should win over skill.toml for shared fields (name, description)
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("my-skill");
+    fs::create_dir_all(&skill_dir).unwrap();
+
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: my-skill
+description: From frontmatter
+license: Apache-2.0
+metadata:
+  author: fm-author
+  version: "3.0.0"
+---
+
+# My Skill
+
+Methodology here.
+"#,
+    )
+    .unwrap();
+
+    // skill.toml provides ATI-specific bindings
+    fs::write(
+        skill_dir.join("skill.toml"),
+        r#"[skill]
+name = "my-skill"
+description = "From toml (should be overridden)"
+tools = ["tool_x", "tool_y"]
+providers = ["provider_a"]
+keywords = ["test"]
+"#,
+    )
+    .unwrap();
+
+    let registry = SkillRegistry::load(tmp.path()).unwrap();
+    let skill = registry.get_skill("my-skill").unwrap();
+
+    // Frontmatter wins for shared fields
+    assert_eq!(skill.description, "From frontmatter");
+    assert_eq!(skill.license.as_deref(), Some("Apache-2.0"));
+    assert_eq!(skill.author.as_deref(), Some("fm-author"));
+    assert_eq!(skill.version, "3.0.0");
+    assert!(skill.has_frontmatter);
+    assert_eq!(skill.format, SkillFormat::Anthropic);
+
+    // ATI extensions come from skill.toml
+    assert_eq!(skill.tools, vec!["tool_x", "tool_y"]);
+    assert_eq!(skill.providers, vec!["provider_a"]);
+    assert_eq!(skill.keywords, vec!["test"]);
+}
+
+#[test]
+fn test_load_skill_frontmatter_only() {
+    // Pure Anthropic skill — no skill.toml at all
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("pure-anthropic");
+    fs::create_dir_all(&skill_dir).unwrap();
+
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: pure-anthropic
+description: A pure Anthropic spec skill
+license: MIT
+metadata:
+  author: test
+  version: "1.0.0"
+---
+
+# Pure Anthropic
+
+Use this when testing ATI.
+"#,
+    )
+    .unwrap();
+
+    let registry = SkillRegistry::load(tmp.path()).unwrap();
+    assert_eq!(registry.skill_count(), 1);
+
+    let skill = registry.get_skill("pure-anthropic").unwrap();
+    assert_eq!(skill.name, "pure-anthropic");
+    assert_eq!(skill.description, "A pure Anthropic spec skill");
+    assert_eq!(skill.license.as_deref(), Some("MIT"));
+    assert_eq!(skill.version, "1.0.0");
+    assert_eq!(skill.author.as_deref(), Some("test"));
+    assert!(skill.has_frontmatter);
+    assert_eq!(skill.format, SkillFormat::Anthropic);
+
+    // No ATI bindings (no skill.toml)
+    assert!(skill.tools.is_empty());
+    assert!(skill.providers.is_empty());
+}
+
+#[test]
+fn test_read_content_strips_frontmatter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("fm-skill");
+    fs::create_dir_all(&skill_dir).unwrap();
+
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: fm-skill
+description: Has frontmatter
+---
+
+# FM Skill
+
+Body content only.
+"#,
+    )
+    .unwrap();
+
+    // Need a skill.toml or frontmatter for loading
+    let registry = SkillRegistry::load(tmp.path()).unwrap();
+    let content = registry.read_content("fm-skill").unwrap();
+
+    // Content should NOT contain the YAML frontmatter
+    assert!(!content.contains("name: fm-skill"));
+    assert!(!content.contains("description: Has frontmatter"));
+    // But SHOULD contain the body
+    assert!(content.contains("# FM Skill"));
+    assert!(content.contains("Body content only."));
+}
+
+#[test]
+fn test_anthropic_name_validation() {
+    // Valid names
+    assert!(skill::is_anthropic_valid_name("my-skill"));
+    assert!(skill::is_anthropic_valid_name("a"));
+    assert!(skill::is_anthropic_valid_name("skill-123"));
+    assert!(skill::is_anthropic_valid_name("a1b2c3"));
+
+    // Invalid: empty
+    assert!(!skill::is_anthropic_valid_name(""));
+
+    // Invalid: uppercase
+    assert!(!skill::is_anthropic_valid_name("My-Skill"));
+
+    // Invalid: consecutive hyphens
+    assert!(!skill::is_anthropic_valid_name("my--skill"));
+
+    // Invalid: starts with hyphen
+    assert!(!skill::is_anthropic_valid_name("-skill"));
+
+    // Invalid: ends with hyphen
+    assert!(!skill::is_anthropic_valid_name("skill-"));
+
+    // Invalid: underscores
+    assert!(!skill::is_anthropic_valid_name("my_skill"));
+
+    // Invalid: too long (65 chars)
+    let long_name = "a".repeat(65);
+    assert!(!skill::is_anthropic_valid_name(&long_name));
+
+    // Valid: exactly 64 chars
+    let max_name = "a".repeat(64);
+    assert!(skill::is_anthropic_valid_name(&max_name));
+}
+
+#[test]
+fn test_backward_compat_legacy_toml_format() {
+    // Existing skill with skill.toml and no frontmatter should load as LegacyToml
+    let tmp = tempfile::tempdir().unwrap();
+
+    create_skill_dir(
+        tmp.path(),
+        "legacy-toml",
+        r#"[skill]
+name = "legacy-toml"
+version = "1.0.0"
+description = "A legacy skill"
+tools = ["tool_a"]
+"#,
+        "# Legacy\n\nNo frontmatter here.",
+    );
+
+    let registry = SkillRegistry::load(tmp.path()).unwrap();
+    let skill = registry.get_skill("legacy-toml").unwrap();
+    assert_eq!(skill.format, SkillFormat::LegacyToml);
+    assert!(!skill.has_frontmatter);
+    assert_eq!(skill.tools, vec!["tool_a"]);
+}
+
+#[test]
+fn test_backward_compat_inferred_format() {
+    // SKILL.md only, no frontmatter, no skill.toml → Inferred
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("inferred-skill");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "# Inferred Skill\n\nA skill inferred from content.\n",
+    )
+    .unwrap();
+
+    let registry = SkillRegistry::load(tmp.path()).unwrap();
+    let skill = registry.get_skill("inferred-skill").unwrap();
+    assert_eq!(skill.format, SkillFormat::Inferred);
+    assert!(!skill.has_frontmatter);
+    assert_eq!(skill.description, "A skill inferred from content.");
+}
+
+#[tokio::test]
+async fn test_proxy_skill_detail_meta_includes_frontmatter_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skills_dir = tmp.path();
+
+    // Create a skill with frontmatter
+    let skill_dir = skills_dir.join("anthropic-skill");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: anthropic-skill
+description: Anthropic spec skill
+license: MIT
+allowed-tools: Bash(git:*) Read
+---
+
+# Anthropic Skill
+"#,
+    )
+    .unwrap();
+
+    let state = build_test_state(skills_dir);
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/skills/anthropic-skill?meta=true")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["name"], "anthropic-skill");
+    assert_eq!(json["license"], "MIT");
+    assert_eq!(json["allowed_tools"], "Bash(git:*) Read");
+    assert_eq!(json["format"], "anthropic");
 }

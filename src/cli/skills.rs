@@ -342,6 +342,16 @@ fn show_skill(
                 if let Some(author) = &skill.author {
                     println!("Author:      {author}");
                 }
+                if let Some(license) = &skill.license {
+                    println!("License:     {license}");
+                }
+                if let Some(compat) = &skill.compatibility {
+                    println!("Compat:      {compat}");
+                }
+                if let Some(allowed) = &skill.allowed_tools {
+                    println!("Allowed:     {allowed}");
+                }
+                println!("Format:      {:?}", skill.format);
                 if !skill.tools.is_empty() {
                     println!("Tools:       {}", skill.tools.join(", "));
                 }
@@ -362,6 +372,12 @@ fn show_skill(
                 }
                 if !skill.suggests.is_empty() {
                     println!("Suggests:    {}", skill.suggests.join(", "));
+                }
+                if !skill.extra_metadata.is_empty() {
+                    println!("Metadata:");
+                    for (k, v) in &skill.extra_metadata {
+                        println!("  {k}: {v}");
+                    }
                 }
                 println!("Directory:   {}", skill.dir.display());
             }
@@ -717,18 +733,30 @@ fn init_skill(
     std::fs::create_dir_all(&skill_dir)?;
     std::fs::create_dir_all(skill_dir.join("references"))?;
 
-    // Write skill.toml
-    let toml_content = skill::scaffold_skill_toml(name, tools, provider);
-    std::fs::write(skill_dir.join("skill.toml"), toml_content)?;
-
-    // Write SKILL.md
-    let md_content = skill::scaffold_skill_md(name);
+    // Write SKILL.md with Anthropic-spec frontmatter
+    let description = format!("TODO: Describe what {name} does");
+    let md_content = skill::scaffold_skill_md_with_frontmatter(name, &description);
     std::fs::write(skill_dir.join("SKILL.md"), md_content)?;
 
+    // Only write skill.toml if ATI-specific bindings are needed
+    let has_bindings = !tools.is_empty() || provider.is_some();
+    if has_bindings {
+        let toml_content = skill::scaffold_ati_extension_toml(name, tools, provider);
+        std::fs::write(skill_dir.join("skill.toml"), toml_content)?;
+    }
+
     println!("Scaffolded skill '{name}' at {}", skill_dir.display());
-    println!("  skill.toml  — edit metadata and tool bindings");
-    println!("  SKILL.md    — write your methodology guide");
+    println!("  SKILL.md    — metadata in frontmatter + methodology guide");
+    if has_bindings {
+        println!("  skill.toml  — ATI tool/provider bindings");
+    }
     println!("  references/ — add supporting documentation");
+
+    // Warn if name doesn't conform to Anthropic spec
+    if !skill::is_anthropic_valid_name(name) {
+        eprintln!("Warning: name '{}' does not conform to Anthropic Agent Skills spec", name);
+        eprintln!("  (1-64 chars, lowercase + digits + hyphens, no consecutive hyphens)");
+    }
 
     Ok(())
 }
@@ -746,12 +774,24 @@ fn validate_skill(
 
     println!("Skill: {}", skill.name);
     println!("Version: {}", skill.version);
+    println!("Format: {:?}", skill.format);
+
+    // Anthropic naming validation (warning, not error)
+    if !skill::is_anthropic_valid_name(&skill.name) {
+        println!("Warning: name '{}' does not conform to Anthropic Agent Skills spec", skill.name);
+        println!("  (1-64 chars, lowercase + digits + hyphens, no consecutive hyphens)");
+    }
 
     // Check SKILL.md exists
     let skill_md = skill.dir.join("SKILL.md");
     if skill_md.exists() {
         let content = std::fs::read_to_string(&skill_md)?;
         println!("SKILL.md: {} bytes, {} lines", content.len(), content.lines().count());
+        if skill.has_frontmatter {
+            println!("Frontmatter: present (Anthropic spec)");
+        } else {
+            println!("Frontmatter: absent");
+        }
     } else {
         println!("SKILL.md: MISSING (recommended)");
     }
