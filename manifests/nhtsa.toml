@@ -1,8 +1,0 @@
-[provider]
-name = "nhtsa"
-description = "NHTSA — Vehicle Identification Number (VIN) decoder"
-handler = "openapi"
-base_url = "https://vpic.nhtsa.dot.gov/api"
-openapi_spec = "nhtsa.json"
-auth_type = "none"
-category = "automotive"

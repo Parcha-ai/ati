@@ -1,0 +1,7 @@
+[skill]
+name = "ati-tools-reference"
+version = "0.1.0"
+description = "Reference guide for using ATI — commands, provider types, credentials, skills, proxy mode"
+author = "Parcha"
+categories = ["reference"]
+keywords = ["ati", "tools", "reference", "commands", "providers", "credentials", "proxy", "skills"]

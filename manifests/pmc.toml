@@ -1,8 +1,0 @@
-[provider]
-name = "pmc"
-description = "NCBI PubMed Central — Biomedical and life sciences literature search"
-handler = "openapi"
-base_url = "https://eutils.ncbi.nlm.nih.gov"
-openapi_spec = "pmc.json"
-auth_type = "none"
-category = "medical"

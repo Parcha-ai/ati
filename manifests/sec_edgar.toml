@@ -1,8 +1,0 @@
-[provider]
-name = "sec_edgar"
-description = "SEC EDGAR — Search SEC filings, annual reports, and company disclosures"
-handler = "openapi"
-base_url = "https://efts.sec.gov/LATEST"
-openapi_spec = "sec_edgar.json"
-auth_type = "none"
-category = "finance"

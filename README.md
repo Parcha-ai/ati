@@ -13,7 +13,54 @@ ATI gives AI agents secure access to APIs, MCP servers, OpenAPI services, and lo
 
 ---
 
-## See It Work — 60 Seconds, Zero Install
+## Install
+
+### Pre-built binary (recommended)
+
+Download the latest release for your platform:
+
+```bash
+# macOS (Apple Silicon)
+curl -fsSL https://github.com/Parcha-ai/ati/releases/latest/download/ati-aarch64-apple-darwin.tar.gz \
+  | tar xz && sudo mv ati /usr/local/bin/
+
+# macOS (Intel)
+curl -fsSL https://github.com/Parcha-ai/ati/releases/latest/download/ati-x86_64-apple-darwin.tar.gz \
+  | tar xz && sudo mv ati /usr/local/bin/
+
+# Linux (x86_64, static musl binary)
+curl -fsSL https://github.com/Parcha-ai/ati/releases/latest/download/ati-x86_64-unknown-linux-musl.tar.gz \
+  | tar xz && sudo mv ati /usr/local/bin/
+```
+
+### From source
+
+```bash
+# With cargo
+cargo install --git https://github.com/Parcha-ai/ati.git
+
+# Or clone and build
+git clone https://github.com/Parcha-ai/ati.git && cd ati
+cargo build --release
+# Binary at target/release/ati
+```
+
+### Quick start
+
+```bash
+# Initialize ATI (creates ~/.ati/)
+ati init
+
+# Add a free API — zero config, no API key needed
+ati provider import-openapi https://clinicaltrials.gov/api/v2/openapi.json
+
+# Try it
+ati run clinicaltrials__searchStudies --query.term "cancer" --pageSize 3
+```
+
+---
+
+## See It Work
 
 ### Import an API from its OpenAPI spec
 
@@ -256,7 +303,7 @@ ati key set example_api_key sk-your-key-here
 
 Supports tag/operation filtering (`--include-tags`, `--exclude-tags`) and an operation cap (`openapi_max_operations`) for large APIs.
 
-17 OpenAPI specs ship out of the box: ClinicalTrials.gov, Finnhub, SEC EDGAR, Crossref, Semantic Scholar, PubMed Central, CourtListener, Middesk, and more.
+3 OpenAPI specs ship out of the box: ClinicalTrials.gov, Finnhub, and Crossref. Additional specs are available in `contrib/specs/`.
 
 ### MCP Servers — Auto-discovered via protocol
 
@@ -437,7 +484,7 @@ $EDITOR ~/.ati/manifests/my-provider.toml
 ati provider remove my-provider
 ```
 
-ATI ships with 42 pre-built manifests covering finance, compliance, medical, legal, search, and developer tools. Use them as-is or as templates for your own.
+ATI ships with 8 curated manifests covering the main provider types — HTTP, OpenAPI, MCP, and CLI. Use them as-is or as templates for your own. Additional manifests are available in `contrib/`.
 
 ---
 
@@ -882,8 +929,10 @@ cargo test --test mcp_live_test -- --ignored           # Live MCP tests (needs A
 ```
 ati/
 ├── Cargo.toml
-├── manifests/              # 42 provider manifests (HTTP, MCP, OpenAPI, CLI)
-├── specs/                  # 17 pre-downloaded OpenAPI 3.0 specs
+├── manifests/              # 8 curated provider manifests (HTTP, MCP, OpenAPI, CLI)
+├── specs/                  # 3 OpenAPI specs for curated providers
+├── contrib/                # 35+ additional manifests and specs (gitignored)
+├── skills/                 # Skill methodology documents
 ├── examples/               # 6 SDK integrations (Claude, OpenAI, ADK, LangChain, Codex, Pi)
 ├── scripts/                # E2E test scripts
 ├── docs/

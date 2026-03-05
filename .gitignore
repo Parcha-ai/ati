@@ -12,3 +12,7 @@ JWT_FINDINGS_*.md
 *.swo
 *~
 .DS_Store
+
+# Contrib manifests/specs (local only, not distributed)
+contrib/manifests/
+contrib/specs/

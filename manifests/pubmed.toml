@@ -1,8 +1,0 @@
-[provider]
-name = "pubmed"
-description = "PubMed — Medical literature search (free, no API key required)"
-handler = "openapi"
-base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-openapi_spec = "pubmed.json"
-auth_type = "none"
-category = "medical"

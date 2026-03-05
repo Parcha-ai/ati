@@ -63,6 +63,12 @@ glob = "0.3"
 rand = "0.8"
 strsim = "0.11.1"
 
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
