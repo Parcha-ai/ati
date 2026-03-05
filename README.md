@@ -272,14 +272,17 @@ ati run github__read_file --owner anthropics --repo claude-code --path README.md
 A skill is a SKILL.md that teaches agents how to use an API — endpoints, auth patterns, parameters, workflows. On `ati skill install`, ATI reads the SKILL.md and uses a fast LLM call (Cerebras) to extract a full provider manifest automatically. No hand-written TOML, no OpenAPI spec needed. The SKILL.md is the only source of truth.
 
 ```bash
-# Install a skill — ATI reads SKILL.md, generates the manifest via Cerebras
-ati skill install ./fal-generate/
+# From a git URL — ATI clones, reads SKILL.md, generates the manifest
+ati skill install https://github.com/org/ati-skills#fal-generate
 Generating manifest for 'fal' from SKILL.md...
 Generated manifest for 'fal' at ~/.ati/manifests/fal.toml
   Hint: run `ati key set fal_api_key <your-key>` to configure credentials.
 Installed 'fal-generate' to ~/.ati/skills/fal-generate
 
-# Tools extracted from the SKILL.md are immediately available
+# From a local directory — same thing, ATI copies it into ~/.ati/skills/
+ati skill install ./my-skills/fal-generate/
+
+# Either way, tools are immediately available
 ati tool list
 ┌─────────────────────────────────────────────────────────────────────────┬──────────┬─────────────┐
 │ DESCRIPTION                                                             ┆ PROVIDER ┆ TOOL        │
@@ -295,7 +298,7 @@ ati key set fal_api_key sk-your-key-here
 ati assist "generate a portrait photo"
 ```
 
-The skill creator writes the SKILL.md — that's it. ATI + Cerebras extracts everything: base URL, auth type, endpoints, parameters, HTTP methods. The generated manifest is cached in `~/.ati/manifests/` so subsequent loads are instant. If the Cerebras call isn't available, a bundled `provider.toml` fallback is used if the skill ships one.
+The skill creator writes the SKILL.md — that's it. ATI + Cerebras extracts everything: base URL, auth type, endpoints, parameters, HTTP methods. Local paths get copied into `~/.ati/skills/`, git URLs get cloned — either way the manifest is auto-generated and cached in `~/.ati/manifests/`.
 
 ### Local CLIs — Wrap any command with credential injection
 
