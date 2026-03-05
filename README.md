@@ -17,51 +17,47 @@ ATI gives AI agents secure access to APIs, MCP servers, OpenAPI services, and lo
 
 ### Import an API from its OpenAPI spec
 
-ClinicalTrials.gov publishes an OpenAPI spec. One command turns it into tools your agent can use:
+Finnhub publishes an OpenAPI spec with 110 endpoints — stock quotes, company financials, insider transactions, market news. One command turns it into tools:
 
 ```bash
-# Import the spec — ATI derives the provider name from the URL
-ati provider import-openapi https://clinicaltrials.gov/api/v2/openapi.json
-# → Saved manifest to ~/.ati/manifests/clinicaltrials.toml
-# → Imported 1 operations from "ClinicalTrials.gov API"
+# Import the spec — ATI auto-derives provider name, auth, endpoints
+ati provider import-openapi https://finnhub.io/api/v2/spec.json
+# → Saved manifest to ~/.ati/manifests/finnhub.toml
+# → Imported 85 operations from "Finnhub — Real-time stock quotes..."
 
-# See what tools were discovered
-ati tool list --provider clinicaltrials
-# ┌───────────────────────────────┬────────────────┬───────────────────────────────┐
-# │ DESCRIPTION                   ┆ PROVIDER       ┆ TOOL                          │
-# ╞═══════════════════════════════╪════════════════╪═══════════════════════════════╡
-# │ Search clinical trial studies ┆ clinicaltrials ┆ clinicaltrials__searchStudies │
-# └───────────────────────────────┴────────────────┴───────────────────────────────┘
+# Store your API key
+ati key set finnhub_api_key "your-key-here"
+
+# 85 tools, instantly available
+ati tool list --provider finnhub | head -5
+# ┌──────────────────────┬──────────┬────────────────────────────────┐
+# │ DESCRIPTION          ┆ PROVIDER ┆ TOOL                           │
+# ╞══════════════════════╪══════════╪════════════════════════════════╡
+# │ Symbol Lookup        ┆ finnhub  ┆ finnhub__symbol-search         │
+# │ Company Profile      ┆ finnhub  ┆ finnhub__company-profile2      │
+# │ Quote                ┆ finnhub  ┆ finnhub__quote                 │
+# │ Insider Transactions ┆ finnhub  ┆ finnhub__insider-transactions  │
+# │ Basic Financials     ┆ finnhub  ┆ finnhub__company-basic-...     │
+# └──────────────────────┴──────────┴────────────────────────────────┘
 ```
 
-That's it. Every operation in the spec is now a tool. No `--name`, no TOML to write, no code to generate.
+Every operation in the spec is now a tool. No `--name`, no TOML to write, no code to generate.
 
 ### Explore what you just added
 
 ```bash
-# Inspect a specific tool — see its parameters, types, required fields
-ati tool info clinicaltrials__searchStudies
-# Tool:        clinicaltrials__searchStudies
-# Provider:    clinicaltrials (ClinicalTrials.gov API)
-# Handler:     openapi
-# Endpoint:    GET https://clinicaltrials.gov/api/v2/studies
-# Description: Search clinical trial studies
+# Agent asks: "research Apple stock — price, insider activity, and sentiment"
+ati assist finnhub "research Apple stock — price, insider activity, and sentiment"
+# Here are the exact commands to research Apple (AAPL) stock:
 #
-# Input Schema:
-#   --query.term (string) **required**: Search term
-#   --filter.overallStatus (string): Filter by overall study status
-#   --filter.phase (string): Filter by study phase
-#   --pageSize (integer, default: 10): Results per page
-
-# Ask for help — scoped to this provider
-ati assist clinicaltrials "find phase 3 cancer trials"
-# For phase 3 cancer trials, use `clinicaltrials__searchStudies` with a phase filter:
+# 1. Current Price
+#   ati run finnhub__quote --symbol AAPL
 #
-#   ati run clinicaltrials__searchStudies \
-#     --query.term "cancer" --filter.phase "Phase 3"
+# 2. Insider Transactions
+#   ati run finnhub__insider-transactions --symbol AAPL
 #
-# To narrow to actively recruiting trials, add `--filter.overallStatus "Recruiting"`.
-# Bump `--pageSize 50` if you need more than 10 results.
+# 3. News Sentiment
+#   ati run finnhub__news-sentiment --symbol AAPL
 ```
 
 `ati assist` answers like a knowledgeable colleague — which tools, what order, key params, gotchas — with commands you can run immediately.
@@ -69,14 +65,22 @@ ati assist clinicaltrials "find phase 3 cancer trials"
 ### Run it
 
 ```bash
-ati run clinicaltrials__searchStudies \
-  --query.term "cancer immunotherapy" --pageSize 3
-# nextPageToken: ZVNj7o2Elu8o3lpoXsGvtK7umpOQJJxuYfas0A
-# studies: [{protocolSection: {identificationModule: {nctId: "NCT06742801",
-#   briefTitle: "Avelumab Immunotherapy in Oral Premalignant Lesions" ...
+ati run finnhub__quote --symbol AAPL
+# c: 262.52         ← current price
+# d: -1.23          ← change
+# dp: -0.4664       ← percent change
+# h: 266.15         ← day high
+# l: 261.43         ← day low
+# o: 264.65         ← open
+# pc: 263.75        ← previous close
+
+ati run finnhub__insider-transactions --symbol AAPL
+# data: [{name: "COOK TIMOTHY D", transactionCode: "S",
+#   change: -59751, share: 3280295, transactionPrice: 257.57,
+#   filingDate: "2025-10-03"}, ...]
 ```
 
-The agent doesn't write HTTP requests. It doesn't parse JSON responses. It calls `ati run` and gets structured text back.
+The agent doesn't write HTTP requests. It doesn't parse JSON responses. It calls `ati run` and gets structured data back — real Apple stock price, real Tim Cook insider sells.
 
 ### Now add an MCP server — same pattern, zero install
 
