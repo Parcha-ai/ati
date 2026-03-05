@@ -8,22 +8,23 @@ use crate::Cli;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const HELP_SYSTEM_PROMPT: &str = r#"You are a tool recommendation assistant for an AI agent. The agent has access to these tools via the `ati` CLI:
+const HELP_SYSTEM_PROMPT: &str = r#"You are a helpful assistant for an AI agent that uses external tools via the `ati` CLI.
 
 ## Available Tools
 {tools}
 
 {skills_section}
 
-Given the user's query, recommend the most relevant tools (1-4). For each tool:
-1. Explain **when and why** to use it — what it's best at, gotchas, practical tips
-2. Show a realistic `ati run` command with the FULL tool name (e.g. `finnhub__stock_candles`)
-3. Note important parameters, defaults, and common pitfalls
-4. If a skill was loaded, incorporate its methodology — don't just say "read the skill", apply its guidance directly
+Answer the agent's question naturally, like a knowledgeable colleague would. Keep it short but useful:
 
-Be practical and opinionated. An agent reading your output should be able to run the tool correctly on the first try. Only recommend tools from the list above."#;
+- Explain which tools to use and why, with `ati run` commands showing realistic parameter values
+- If multiple steps are needed, walk through them briefly in order
+- Mention important gotchas or parameter choices that matter
+- If skills were loaded, apply their guidance directly in your answer
 
-const SCOPED_HELP_SYSTEM_PROMPT: &str = r#"You are an expert assistant for the `{tool_name}` tool, accessed via the `ati` CLI.
+Keep your answer concise — a few short paragraphs with embedded code blocks, not a formal report. Only recommend tools from the list above."#;
+
+const SCOPED_HELP_SYSTEM_PROMPT: &str = r#"You are an expert on the `{tool_name}` tool, accessed via the `ati` CLI.
 
 ## Tool Details
 {tool_details}
@@ -32,12 +33,7 @@ const SCOPED_HELP_SYSTEM_PROMPT: &str = r#"You are an expert assistant for the `
 
 The agent runs this tool via: `ati run {tool_name} -- <args>`
 
-Answer the agent's question about this specific tool. Be practical:
-- Give exact commands with realistic parameter values
-- Explain important parameters, defaults, and what to watch out for
-- If a skill methodology was loaded, apply its guidance directly (don't just reference it)
-- Include tips on common mistakes and how to get the best results
-Be concise but thorough — the agent should be able to use the tool correctly on the first try."#;
+Answer the agent's question directly and concisely. Show exact commands with realistic values, explain parameter choices that matter, and mention gotchas. If skills were loaded, apply their guidance naturally. Keep it short — a helpful answer, not a manual."#;
 
 /// Maximum characters of CLI --help output to include in context.
 const CLI_HELP_MAX_CHARS: usize = 3000;
@@ -429,7 +425,7 @@ async fn call_llm(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query}
             ],
-            "max_completion_tokens": 1024,
+            "max_completion_tokens": 1536,
             "temperature": 0.3
         });
 
@@ -474,7 +470,7 @@ async fn call_llm(
 
         let request_body = serde_json::json!({
             "model": model,
-            "max_tokens": 1024,
+            "max_tokens": 1536,
             "system": system_prompt,
             "messages": [
                 {"role": "user", "content": query}

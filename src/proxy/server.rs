@@ -344,7 +344,7 @@ async fn handle_help(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": req.query}
         ],
-        "max_completion_tokens": 1024,
+        "max_completion_tokens": 1536,
         "temperature": 0.3
     });
 
@@ -973,21 +973,21 @@ pub async fn run(
 
 // --- Helpers ---
 
-const HELP_SYSTEM_PROMPT: &str = r#"You are a tool recommendation assistant for an AI agent. The agent has access to these tools via the `ati` CLI:
+const HELP_SYSTEM_PROMPT: &str = r#"You are a helpful assistant for an AI agent that uses external tools via the `ati` CLI.
 
 ## Available Tools
 {tools}
 
 {skills_section}
 
-Given the user's query, recommend the most relevant tools and provide exact `ati run` commands with the right arguments. If a methodology skill is relevant, mention it and suggest `ati skill show <name>` to read the full guide. Be concise and practical. Format each recommendation as:
+Answer the agent's question naturally, like a knowledgeable colleague would. Keep it short but useful:
 
-1. **tool_name** — description
-   ```
-   ati run tool_name --arg1 value1 --arg2 value2
-   ```
+- Explain which tools to use and why, with `ati run` commands showing realistic parameter values
+- If multiple steps are needed, walk through them briefly in order
+- Mention important gotchas or parameter choices that matter
+- If skills are relevant, suggest `ati skill show <name>` for the full methodology
 
-Only recommend tools from the list above. If no tool matches, say so clearly."#;
+Keep your answer concise — a few short paragraphs with embedded code blocks. Only recommend tools from the list above."#;
 
 fn build_tool_context(
     tools: &[(&crate::core::manifest::Provider, &crate::core::manifest::Tool)],
