@@ -4,6 +4,7 @@ use std::process::Stdio;
 
 use thiserror::Error;
 
+use crate::core::auth_generator::{self, AuthCache, GenContext};
 use crate::core::keyring::Keyring;
 use crate::core::manifest::Provider;
 
@@ -45,10 +46,7 @@ impl Drop for CredentialFile {
             if let Ok(meta) = std::fs::metadata(&self.path) {
                 let len = meta.len() as usize;
                 if len > 0 {
-                    if let Ok(file) = std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(&self.path)
-                    {
+                    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&self.path) {
                         use std::io::Write;
                         let zeros = vec![0u8; len];
                         let _ = (&file).write_all(&zeros);
@@ -125,9 +123,9 @@ fn resolve_env_value(value: &str, keyring: &Keyring) -> Result<String, CliError>
         let rest = &result[start + 2..];
         if let Some(end) = rest.find('}') {
             let key_name = &rest[..end];
-            let replacement = keyring.get(key_name).ok_or_else(|| {
-                CliError::MissingKey(key_name.to_string())
-            })?;
+            let replacement = keyring
+                .get(key_name)
+                .ok_or_else(|| CliError::MissingKey(key_name.to_string()))?;
             result = format!("{}{}{}", &result[..start], replacement, &rest[end + 1..]);
         } else {
             break; // No closing brace
@@ -157,9 +155,9 @@ pub fn resolve_cli_env(
     for (key, value) in env_map {
         if let Some(key_ref) = value.strip_prefix("@{").and_then(|s| s.strip_suffix('}')) {
             // File-materialized credential
-            let content = keyring.get(key_ref).ok_or_else(|| {
-                CliError::MissingKey(key_ref.to_string())
-            })?;
+            let content = keyring
+                .get(key_ref)
+                .ok_or_else(|| CliError::MissingKey(key_ref.to_string()))?;
             let cf = materialize_credential_file(key_ref, content, wipe_on_drop, ati_dir)?;
             resolved.insert(key.clone(), cf.path.to_string_lossy().into_owned());
             cred_files.push(cf);
@@ -191,6 +189,17 @@ pub async fn execute(
     raw_args: &[String],
     keyring: &Keyring,
 ) -> Result<serde_json::Value, CliError> {
+    execute_with_gen(provider, raw_args, keyring, None, None).await
+}
+
+/// Execute a CLI provider tool, optionally using a dynamic auth generator.
+pub async fn execute_with_gen(
+    provider: &Provider,
+    raw_args: &[String],
+    keyring: &Keyring,
+    gen_ctx: Option<&GenContext>,
+    auth_cache: Option<&AuthCache>,
+) -> Result<serde_json::Value, CliError> {
     let cli_command = provider
         .cli_command
         .as_deref()
@@ -211,12 +220,8 @@ pub async fn execute(
 
     // Resolve provider CLI env vars against keyring.
     // cred_files must live until after the subprocess exits (Drop does cleanup).
-    let (resolved_env, cred_files) = resolve_cli_env(
-        &provider.cli_env,
-        keyring,
-        wipe_on_drop,
-        &ati_dir,
-    )?;
+    let (resolved_env, cred_files) =
+        resolve_cli_env(&provider.cli_env, keyring, wipe_on_drop, &ati_dir)?;
 
     // Build curated base env from host
     let mut final_env: HashMap<String, String> = HashMap::new();
@@ -227,6 +232,25 @@ pub async fn execute(
     }
     // Layer provider-resolved env on top
     final_env.extend(resolved_env);
+
+    // If auth_generator is configured, run it and inject into env
+    if let Some(gen) = &provider.auth_generator {
+        let default_ctx = GenContext::default();
+        let ctx = gen_ctx.unwrap_or(&default_ctx);
+        let default_cache = AuthCache::new();
+        let cache = auth_cache.unwrap_or(&default_cache);
+        match auth_generator::generate(provider, gen, ctx, keyring, cache).await {
+            Ok(cred) => {
+                final_env.insert("ATI_AUTH_TOKEN".to_string(), cred.value);
+                for (k, v) in &cred.extra_env {
+                    final_env.insert(k.clone(), v.clone());
+                }
+            }
+            Err(e) => {
+                return Err(CliError::Config(format!("auth_generator failed: {e}")));
+            }
+        }
+    }
 
     // Clone values for the blocking closure
     let command = cli_command.to_string();

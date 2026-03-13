@@ -2,7 +2,6 @@
 ///
 /// These tests build the axum Router in-process (no TCP binding) and use
 /// `tower::ServiceExt::oneshot` to send requests directly.
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -12,7 +11,8 @@ use tower::ServiceExt;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use ati::core::jwt::{self, JwtConfig, TokenClaims, AtiNamespace};
+use ati::core::auth_generator::AuthCache;
+use ati::core::jwt::{self, AtiNamespace, JwtConfig, TokenClaims};
 use ati::core::keyring::Keyring;
 use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
@@ -72,7 +72,11 @@ description = "Title to create"
 
 /// Create an HS256 JWT config for testing.
 fn test_jwt_config() -> JwtConfig {
-    jwt::config_from_secret(b"test-secret-key-32-bytes-long!!!", None, "ati-proxy".into())
+    jwt::config_from_secret(
+        b"test-secret-key-32-bytes-long!!!",
+        None,
+        "ati-proxy".into(),
+    )
 }
 
 /// Issue a test JWT with given scopes.
@@ -87,7 +91,7 @@ fn issue_test_token(scope: &str) -> String {
         exp: now + 3600,
         jti: None,
         scope: scope.into(),
-        ati: Some(AtiNamespace { v: 1 }),
+        ati: Some(AtiNamespace { v: 1, rate: std::collections::HashMap::new() }),
     };
     jwt::issue(&claims, &config).unwrap()
 }
@@ -108,6 +112,7 @@ fn build_test_app(upstream_url: &str) -> axum::Router {
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
 
     build_router(state)
@@ -129,6 +134,7 @@ fn build_test_app_with_jwt(upstream_url: &str) -> axum::Router {
         verbose: false,
         jwt_config: Some(test_jwt_config()),
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
 
     build_router(state)
@@ -183,14 +189,8 @@ async fn test_call_unknown_tool_returns_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     let json = body_json(resp.into_body()).await;
-    assert!(json["error"]
-        .as_str()
-        .unwrap()
-        .contains("Unknown tool"));
-    assert!(json["error"]
-        .as_str()
-        .unwrap()
-        .contains("nonexistent_tool"));
+    assert!(json["error"].as_str().unwrap().contains("Unknown tool"));
+    assert!(json["error"].as_str().unwrap().contains("nonexistent_tool"));
 }
 
 /// /call routes to the upstream API and returns the response.
@@ -228,10 +228,7 @@ async fn test_call_routes_to_upstream() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
     let json = body_json(resp.into_body()).await;
-    assert!(json["error"]
-        .as_str()
-        .unwrap()
-        .contains("test_api_key"));
+    assert!(json["error"].as_str().unwrap().contains("test_api_key"));
 }
 
 /// /call with upstream returning an error propagates as 502.
@@ -286,6 +283,7 @@ description = "Query"
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
     let app = build_router(state);
 
@@ -364,6 +362,7 @@ description = "ID to look up"
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
     let app = build_router(state);
 
@@ -442,6 +441,7 @@ description = "Title"
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
     let app = build_router(state);
 
@@ -485,10 +485,7 @@ async fn test_help_without_llm_returns_503() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let json = body_json(resp.into_body()).await;
-    assert!(json["error"]
-        .as_str()
-        .unwrap()
-        .contains("_llm.toml"));
+    assert!(json["error"].as_str().unwrap().contains("_llm.toml"));
 }
 
 /// /call with invalid JSON body returns 400.
@@ -505,7 +502,10 @@ async fn test_call_invalid_json_returns_error() {
 
     let resp = app.oneshot(req).await.expect("oneshot");
     // Now we parse manually so we get 422 for invalid JSON
-    assert!(resp.status() == StatusCode::UNPROCESSABLE_ENTITY || resp.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        resp.status() == StatusCode::UNPROCESSABLE_ENTITY
+            || resp.status() == StatusCode::BAD_REQUEST
+    );
 }
 
 /// /call with missing required fields returns 422.
@@ -533,10 +533,7 @@ async fn test_call_missing_fields_returns_error() {
 async fn test_call_get_method_not_allowed() {
     let app = build_test_app("http://unused.test");
 
-    let req = Request::builder()
-        .uri("/call")
-        .body(Body::empty())
-        .unwrap();
+    let req = Request::builder().uri("/call").body(Body::empty()).unwrap();
 
     let resp = app.oneshot(req).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
@@ -608,6 +605,7 @@ description = "Query"
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
     let app = build_router(state);
 
@@ -682,7 +680,11 @@ async fn test_jwt_auth_rejects_wrong_secret() {
     let app = build_test_app_with_jwt("http://unused.test");
 
     // Issue token with a different secret
-    let wrong_config = jwt::config_from_secret(b"wrong-secret-key-32-bytes-long!!", None, "ati-proxy".into());
+    let wrong_config = jwt::config_from_secret(
+        b"wrong-secret-key-32-bytes-long!!",
+        None,
+        "ati-proxy".into(),
+    );
     let now = jwt::now_secs();
     let claims = TokenClaims {
         iss: None,
@@ -873,4 +875,184 @@ async fn test_no_jwt_config_allows_all() {
     let resp = app.oneshot(req).await.expect("oneshot");
     // 404 means the middleware passed through and handler ran
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// --- Auth Generator through Proxy tests ---
+
+/// Auth generator with bearer token flows through the proxy /call endpoint.
+#[tokio::test]
+async fn test_call_with_auth_generator_through_proxy() {
+    let upstream = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/gen-endpoint"))
+        .and(header("authorization", "Bearer generated-proxy-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "proxy_gen": "success"
+        })))
+        .mount(&upstream)
+        .await;
+
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).expect("create manifests dir");
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "gen_proxy_provider"
+description = "Provider with auth_generator for proxy test"
+base_url = "{}"
+auth_type = "bearer"
+
+[provider.auth_generator]
+type = "command"
+command = "echo"
+args = ["generated-proxy-token"]
+cache_ttl_secs = 0
+output_format = "text"
+timeout_secs = 5
+
+[[tools]]
+name = "gen_proxy_search"
+description = "Search via auth generator"
+endpoint = "/gen-endpoint"
+method = "GET"
+
+[tools.input_schema]
+type = "object"
+
+[tools.input_schema.properties.q]
+type = "string"
+description = "Query"
+"#,
+        upstream.uri()
+    );
+
+    std::fs::write(manifests_dir.join("gen_proxy.toml"), manifest).expect("write manifest");
+    let registry = ManifestRegistry::load(&manifests_dir).expect("load manifests");
+
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring: Keyring::empty(),
+        verbose: false,
+        jwt_config: None,
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+    });
+    let app = build_router(state);
+
+    let body = serde_json::json!({
+        "tool_name": "gen_proxy_search",
+        "args": {"q": "test"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["proxy_gen"], "success");
+}
+
+/// Auth generator with JSON output + inject map through the proxy.
+#[tokio::test]
+async fn test_call_with_auth_generator_json_inject_through_proxy() {
+    let upstream = MockServer::start().await;
+
+    // Upstream requires both bearer token and custom header
+    Mock::given(method("POST"))
+        .and(path("/gen-secure"))
+        .and(header("authorization", "Bearer proxy-session-tok"))
+        .and(header("X-Custom-Key", "PROXY-KEY-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "proxy_inject": "verified"
+        })))
+        .mount(&upstream)
+        .await;
+
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).expect("create manifests dir");
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "gen_inject_provider"
+description = "Provider with JSON inject auth_generator"
+base_url = "{}"
+auth_type = "bearer"
+
+[provider.auth_generator]
+type = "command"
+command = "echo"
+args = ['{{"token":"proxy-session-tok","api_key":"PROXY-KEY-123"}}']
+cache_ttl_secs = 0
+output_format = "json"
+timeout_secs = 5
+
+[provider.auth_generator.inject.token]
+type = "primary"
+name = "token"
+
+[provider.auth_generator.inject."api_key"]
+type = "header"
+name = "X-Custom-Key"
+
+[[tools]]
+name = "gen_inject_tool"
+description = "Tool with JSON inject"
+endpoint = "/gen-secure"
+method = "POST"
+
+[tools.input_schema]
+type = "object"
+
+[tools.input_schema.properties.data]
+type = "string"
+description = "Data"
+"#,
+        upstream.uri()
+    );
+
+    std::fs::write(manifests_dir.join("gen_inject.toml"), manifest).expect("write manifest");
+    let registry = ManifestRegistry::load(&manifests_dir).expect("load manifests");
+
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring: Keyring::empty(),
+        verbose: false,
+        jwt_config: None,
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+    });
+    let app = build_router(state);
+
+    let body = serde_json::json!({
+        "tool_name": "gen_inject_tool",
+        "args": {"data": "hello"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["proxy_inject"], "verified");
 }

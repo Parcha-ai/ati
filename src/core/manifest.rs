@@ -73,7 +73,6 @@ pub struct Provider {
     pub handler: String,
 
     // --- MCP provider fields (handler = "mcp") ---
-
     /// MCP transport type: "stdio" or "http"
     #[serde(default)]
     pub mcp_transport: Option<String>,
@@ -91,7 +90,6 @@ pub struct Provider {
     pub mcp_env: HashMap<String, String>,
 
     // --- CLI provider fields (handler = "cli") ---
-
     /// Command to run for CLI providers (e.g., "gsutil", "gh", "kubectl")
     #[serde(default)]
     pub cli_command: Option<String>,
@@ -106,7 +104,6 @@ pub struct Provider {
     pub cli_timeout_secs: Option<u64>,
 
     // --- OpenAPI provider fields (handler = "openapi") ---
-
     /// Path (relative to ~/.ati/specs/) or URL to OpenAPI spec (JSON or YAML)
     #[serde(default)]
     pub openapi_spec: Option<String>,
@@ -129,8 +126,13 @@ pub struct Provider {
     #[serde(default)]
     pub openapi_overrides: HashMap<String, OpenApiToolOverride>,
 
-    // --- Optional metadata fields ---
+    // --- Auth generator (dynamic credential generation) ---
+    /// Optional auth generator for producing short-lived credentials at call time.
+    /// Runs where secrets live (proxy server in proxy mode, local machine in local mode).
+    #[serde(default)]
+    pub auth_generator: Option<AuthGenerator>,
 
+    // --- Optional metadata fields ---
     /// Provider category for discovery (e.g., "finance", "search", "social")
     #[serde(default)]
     pub category: Option<String>,
@@ -157,6 +159,77 @@ pub struct OpenApiToolOverride {
     pub scope: Option<String>,
     pub response_extract: Option<String>,
     pub response_format: Option<String>,
+}
+
+/// Dynamic auth generator configuration — produces short-lived credentials at call time.
+///
+/// Two types:
+/// - `command`: runs an external command, captures stdout as the credential
+/// - `script`: writes an inline script to a temp file and runs it via an interpreter
+///
+/// Variable expansion in `args` and `env` values:
+/// - `${key_name}` → keyring lookup
+/// - `${JWT_SUB}` → agent's JWT `sub` claim
+/// - `${JWT_SCOPE}` → agent's JWT `scope` claim
+/// - `${TOOL_NAME}` → tool being invoked
+/// - `${TIMESTAMP}` → current unix timestamp
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthGenerator {
+    #[serde(rename = "type")]
+    pub gen_type: AuthGenType,
+    /// Command to run (for `type = "command"`)
+    pub command: Option<String>,
+    /// Arguments for the command
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Interpreter for inline script (for `type = "script"`, e.g. "python3")
+    pub interpreter: Option<String>,
+    /// Inline script body (for `type = "script"`)
+    pub script: Option<String>,
+    /// TTL for cached credentials (0 = no cache)
+    #[serde(default)]
+    pub cache_ttl_secs: u64,
+    /// Output format: "text" (trimmed stdout) or "json" (parsed, fields extracted via `inject`)
+    #[serde(default)]
+    pub output_format: AuthOutputFormat,
+    /// Environment variables for the subprocess (values support `${key}` expansion)
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// For JSON output: map dot-notation JSON paths to injection targets
+    #[serde(default)]
+    pub inject: HashMap<String, InjectTarget>,
+    /// Subprocess timeout in seconds (default: 30)
+    #[serde(default = "default_gen_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_gen_timeout() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthGenType {
+    Command,
+    Script,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthOutputFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+/// Target for injecting a JSON-extracted credential value.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InjectTarget {
+    /// Where to inject: "header", "env", or "query"
+    #[serde(rename = "type")]
+    pub inject_type: String,
+    /// Name of the header/env var/query param
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -228,7 +301,6 @@ pub struct Tool {
     pub response: Option<ResponseConfig>,
 
     // --- Optional metadata fields ---
-
     /// Tags for discovery (e.g., ["search", "real-time"])
     #[serde(default)]
     pub tags: Vec<String>,
@@ -376,6 +448,7 @@ impl CachedProvider {
             cli_default_args: self.cli_default_args.clone(),
             cli_env: self.cli_env.clone(),
             cli_timeout_secs: self.cli_timeout_secs,
+            auth_generator: None,
             category: None,
             skills: Vec::new(),
         }
@@ -419,7 +492,9 @@ impl ManifestRegistry {
         let specs_dir = dir.parent().map(|p| p.join("specs"));
 
         for entry in entries {
-            let path = entry.map_err(|e| ManifestError::Io(format!("{e}"), std::io::Error::other("glob error")))?;
+            let path = entry.map_err(|e| {
+                ManifestError::Io(format!("{e}"), std::io::Error::other("glob error"))
+            })?;
             let contents = std::fs::read_to_string(&path)
                 .map_err(|e| ManifestError::Io(path.display().to_string(), e))?;
             let mut manifest: Manifest = toml::from_str(&contents)
@@ -428,7 +503,11 @@ impl ManifestRegistry {
             // For OpenAPI providers, load spec and register tools
             if manifest.provider.is_openapi() {
                 if let Some(spec_ref) = &manifest.provider.openapi_spec {
-                    match crate::core::openapi::load_and_register(&manifest.provider, spec_ref, specs_dir.as_deref()) {
+                    match crate::core::openapi::load_and_register(
+                        &manifest.provider,
+                        spec_ref,
+                        specs_dir.as_deref(),
+                    ) {
                         Ok(tools) => {
                             manifest.tools = tools;
                         }

@@ -8,7 +8,6 @@
 /// - List shows providers
 /// - Remove deletes provider manifest (any type)
 /// - Validation: --url required for http, --command required for stdio
-
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -32,19 +31,20 @@ fn test_mcp_add_http() {
 
     let output = Command::new(ati_bin())
         .args([
-            "provider", "add-mcp", "serpapi",
-            "--transport", "http",
-            "--url", "https://mcp.serpapi.com/mcp",
+            "provider",
+            "add-mcp",
+            "serpapi",
+            "--transport",
+            "http",
+            "--url",
+            "https://mcp.serpapi.com/mcp",
         ])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
         .expect("Failed to execute ati");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "Should succeed. stderr: {stderr}"
-    );
+    assert!(output.status.success(), "Should succeed. stderr: {stderr}");
 
     // Verify manifest was created
     let manifest_path = dir.path().join("manifests/serpapi.toml");
@@ -78,21 +78,24 @@ fn test_mcp_add_stdio() {
 
     let output = Command::new(ati_bin())
         .args([
-            "provider", "add-mcp", "github",
-            "--transport", "stdio",
-            "--command", "npx",
-            "--args", "-y",
-            "--args", "@modelcontextprotocol/server-github",
+            "provider",
+            "add-mcp",
+            "github",
+            "--transport",
+            "stdio",
+            "--command",
+            "npx",
+            "--args",
+            "-y",
+            "--args",
+            "@modelcontextprotocol/server-github",
         ])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
         .expect("Failed to execute ati");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "Should succeed. stderr: {stderr}"
-    );
+    assert!(output.status.success(), "Should succeed. stderr: {stderr}");
 
     let content = std::fs::read_to_string(dir.path().join("manifests/github.toml")).unwrap();
     let parsed: toml::Value = toml::from_str(&content).unwrap();
@@ -122,28 +125,30 @@ fn test_mcp_add_with_auth() {
 
     let output = Command::new(ati_bin())
         .args([
-            "provider", "add-mcp", "parallel",
-            "--transport", "http",
-            "--url", "https://search-mcp.parallel.ai/mcp",
-            "--auth", "bearer",
-            "--auth-key", "parallel_api_key",
+            "provider",
+            "add-mcp",
+            "parallel",
+            "--transport",
+            "http",
+            "--url",
+            "https://search-mcp.parallel.ai/mcp",
+            "--auth",
+            "bearer",
+            "--auth-key",
+            "parallel_api_key",
         ])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
         .expect("Failed to execute ati");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "Should succeed. stderr: {stderr}"
-    );
+    assert!(output.status.success(), "Should succeed. stderr: {stderr}");
     assert!(
         stderr.contains("parallel_api_key"),
         "Should hint about adding the key. stderr: {stderr}"
     );
 
-    let content =
-        std::fs::read_to_string(dir.path().join("manifests/parallel.toml")).unwrap();
+    let content = std::fs::read_to_string(dir.path().join("manifests/parallel.toml")).unwrap();
     let parsed: toml::Value = toml::from_str(&content).unwrap();
     let provider = &parsed["provider"];
 
@@ -164,22 +169,26 @@ fn test_mcp_add_with_env() {
 
     let output = Command::new(ati_bin())
         .args([
-            "provider", "add-mcp", "github",
-            "--transport", "stdio",
-            "--command", "npx",
-            "--args", "-y",
-            "--args", "@modelcontextprotocol/server-github",
-            "--env", "GITHUB_PERSONAL_ACCESS_TOKEN=${github_token}",
+            "provider",
+            "add-mcp",
+            "github",
+            "--transport",
+            "stdio",
+            "--command",
+            "npx",
+            "--args",
+            "-y",
+            "--args",
+            "@modelcontextprotocol/server-github",
+            "--env",
+            "GITHUB_PERSONAL_ACCESS_TOKEN=${github_token}",
         ])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
         .expect("Failed to execute ati");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "Should succeed. stderr: {stderr}"
-    );
+    assert!(output.status.success(), "Should succeed. stderr: {stderr}");
 
     let content = std::fs::read_to_string(dir.path().join("manifests/github.toml")).unwrap();
     let parsed: toml::Value = toml::from_str(&content).unwrap();
@@ -203,9 +212,13 @@ fn test_mcp_list() {
     // Add two MCP providers
     Command::new(ati_bin())
         .args([
-            "provider", "add-mcp", "serpapi",
-            "--transport", "http",
-            "--url", "https://mcp.serpapi.com/mcp",
+            "provider",
+            "add-mcp",
+            "serpapi",
+            "--transport",
+            "http",
+            "--url",
+            "https://mcp.serpapi.com/mcp",
         ])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
@@ -213,11 +226,17 @@ fn test_mcp_list() {
 
     Command::new(ati_bin())
         .args([
-            "provider", "add-mcp", "github",
-            "--transport", "stdio",
-            "--command", "npx",
-            "--args", "-y",
-            "--args", "@modelcontextprotocol/server-github",
+            "provider",
+            "add-mcp",
+            "github",
+            "--transport",
+            "stdio",
+            "--command",
+            "npx",
+            "--args",
+            "-y",
+            "--args",
+            "@modelcontextprotocol/server-github",
         ])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
@@ -236,10 +255,22 @@ fn test_mcp_list() {
         "Should succeed. stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("serpapi"), "Should list serpapi. stdout: {stdout}");
-    assert!(stdout.contains("github"), "Should list github. stdout: {stdout}");
-    assert!(stdout.contains("http"), "Should show http transport. stdout: {stdout}");
-    assert!(stdout.contains("stdio"), "Should show stdio transport. stdout: {stdout}");
+    assert!(
+        stdout.contains("serpapi"),
+        "Should list serpapi. stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("github"),
+        "Should list github. stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("http"),
+        "Should show http transport. stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("stdio"),
+        "Should show stdio transport. stdout: {stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -253,9 +284,13 @@ fn test_mcp_remove() {
     // Add
     Command::new(ati_bin())
         .args([
-            "provider", "add-mcp", "serpapi",
-            "--transport", "http",
-            "--url", "https://mcp.serpapi.com/mcp",
+            "provider",
+            "add-mcp",
+            "serpapi",
+            "--transport",
+            "http",
+            "--url",
+            "https://mcp.serpapi.com/mcp",
         ])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
@@ -303,11 +338,7 @@ description = "Search"
 endpoint = "/search"
 method = "GET"
 "#;
-    std::fs::write(
-        dir.path().join("manifests/example.toml"),
-        http_manifest,
-    )
-    .unwrap();
+    std::fs::write(dir.path().join("manifests/example.toml"), http_manifest).unwrap();
 
     assert!(dir.path().join("manifests/example.toml").exists());
 
@@ -338,10 +369,7 @@ fn test_mcp_add_requires_url_for_http() {
     let dir = create_ati_dir();
 
     let output = Command::new(ati_bin())
-        .args([
-            "provider", "add-mcp", "broken",
-            "--transport", "http",
-        ])
+        .args(["provider", "add-mcp", "broken", "--transport", "http"])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
         .expect("Failed to execute ati");
@@ -366,10 +394,7 @@ fn test_mcp_add_requires_command_for_stdio() {
     let dir = create_ati_dir();
 
     let output = Command::new(ati_bin())
-        .args([
-            "provider", "add-mcp", "broken",
-            "--transport", "stdio",
-        ])
+        .args(["provider", "add-mcp", "broken", "--transport", "stdio"])
         .env("ATI_DIR", dir.path().to_str().unwrap())
         .output()
         .expect("Failed to execute ati");

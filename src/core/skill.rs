@@ -10,8 +10,8 @@
 /// Metadata priority: YAML frontmatter in SKILL.md > skill.toml > inferred from content.
 /// Skills reference manifests (tools, providers, categories), never the reverse.
 /// Installing a skill never requires editing existing manifests.
-
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -69,7 +69,7 @@ pub fn parse_frontmatter(content: &str) -> (Option<AnthropicFrontmatter>, &str) 
         Some(end_pos) => {
             let yaml_str = &after_open[..end_pos];
             let body_start = &after_open[end_pos + 4..]; // skip \n---
-            // Skip rest of closing --- line
+                                                         // Skip rest of closing --- line
             let body = match body_start.find('\n') {
                 Some(pos) => &body_start[pos + 1..],
                 None => "",
@@ -88,6 +88,14 @@ pub fn parse_frontmatter(content: &str) -> (Option<AnthropicFrontmatter>, &str) 
 pub fn strip_frontmatter(content: &str) -> &str {
     let (_, body) = parse_frontmatter(content);
     body
+}
+
+/// Compute SHA-256 hash of content, returning lowercase hex string.
+pub fn compute_content_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(result)
 }
 
 /// Validate a skill name against the Anthropic Agent Skills naming rules.
@@ -149,7 +157,6 @@ pub struct SkillMeta {
     pub author: Option<String>,
 
     // --- Tool/provider/category bindings (auto-load when these are in scope) ---
-
     /// Exact tool names this skill covers (e.g., ["ca_business_sanctions_search"])
     #[serde(default)]
     pub tools: Vec<String>,
@@ -161,14 +168,12 @@ pub struct SkillMeta {
     pub categories: Vec<String>,
 
     // --- Discovery metadata ---
-
     #[serde(default)]
     pub keywords: Vec<String>,
     #[serde(default)]
     pub hint: Option<String>,
 
     // --- Dependencies ---
-
     /// Skills that must be transitively loaded with this one
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -177,7 +182,6 @@ pub struct SkillMeta {
     pub suggests: Vec<String>,
 
     // --- Anthropic spec fields ---
-
     /// SPDX license identifier (from frontmatter)
     #[serde(default)]
     pub license: Option<String>,
@@ -197,8 +201,18 @@ pub struct SkillMeta {
     #[serde(default = "default_format")]
     pub format: SkillFormat,
 
-    // --- Runtime (not in TOML, set after loading) ---
+    // --- Supply chain integrity (stored in [ati.integrity] section of skill.toml) ---
+    /// Source URL this skill was installed from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    /// SHA-256 hash of SKILL.md content at install time
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// Pinned git SHA (from source@SHA syntax)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_sha: Option<String>,
 
+    // --- Runtime (not in TOML, set after loading) ---
     /// Absolute path to the skill directory
     #[serde(skip)]
     pub dir: PathBuf,
@@ -224,6 +238,9 @@ impl Default for SkillMeta {
             allowed_tools: None,
             has_frontmatter: false,
             format: SkillFormat::Inferred,
+            source_url: None,
+            content_hash: None,
+            pinned_sha: None,
             dir: PathBuf::new(),
         }
     }
@@ -283,9 +300,7 @@ impl SkillRegistry {
             .map_err(|e| SkillError::Io(skills_dir.display().to_string(), e))?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| {
-                SkillError::Io(skills_dir.display().to_string(), e)
-            })?;
+            let entry = entry.map_err(|e| SkillError::Io(skills_dir.display().to_string(), e))?;
             let path = entry.path();
             if !path.is_dir() {
                 continue;
@@ -389,11 +404,7 @@ impl SkillRegistry {
                         score += 8;
                     }
                     // Tool name match
-                    if skill
-                        .tools
-                        .iter()
-                        .any(|t| t.to_lowercase().contains(term))
-                    {
+                    if skill.tools.iter().any(|t| t.to_lowercase().contains(term)) {
                         score += 6;
                     }
                     // Hint match
@@ -460,8 +471,7 @@ impl SkillRegistry {
         let entries = std::fs::read_dir(&refs_dir)
             .map_err(|e| SkillError::Io(refs_dir.display().to_string(), e))?;
         for entry in entries {
-            let entry =
-                entry.map_err(|e| SkillError::Io(refs_dir.display().to_string(), e))?;
+            let entry = entry.map_err(|e| SkillError::Io(refs_dir.display().to_string(), e))?;
             if let Some(name) = entry.file_name().to_str() {
                 refs.push(name.to_string());
             }
@@ -473,7 +483,11 @@ impl SkillRegistry {
     /// Read a specific reference file.
     pub fn read_reference(&self, skill_name: &str, ref_name: &str) -> Result<String, SkillError> {
         // Path traversal protection: reject names with path components
-        if ref_name.contains("..") || ref_name.contains('/') || ref_name.contains('\\') || ref_name.contains('\0') {
+        if ref_name.contains("..")
+            || ref_name.contains('/')
+            || ref_name.contains('\\')
+            || ref_name.contains('\0')
+        {
             return Err(SkillError::NotFound(format!(
                 "Invalid reference name '{ref_name}' — path traversal not allowed"
             )));
@@ -486,7 +500,9 @@ impl SkillRegistry {
         let ref_path = refs_dir.join(ref_name);
 
         // Canonicalize and verify the resolved path is inside the references directory
-        if let (Ok(canonical_ref), Ok(canonical_dir)) = (ref_path.canonicalize(), refs_dir.canonicalize()) {
+        if let (Ok(canonical_ref), Ok(canonical_dir)) =
+            (ref_path.canonicalize(), refs_dir.canonicalize())
+        {
             if !canonical_ref.starts_with(&canonical_dir) {
                 return Err(SkillError::NotFound(format!(
                     "Reference '{ref_name}' resolves outside references directory"
@@ -729,6 +745,7 @@ fn load_skill_from_dir(dir: &Path) -> Result<SkillMeta, SkillError> {
             }
         }
 
+        load_integrity_info(&mut meta);
         Ok(meta)
     } else if skill_toml_path.exists() {
         // --- (B) No frontmatter + skill.toml → legacy behavior ---
@@ -742,6 +759,7 @@ fn load_skill_from_dir(dir: &Path) -> Result<SkillMeta, SkillError> {
         if meta.name.is_empty() {
             meta.name = dir_name;
         }
+        load_integrity_info(&mut meta);
         Ok(meta)
     } else if let Some((_full_content, body)) = _body {
         // --- (C) No frontmatter + no skill.toml + SKILL.md exists → infer ---
@@ -766,12 +784,38 @@ fn load_skill_from_dir(dir: &Path) -> Result<SkillMeta, SkillError> {
     }
 }
 
+/// Read [ati.integrity] section from skill.toml and populate SkillMeta fields.
+fn load_integrity_info(meta: &mut SkillMeta) {
+    let toml_path = meta.dir.join("skill.toml");
+    if !toml_path.exists() {
+        return;
+    }
+    let contents = match std::fs::read_to_string(&toml_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let parsed: toml::Value = match toml::from_str(&contents) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if let Some(integrity) = parsed.get("ati").and_then(|a| a.get("integrity")) {
+        meta.content_hash = integrity
+            .get("content_hash")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        meta.source_url = integrity
+            .get("source_url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        meta.pinned_sha = integrity
+            .get("pinned_sha")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+}
+
 /// Generate a skeleton `skill.toml` for a new skill.
-pub fn scaffold_skill_toml(
-    name: &str,
-    tools: &[String],
-    provider: Option<&str>,
-) -> String {
+pub fn scaffold_skill_toml(name: &str, tools: &[String], provider: Option<&str>) -> String {
     let mut toml = format!(
         r#"[skill]
 name = "{name}"
@@ -882,11 +926,7 @@ TODO: Add example workflows
 
 /// Generate an ATI extension `skill.toml` for fields not in the Anthropic spec.
 /// Used alongside a SKILL.md with frontmatter.
-pub fn scaffold_ati_extension_toml(
-    name: &str,
-    tools: &[String],
-    provider: Option<&str>,
-) -> String {
+pub fn scaffold_ati_extension_toml(name: &str, tools: &[String], provider: Option<&str>) -> String {
     let mut toml = format!(
         r#"# ATI extension fields for skill '{name}'
 # Core metadata (name, description, license) lives in SKILL.md frontmatter.
@@ -925,7 +965,13 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn create_test_skill(dir: &Path, name: &str, tools: &[&str], providers: &[&str], categories: &[&str]) {
+    fn create_test_skill(
+        dir: &Path,
+        name: &str,
+        tools: &[&str],
+        providers: &[&str],
+        categories: &[&str],
+    ) {
         let skill_dir = dir.join(name);
         fs::create_dir_all(&skill_dir).unwrap();
 
@@ -995,27 +1041,18 @@ suggests = []
         assert_eq!(registry.skill_count(), 1);
 
         let skill = registry.get_skill("legacy-skill").unwrap();
-        assert_eq!(skill.description, "A skill with only SKILL.md, no skill.toml.");
+        assert_eq!(
+            skill.description,
+            "A skill with only SKILL.md, no skill.toml."
+        );
         assert!(skill.tools.is_empty()); // No tool bindings without skill.toml
     }
 
     #[test]
     fn test_tool_index() {
         let tmp = tempfile::tempdir().unwrap();
-        create_test_skill(
-            tmp.path(),
-            "skill-a",
-            &["tool_x", "tool_y"],
-            &[],
-            &[],
-        );
-        create_test_skill(
-            tmp.path(),
-            "skill-b",
-            &["tool_y", "tool_z"],
-            &[],
-            &[],
-        );
+        create_test_skill(tmp.path(), "skill-a", &["tool_x", "tool_y"], &[], &[]);
+        create_test_skill(tmp.path(), "skill-b", &["tool_y", "tool_z"], &[], &[]);
 
         let registry = SkillRegistry::load(tmp.path()).unwrap();
 
@@ -1134,6 +1171,7 @@ description = "Test"
             scopes: vec!["skill:skill-a".to_string()],
             sub: String::new(),
             expires_at: 0,
+            rate_config: None,
         };
 
         let resolved = resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -1167,6 +1205,7 @@ description = "Test"
             scopes: vec!["tool:ca_sanctions_search".to_string()],
             sub: String::new(),
             expires_at: 0,
+            rate_config: None,
         };
 
         let resolved = resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -1218,6 +1257,7 @@ tools = ["tool_b"]
             scopes: vec!["tool:tool_a".to_string()],
             sub: String::new(),
             expires_at: 0,
+            rate_config: None,
         };
 
         let resolved = resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -1230,7 +1270,11 @@ tools = ["tool_b"]
 
     #[test]
     fn test_scaffold() {
-        let toml = scaffold_skill_toml("my-skill", &["tool_a".into(), "tool_b".into()], Some("provider_x"));
+        let toml = scaffold_skill_toml(
+            "my-skill",
+            &["tool_a".into(), "tool_b".into()],
+            Some("provider_x"),
+        );
         assert!(toml.contains("name = \"my-skill\""));
         assert!(toml.contains("\"tool_a\""));
         assert!(toml.contains("\"provider_x\""));

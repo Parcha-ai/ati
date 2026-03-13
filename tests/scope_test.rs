@@ -2,7 +2,6 @@
 ///
 /// Scopes are now carried inside JWT claims, not scopes.json files.
 /// These tests verify the ScopeConfig matching logic.
-
 use ati::core::scope::ScopeConfig;
 
 fn make_scopes(scopes: &[&str]) -> ScopeConfig {
@@ -10,6 +9,7 @@ fn make_scopes(scopes: &[&str]) -> ScopeConfig {
         scopes: scopes.iter().map(|s| s.to_string()).collect(),
         sub: "test-agent".into(),
         expires_at: 0,
+        rate_config: None,
     }
 }
 
@@ -47,6 +47,7 @@ fn test_expired_scopes_deny_all() {
         scopes: vec!["tool:web_search".into()],
         sub: "test".into(),
         expires_at: 1, // Expired long ago
+        rate_config: None,
     };
 
     assert!(scopes.is_expired());
@@ -59,6 +60,7 @@ fn test_zero_expiry_means_no_expiry() {
         scopes: vec!["tool:web_search".into()],
         sub: "test".into(),
         expires_at: 0,
+        rate_config: None,
     };
 
     assert!(!scopes.is_expired());
@@ -71,6 +73,7 @@ fn test_far_future_expiry_not_expired() {
         scopes: vec!["tool:web_search".into()],
         sub: "test".into(),
         expires_at: 4102444800, // Year 2100
+        rate_config: None,
     };
 
     assert!(!scopes.is_expired());
@@ -93,6 +96,7 @@ fn test_check_access_returns_error_when_expired() {
         scopes: vec!["tool:web_search".into()],
         sub: "test".into(),
         expires_at: 1,
+        rate_config: None,
     };
 
     let result = scopes.check_access("web_search", "tool:web_search");
@@ -138,7 +142,7 @@ fn test_mixed_scope_patterns() {
 
 #[test]
 fn test_scope_from_jwt_claims() {
-    use ati::core::jwt::{TokenClaims, AtiNamespace};
+    use ati::core::jwt::{AtiNamespace, TokenClaims};
 
     let claims = TokenClaims {
         iss: Some("ati-orchestrator".into()),
@@ -148,7 +152,7 @@ fn test_scope_from_jwt_claims() {
         exp: 4102444800, // Year 2100
         jti: None,
         scope: "tool:web_search tool:github__* help".into(),
-        ati: Some(AtiNamespace { v: 1 }),
+        ati: Some(AtiNamespace { v: 1, rate: std::collections::HashMap::new() }),
     };
 
     let scopes = ScopeConfig::from_jwt(&claims);

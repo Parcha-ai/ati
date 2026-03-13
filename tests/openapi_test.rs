@@ -9,7 +9,6 @@
 /// - Auth detection
 /// - ManifestRegistry integration (tools appear in list, search, etc.)
 /// - Proxy server serves OpenAPI tools via /call, /mcp, /health
-
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -158,11 +157,7 @@ const PETSTORE_SPEC: &str = r#"{
 }"#;
 
 /// Create a temp dir with specs/ and manifests/ subdirectories.
-fn create_test_ati_dir(
-    manifest_toml: &str,
-    spec_json: &str,
-    spec_filename: &str,
-) -> TempDir {
+fn create_test_ati_dir(manifest_toml: &str, spec_json: &str, spec_filename: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     let specs_dir = dir.path().join("specs");
     let manifests_dir = dir.path().join("manifests");
@@ -195,15 +190,12 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     // Should have discovered all 6 operations
     let tools = registry.list_public_tools();
-    assert!(
-        tools.len() >= 6,
-        "Expected >= 6 tools, got {}",
-        tools.len()
-    );
+    assert!(tools.len() >= 6, "Expected >= 6 tools, got {}", tools.len());
 
     // Check specific tools exist with correct prefixed names
     assert!(registry.get_tool("petstore__getPetById").is_some());
@@ -232,11 +224,17 @@ openapi_include_tags = ["pet"]
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     let tools = registry.list_public_tools();
     // Only pet-tagged operations: getPetById, deletePet, addPet, findPetsByStatus
-    assert_eq!(tools.len(), 4, "Expected 4 pet-tagged tools, got {}", tools.len());
+    assert_eq!(
+        tools.len(),
+        4,
+        "Expected 4 pet-tagged tools, got {}",
+        tools.len()
+    );
 
     // Store and user tools should NOT be present
     assert!(registry.get_tool("petstore__getInventory").is_none());
@@ -261,7 +259,8 @@ openapi_exclude_tags = ["store", "user"]
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     // Only pet-tagged operations remain
     assert!(registry.get_tool("petstore__getInventory").is_none());
@@ -287,10 +286,16 @@ openapi_max_operations = 2
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     let tools = registry.list_public_tools();
-    assert_eq!(tools.len(), 2, "Expected exactly 2 tools (capped), got {}", tools.len());
+    assert_eq!(
+        tools.len(),
+        2,
+        "Expected exactly 2 tools (capped), got {}",
+        tools.len()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +316,8 @@ openapi_exclude_operations = ["deletePet", "getInventory"]
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     assert!(registry.get_tool("petstore__deletePet").is_none());
     assert!(registry.get_tool("petstore__getInventory").is_none());
@@ -336,7 +342,8 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     // Check getPetById tool properties
     let (provider, tool) = registry.get_tool("petstore__getPetById").unwrap();
@@ -350,7 +357,11 @@ auth_type = "none"
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let pet_id_prop = props.get("petId").unwrap();
     assert_eq!(
-        pet_id_prop.get("x-ati-param-location").unwrap().as_str().unwrap(),
+        pet_id_prop
+            .get("x-ati-param-location")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "path"
     );
     assert_eq!(
@@ -383,7 +394,8 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     let (_, tool) = registry.get_tool("petstore__addPet").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
@@ -392,7 +404,11 @@ auth_type = "none"
     // Body params should have x-ati-param-location = "body"
     let name_prop = props.get("name").unwrap();
     assert_eq!(
-        name_prop.get("x-ati-param-location").unwrap().as_str().unwrap(),
+        name_prop
+            .get("x-ati-param-location")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "body"
     );
 }
@@ -414,7 +430,8 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     let (_, tool) = registry.get_tool("petstore__findPetsByStatus").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
@@ -422,7 +439,11 @@ auth_type = "none"
 
     let status_prop = props.get("status").unwrap();
     assert_eq!(
-        status_prop.get("x-ati-param-location").unwrap().as_str().unwrap(),
+        status_prop
+            .get("x-ati-param-location")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "query"
     );
 }
@@ -449,7 +470,8 @@ tags = ["lookup", "single-entity"]
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     let (_, tool) = registry.get_tool("petstore__getPetById").unwrap();
     assert_eq!(tool.description, "Get a pet (overridden)");
@@ -646,7 +668,11 @@ fn test_path_param_substitution() {
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let pet_id = props.get("petId").unwrap();
     assert_eq!(
-        pet_id.get("x-ati-param-location").unwrap().as_str().unwrap(),
+        pet_id
+            .get("x-ati-param-location")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "path"
     );
 }
@@ -714,7 +740,8 @@ auth_type = "none"
     let registry = ati::core::manifest::ManifestRegistry::load(&manifests_dir).unwrap();
     let keyring = ati::core::keyring::Keyring::empty();
 
-    let skill_registry = ati::core::skill::SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let skill_registry =
+        ati::core::skill::SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
     let state = std::sync::Arc::new(ati::proxy::server::ProxyState {
         registry,
         skill_registry,
@@ -722,6 +749,7 @@ auth_type = "none"
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: ati::core::auth_generator::AuthCache::new(),
     });
 
     let app = ati::proxy::server::build_router(state);
@@ -773,14 +801,15 @@ auth_type = "none"
     let pet_tool = tools_list
         .iter()
         .find(|t| t["name"] == "petstore__getPetById");
-    assert!(pet_tool.is_some(), "petstore__getPetById not in MCP tools/list");
-    let pet_tool = pet_tool.unwrap();
     assert!(
-        pet_tool["description"]
-            .as_str()
-            .unwrap()
-            .contains("Find pet by ID")
+        pet_tool.is_some(),
+        "petstore__getPetById not in MCP tools/list"
     );
+    let pet_tool = pet_tool.unwrap();
+    assert!(pet_tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("Find pet by ID"));
 }
 
 // ---------------------------------------------------------------------------
@@ -800,7 +829,8 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     let openapi_providers = registry.list_openapi_providers();
     assert_eq!(openapi_providers.len(), 1);
@@ -869,7 +899,8 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
     let (_, tool) = registry.get_tool("test__findPets").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
@@ -877,7 +908,11 @@ auth_type = "none"
 
     // Default style=form + explode=true → "multi"
     assert_eq!(
-        status.get("x-ati-collection-format").unwrap().as_str().unwrap(),
+        status
+            .get("x-ati-collection-format")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "multi"
     );
 }
@@ -924,14 +959,18 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
     let (_, tool) = registry.get_tool("test__findPets").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let ids = props.get("ids").unwrap();
 
     assert_eq!(
-        ids.get("x-ati-collection-format").unwrap().as_str().unwrap(),
+        ids.get("x-ati-collection-format")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "csv"
     );
 }
@@ -978,14 +1017,18 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
     let (_, tool) = registry.get_tool("test__findPets").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let tags = props.get("tags").unwrap();
 
     assert_eq!(
-        tags.get("x-ati-collection-format").unwrap().as_str().unwrap(),
+        tags.get("x-ati-collection-format")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "ssv"
     );
 }
@@ -1032,14 +1075,19 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
     let (_, tool) = registry.get_tool("test__findPets").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let colors = props.get("colors").unwrap();
 
     assert_eq!(
-        colors.get("x-ati-collection-format").unwrap().as_str().unwrap(),
+        colors
+            .get("x-ati-collection-format")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "pipes"
     );
 }
@@ -1061,7 +1109,8 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     // findPetsByStatus has a scalar string query param "status" (not array)
     let (_, tool) = registry.get_tool("petstore__findPetsByStatus").unwrap();
@@ -1123,7 +1172,8 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
     let (_, tool) = registry.get_tool("test__getToken").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
 
@@ -1150,7 +1200,8 @@ auth_type = "none"
 "#;
 
     let dir = create_test_ati_dir(manifest, PETSTORE_SPEC, "petstore.json");
-    let registry = ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
+    let registry =
+        ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     // addPet has a JSON body
     let (_, tool) = registry.get_tool("petstore__addPet").unwrap();
@@ -1170,8 +1221,5 @@ auth_type = "none"
 fn test_spec_base_url() {
     let spec = ati::core::openapi::parse_spec(PETSTORE_SPEC).unwrap();
     let base_url = ati::core::openapi::spec_base_url(&spec);
-    assert_eq!(
-        base_url.as_deref(),
-        Some("https://petstore.example.com/v3")
-    );
+    assert_eq!(base_url.as_deref(), Some("https://petstore.example.com/v3"));
 }

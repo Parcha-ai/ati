@@ -60,10 +60,7 @@ fn test_denied_header_transfer_encoding() {
 #[test]
 fn test_denied_header_proxy_authorization() {
     let mut headers = HashMap::new();
-    headers.insert(
-        "Proxy-Authorization".to_string(),
-        "Basic evil".to_string(),
-    );
+    headers.insert("Proxy-Authorization".to_string(), "Basic evil".to_string());
     assert!(validate_headers(&headers, None).is_err());
 }
 
@@ -153,6 +150,7 @@ fn mock_provider(base_url: &str) -> Provider {
         oauth2_token_url: None,
         oauth2_basic_auth: false,
         extra_headers: HashMap::new(),
+        auth_generator: None,
         skills: vec![],
     }
 }
@@ -204,12 +202,11 @@ async fn test_array_query_param_multi() {
     let keyring = Keyring::empty();
 
     let mut args = HashMap::new();
-    args.insert(
-        "status".into(),
-        json!(["available", "pending"]),
-    );
+    args.insert("status".into(), json!(["available", "pending"]));
 
-    let result = execute_tool(&provider, &tool, &args, &keyring).await.unwrap();
+    let result = execute_tool(&provider, &tool, &args, &keyring)
+        .await
+        .unwrap();
     assert_eq!(result["ok"], true);
 }
 
@@ -246,7 +243,9 @@ async fn test_array_query_param_csv() {
     let mut args = HashMap::new();
     args.insert("ids".into(), json!([1, 2, 3]));
 
-    let result = execute_tool(&provider, &tool, &args, &keyring).await.unwrap();
+    let result = execute_tool(&provider, &tool, &args, &keyring)
+        .await
+        .unwrap();
     assert_eq!(result["ok"], true);
 }
 
@@ -289,6 +288,8 @@ async fn test_form_urlencoded_body() {
     args.insert("grant_type".into(), json!("client_credentials"));
     args.insert("client_id".into(), json!("myapp"));
 
-    let result = execute_tool(&provider, &tool, &args, &keyring).await.unwrap();
+    let result = execute_tool(&provider, &tool, &args, &keyring)
+        .await
+        .unwrap();
     assert_eq!(result["access_token"], "abc123");
 }

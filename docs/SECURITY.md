@@ -142,3 +142,50 @@ Both modes enforce scopes:
 | Air-gapped or offline sandboxes | **Local** — no network dependency |
 | Multi-tenant with shared sandboxes | **Proxy** — strongest isolation |
 | Development / testing | **Local** — easiest to set up |
+
+## Verifying Your ATI Binary
+
+Every release binary is cryptographically signed and auditable. Three levels of verification:
+
+### GitHub Attestation (recommended)
+
+Release binaries are attested by GitHub Actions using [artifact attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds) (SLSA Level 3). This cryptographically proves the binary was built from a specific commit in the official repo by the official CI workflow.
+
+```bash
+gh attestation verify ./ati --repo Parcha-ai/ati
+```
+
+If this fails, **do not use the binary**. It was not built by our CI.
+
+### SHA256 Checksum
+
+Each release includes `.sha256` files alongside the binaries:
+
+```bash
+sha256sum -c ati-x86_64-unknown-linux-musl.sha256
+```
+
+### Inspecting Embedded Dependencies
+
+ATI binaries are built with `cargo-auditable`, which embeds a compressed dependency manifest inside the binary itself. You can inspect what dependencies were compiled into any ATI binary:
+
+```bash
+cargo audit bin ./ati
+```
+
+If an attacker rebuilt the binary with injected dependencies, they show up here. This is forensic detection — the audit trail lives inside the binary, not in a separate file that could also be swapped.
+
+## CI/CD Security
+
+### Dependency Policy
+
+ATI enforces a strict dependency policy via `cargo-deny` (checked on every push):
+
+- **No unknown registries** — all crates must come from crates.io (blocks typosquatting via alt registries)
+- **No git source dependencies** — prevents "point Cargo.toml at an evil fork" attacks
+- **Known vulnerabilities denied** — checked against the RustSec advisory database
+- **License allowlist** — only OSI-approved permissive licenses
+
+### Pinned GitHub Actions
+
+All CI/CD workflow actions are pinned to full commit SHAs, not mutable version tags. This prevents the class of attack demonstrated by CVE-2025-30066 (tj-actions/changed-files), where an attacker force-pushed malicious code to a version tag.

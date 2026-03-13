@@ -34,7 +34,8 @@ description = "Search query"
     )
     .unwrap();
 
-    let manifest: Manifest = toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let manifest: Manifest =
+        toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
 
     assert_eq!(manifest.provider.name, "parallel");
     assert_eq!(manifest.provider.base_url, "https://api.parallel.ai/v1");
@@ -76,7 +77,8 @@ method = "GET"
     )
     .unwrap();
 
-    let manifest: Manifest = toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let manifest: Manifest =
+        toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
 
     assert!(matches!(manifest.provider.auth_type, AuthType::None));
     assert!(manifest.provider.auth_key_name.is_none());
@@ -525,4 +527,166 @@ endpoint = "/test"
 
     let manifest: Manifest = toml::from_str(manifest_str).unwrap();
     assert!(manifest.provider.skills.is_empty());
+}
+
+// --- Auth generator TOML parsing tests (use real ATI types) ---
+
+#[test]
+fn test_parse_auth_generator_command() {
+    let toml_str = r#"
+[provider]
+name = "brain"
+description = "Brain CLI"
+base_url = "http://backend:8001/grep"
+auth_type = "bearer"
+
+[provider.auth_generator]
+type = "command"
+command = "python3"
+args = ["-c", "print('token-${JWT_SUB}')"]
+cache_ttl_secs = 300
+output_format = "text"
+timeout_secs = 10
+
+[provider.auth_generator.env]
+BRAIN_SECRET = "${brain_cli_secret}"
+
+[[tools]]
+name = "brain_query"
+description = "Query brain"
+endpoint = "/query"
+method = "POST"
+"#;
+    let manifest: ati::core::manifest::Manifest = toml::from_str(toml_str).unwrap();
+    let gen = manifest.provider.auth_generator.as_ref().unwrap();
+    assert!(matches!(gen.gen_type, ati::core::manifest::AuthGenType::Command));
+    assert_eq!(gen.command.as_deref(), Some("python3"));
+    assert_eq!(gen.args.len(), 2);
+    assert_eq!(gen.cache_ttl_secs, 300);
+    assert!(matches!(gen.output_format, ati::core::manifest::AuthOutputFormat::Text));
+    assert_eq!(gen.timeout_secs, 10);
+    assert_eq!(gen.env.get("BRAIN_SECRET").unwrap(), "${brain_cli_secret}");
+}
+
+#[test]
+fn test_parse_auth_generator_script() {
+    let toml_str = r#"
+[provider]
+name = "hmac_api"
+description = "HMAC-signed API"
+base_url = "https://api.example.com"
+auth_type = "header"
+auth_header_name = "X-Signature"
+
+[provider.auth_generator]
+type = "script"
+interpreter = "python3"
+script = """
+import hmac, hashlib, os
+print(hmac.new(os.environ['SECRET'].encode(), b'payload', hashlib.sha256).hexdigest())
+"""
+cache_ttl_secs = 60
+output_format = "text"
+
+[provider.auth_generator.env]
+SECRET = "${hmac_secret}"
+
+[[tools]]
+name = "hmac_call"
+description = "Make HMAC-signed call"
+endpoint = "/data"
+"#;
+    let manifest: ati::core::manifest::Manifest = toml::from_str(toml_str).unwrap();
+    let gen = manifest.provider.auth_generator.as_ref().unwrap();
+    assert!(matches!(gen.gen_type, ati::core::manifest::AuthGenType::Script));
+    assert_eq!(gen.interpreter.as_deref(), Some("python3"));
+    assert!(gen.script.as_ref().unwrap().contains("hmac"));
+    assert_eq!(gen.cache_ttl_secs, 60);
+}
+
+#[test]
+fn test_parse_auth_generator_json_inject() {
+    let toml_str = r#"
+[provider]
+name = "aws_sts"
+description = "AWS STS"
+base_url = "https://api.aws.example.com"
+auth_type = "header"
+
+[provider.auth_generator]
+type = "command"
+command = "aws"
+args = ["sts", "assume-role", "--role-arn", "${aws_role_arn}", "--output", "json"]
+cache_ttl_secs = 840
+output_format = "json"
+
+[provider.auth_generator.inject]
+"Credentials.AccessKeyId" = { type = "header", name = "X-Aws-Access-Key-Id" }
+"Credentials.SecretAccessKey" = { type = "env", name = "AWS_SECRET_ACCESS_KEY" }
+"Credentials.SessionToken" = { type = "header", name = "X-Aws-Security-Token" }
+
+[[tools]]
+name = "aws_call"
+description = "AWS API call"
+endpoint = "/resource"
+"#;
+    let manifest: ati::core::manifest::Manifest = toml::from_str(toml_str).unwrap();
+    let gen = manifest.provider.auth_generator.as_ref().unwrap();
+    assert!(matches!(gen.output_format, ati::core::manifest::AuthOutputFormat::Json));
+    assert_eq!(gen.inject.len(), 3);
+
+    let access_key_target = gen.inject.get("Credentials.AccessKeyId").unwrap();
+    assert_eq!(access_key_target.inject_type, "header");
+    assert_eq!(access_key_target.name, "X-Aws-Access-Key-Id");
+
+    let secret_target = gen.inject.get("Credentials.SecretAccessKey").unwrap();
+    assert_eq!(secret_target.inject_type, "env");
+    assert_eq!(secret_target.name, "AWS_SECRET_ACCESS_KEY");
+}
+
+#[test]
+fn test_parse_no_auth_generator() {
+    let toml_str = r#"
+[provider]
+name = "simple"
+description = "No generator"
+base_url = "https://api.example.com"
+auth_type = "bearer"
+auth_key_name = "api_key"
+
+[[tools]]
+name = "simple_call"
+description = "Simple call"
+endpoint = "/data"
+"#;
+    let manifest: ati::core::manifest::Manifest = toml::from_str(toml_str).unwrap();
+    assert!(manifest.provider.auth_generator.is_none());
+}
+
+#[test]
+fn test_parse_auth_generator_defaults() {
+    let toml_str = r#"
+[provider]
+name = "minimal"
+description = "Minimal generator"
+base_url = "https://api.example.com"
+auth_type = "bearer"
+
+[provider.auth_generator]
+type = "command"
+command = "echo"
+args = ["token"]
+
+[[tools]]
+name = "test"
+description = "Test"
+endpoint = "/test"
+"#;
+    let manifest: ati::core::manifest::Manifest = toml::from_str(toml_str).unwrap();
+    let gen = manifest.provider.auth_generator.as_ref().unwrap();
+    assert_eq!(gen.cache_ttl_secs, 0);
+    assert!(matches!(gen.output_format, ati::core::manifest::AuthOutputFormat::Text));
+    assert_eq!(gen.timeout_secs, 30); // default
+    assert!(gen.env.is_empty());
+    assert!(gen.inject.is_empty());
 }

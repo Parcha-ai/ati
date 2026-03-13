@@ -4,7 +4,6 @@
 /// scopes, and expiry. No more static tokens or unsigned scope lists.
 ///
 /// Usage: `ati proxy --port 8080 [--ati-dir ~/.ati]`
-
 use axum::{
     body::Body,
     extract::State,
@@ -21,6 +20,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::core::auth_generator::{AuthCache, GenContext};
 use crate::core::http;
 use crate::core::jwt::{self, JwtConfig, TokenClaims};
 use crate::core::keyring::Keyring;
@@ -41,6 +41,8 @@ pub struct ProxyState {
     pub jwt_config: Option<JwtConfig>,
     /// Pre-computed JWKS JSON for the /.well-known/jwks.json endpoint.
     pub jwks_json: Option<Value>,
+    /// Shared cache for dynamically generated auth credentials.
+    pub auth_cache: AuthCache,
 }
 
 // --- Request/Response types ---
@@ -148,7 +150,10 @@ async fn handle_call(
     };
 
     if state.verbose {
-        eprintln!("[proxy] /call tool={} args={:?}", call_req.tool_name, call_req.args);
+        eprintln!(
+            "[proxy] /call tool={} args={:?}",
+            call_req.tool_name, call_req.args
+        );
     }
 
     // Look up tool in registry
@@ -192,13 +197,61 @@ async fn handle_call(
         }
     }
 
-    // Execute tool call — dispatch based on handler type
-    match provider.handler.as_str() {
+    // Rate limit check
+    {
+        let scopes = match &claims {
+            Some(c) => ScopeConfig::from_jwt(c),
+            None => ScopeConfig::unrestricted(),
+        };
+        if let Some(ref rate_config) = scopes.rate_config {
+            if let Err(e) = crate::core::rate::check_and_record(&call_req.tool_name, rate_config) {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(CallResponse {
+                        result: Value::Null,
+                        error: Some(format!("{e}")),
+                    }),
+                );
+            }
+        }
+    }
+
+    // Build auth generator context from JWT claims
+    let gen_ctx = GenContext {
+        jwt_sub: claims
+            .as_ref()
+            .map(|c| c.sub.clone())
+            .unwrap_or_else(|| "dev".into()),
+        jwt_scope: claims
+            .as_ref()
+            .map(|c| c.scope.clone())
+            .unwrap_or_else(|| "*".into()),
+        tool_name: call_req.tool_name.clone(),
+        timestamp: crate::core::jwt::now_secs(),
+    };
+
+    // Execute tool call — dispatch based on handler type, with timing for audit
+    let agent_sub = claims.as_ref().map(|c| c.sub.clone()).unwrap_or_default();
+    let start = std::time::Instant::now();
+
+    let response = match provider.handler.as_str() {
         "mcp" => {
-            match mcp_client::execute(provider, &call_req.tool_name, &call_req.args, &state.keyring).await {
+            match mcp_client::execute_with_gen(
+                provider,
+                &call_req.tool_name,
+                &call_req.args,
+                &state.keyring,
+                Some(&gen_ctx),
+                Some(&state.auth_cache),
+            )
+            .await
+            {
                 Ok(result) => (
                     StatusCode::OK,
-                    Json(CallResponse { result, error: None }),
+                    Json(CallResponse {
+                        result,
+                        error: None,
+                    }),
                 ),
                 Err(e) => (
                     StatusCode::BAD_GATEWAY,
@@ -211,10 +264,21 @@ async fn handle_call(
         }
         "cli" => {
             let raw = call_req.raw_args.as_deref().unwrap_or(&[]);
-            match crate::core::cli_executor::execute(provider, raw, &state.keyring).await {
+            match crate::core::cli_executor::execute_with_gen(
+                provider,
+                raw,
+                &state.keyring,
+                Some(&gen_ctx),
+                Some(&state.auth_cache),
+            )
+            .await
+            {
                 Ok(result) => (
                     StatusCode::OK,
-                    Json(CallResponse { result, error: None }),
+                    Json(CallResponse {
+                        result,
+                        error: None,
+                    }),
                 ),
                 Err(e) => (
                     StatusCode::BAD_GATEWAY,
@@ -227,11 +291,25 @@ async fn handle_call(
         }
         _ => {
             let raw_response = match match provider.handler.as_str() {
-                "xai" => xai::execute_xai_tool(provider, tool, &call_req.args, &state.keyring).await,
-                _ => http::execute_tool(provider, tool, &call_req.args, &state.keyring).await,
+                "xai" => {
+                    xai::execute_xai_tool(provider, tool, &call_req.args, &state.keyring).await
+                }
+                _ => {
+                    http::execute_tool_with_gen(
+                        provider,
+                        tool,
+                        &call_req.args,
+                        &state.keyring,
+                        Some(&gen_ctx),
+                        Some(&state.auth_cache),
+                    )
+                    .await
+                }
             } {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let duration = start.elapsed();
+                    write_proxy_audit(&call_req, &agent_sub, duration, Some(&e.to_string()));
                     return (
                         StatusCode::BAD_GATEWAY,
                         Json(CallResponse {
@@ -242,9 +320,12 @@ async fn handle_call(
                 }
             };
 
-            let processed = match response::process_response(&raw_response, tool.response.as_ref()) {
+            let processed = match response::process_response(&raw_response, tool.response.as_ref())
+            {
                 Ok(p) => p,
                 Err(e) => {
+                    let duration = start.elapsed();
+                    write_proxy_audit(&call_req, &agent_sub, duration, Some(&e.to_string()));
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(CallResponse {
@@ -257,10 +338,19 @@ async fn handle_call(
 
             (
                 StatusCode::OK,
-                Json(CallResponse { result: processed, error: None }),
+                Json(CallResponse {
+                    result: processed,
+                    error: None,
+                }),
             )
         }
-    }
+    };
+
+    let duration = start.elapsed();
+    let error_msg = response.1.error.as_deref();
+    write_proxy_audit(&call_req, &agent_sub, duration, error_msg);
+
+    response
 }
 
 async fn handle_help(
@@ -302,8 +392,7 @@ async fn handle_help(
     };
 
     let scopes = ScopeConfig::unrestricted();
-    let resolved_skills =
-        skill::resolve_skills(&state.skill_registry, &state.registry, &scopes);
+    let resolved_skills = skill::resolve_skills(&state.skill_registry, &state.registry, &scopes);
     let skills_section = if resolved_skills.is_empty() {
         String::new()
     } else {
@@ -321,7 +410,10 @@ async fn handle_help(
             None => {
                 // Fall back to unscoped if tool/provider not found
                 if state.verbose {
-                    eprintln!("[proxy] /help scope '{}' not found, falling back to unscoped", tool_name);
+                    eprintln!(
+                        "[proxy] /help scope '{}' not found, falling back to unscoped",
+                        tool_name
+                    );
                 }
                 let all_tools = state.registry.list_public_tools();
                 let tools_context = build_tool_context(&all_tools);
@@ -472,9 +564,7 @@ async fn handle_mcp(
             jsonrpc_success(id, result)
         }
 
-        "notifications/initialized" => {
-            (StatusCode::ACCEPTED, Json(Value::Null))
-        }
+        "notifications/initialized" => (StatusCode::ACCEPTED, Json(Value::Null)),
 
         "tools/list" => {
             let all_tools = state.registry.list_public_tools();
@@ -513,23 +603,38 @@ async fn handle_mcp(
             let (provider, _tool) = match state.registry.get_tool(tool_name) {
                 Some(pt) => pt,
                 None => {
-                    return jsonrpc_error(
-                        id,
-                        -32602,
-                        &format!("Unknown tool: '{tool_name}'"),
-                    );
+                    return jsonrpc_error(id, -32602, &format!("Unknown tool: '{tool_name}'"));
                 }
             };
 
             if state.verbose {
-                eprintln!("[proxy] /mcp tools/call name={tool_name} provider={}", provider.name);
+                eprintln!(
+                    "[proxy] /mcp tools/call name={tool_name} provider={}",
+                    provider.name
+                );
             }
 
+            let mcp_gen_ctx = GenContext {
+                jwt_sub: "dev".into(),
+                jwt_scope: "*".into(),
+                tool_name: tool_name.to_string(),
+                timestamp: crate::core::jwt::now_secs(),
+            };
+
             let result = if provider.is_mcp() {
-                mcp_client::execute(provider, tool_name, &arguments, &state.keyring).await
+                mcp_client::execute_with_gen(
+                    provider,
+                    tool_name,
+                    &arguments,
+                    &state.keyring,
+                    Some(&mcp_gen_ctx),
+                    Some(&state.auth_cache),
+                )
+                .await
             } else if provider.is_cli() {
                 // Convert arguments map to CLI-style args for MCP passthrough
-                let raw: Vec<String> = arguments.iter()
+                let raw: Vec<String> = arguments
+                    .iter()
                     .flat_map(|(k, v)| {
                         let val = match v {
                             Value::String(s) => s.clone(),
@@ -538,12 +643,31 @@ async fn handle_mcp(
                         vec![format!("--{k}"), val]
                     })
                     .collect();
-                crate::core::cli_executor::execute(provider, &raw, &state.keyring).await
-                    .map_err(|e| mcp_client::McpError::Transport(e.to_string()))
+                crate::core::cli_executor::execute_with_gen(
+                    provider,
+                    &raw,
+                    &state.keyring,
+                    Some(&mcp_gen_ctx),
+                    Some(&state.auth_cache),
+                )
+                .await
+                .map_err(|e| mcp_client::McpError::Transport(e.to_string()))
             } else {
                 match match provider.handler.as_str() {
-                    "xai" => xai::execute_xai_tool(provider, _tool, &arguments, &state.keyring).await,
-                    _ => http::execute_tool(provider, _tool, &arguments, &state.keyring).await,
+                    "xai" => {
+                        xai::execute_xai_tool(provider, _tool, &arguments, &state.keyring).await
+                    }
+                    _ => {
+                        http::execute_tool_with_gen(
+                            provider,
+                            _tool,
+                            &arguments,
+                            &state.keyring,
+                            Some(&mcp_gen_ctx),
+                            Some(&state.auth_cache),
+                        )
+                        .await
+                    }
                 } {
                     Ok(val) => Ok(val),
                     Err(e) => Err(mcp_client::McpError::Transport(e.to_string())),
@@ -572,9 +696,7 @@ async fn handle_mcp(
             }
         }
 
-        _ => {
-            jsonrpc_error(id, -32601, &format!("Method not found: '{method}'"))
-        }
+        _ => jsonrpc_error(id, -32601, &format!("Method not found: '{method}'")),
     }
 }
 
@@ -654,7 +776,10 @@ async fn handle_skill_detail(
     axum::extract::Query(query): axum::extract::Query<SkillDetailQuery>,
 ) -> impl IntoResponse {
     if state.verbose {
-        eprintln!("[proxy] GET /skills/{name} meta={:?} refs={:?}", query.meta, query.refs);
+        eprintln!(
+            "[proxy] GET /skills/{name} meta={:?} refs={:?}",
+            query.meta, query.refs
+        );
     }
 
     let skill_meta = match state.skill_registry.get_skill(&name) {
@@ -728,6 +853,7 @@ async fn handle_skills_resolve(
         scopes: req.scopes,
         sub: String::new(),
         expires_at: 0,
+        rate_config: None,
     };
 
     let resolved = skill::resolve_skills(&state.skill_registry, &state.registry, &scopes);
@@ -789,7 +915,10 @@ async fn auth_middleware(
     match jwt::validate(token, jwt_config) {
         Ok(claims) => {
             if state.verbose {
-                eprintln!("[proxy] JWT validated: sub={} scopes={}", claims.sub, claims.scope);
+                eprintln!(
+                    "[proxy] JWT validated: sub={} scopes={}",
+                    claims.sub, claims.scope
+                );
             }
             req.extensions_mut().insert(claims);
             Ok(next.run(req).await)
@@ -816,7 +945,10 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/skills/{name}", get(handle_skill_detail))
         .route("/health", get(handle_health))
         .route("/.well-known/jwks.json", get(handle_jwks))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state)
 }
 
@@ -843,7 +975,10 @@ pub async fn run(
         // --env-keys: scan ATI_KEY_* environment variables
         let kr = Keyring::from_env();
         let key_names = kr.key_names();
-        eprintln!("  Loaded {} API keys from ATI_KEY_* env vars:", key_names.len());
+        eprintln!(
+            "  Loaded {} API keys from ATI_KEY_* env vars:",
+            key_names.len()
+        );
         for name in &key_names {
             eprintln!("    - {name}");
         }
@@ -879,7 +1014,9 @@ pub async fn run(
                     }
                 }
             } else {
-                eprintln!("Warning: No keyring.enc or credentials found — running without API keys");
+                eprintln!(
+                    "Warning: No keyring.enc or credentials found — running without API keys"
+                );
                 eprintln!("Tools requiring authentication will fail.");
                 keyring_source = "empty (no auth)";
                 Keyring::empty()
@@ -928,9 +1065,10 @@ pub async fn run(
 
     // Build JWKS for the endpoint
     let jwks_json = jwt_config.as_ref().and_then(|config| {
-        config.public_key_pem.as_ref().and_then(|pem| {
-            jwt::public_key_to_jwks(pem, config.algorithm, "ati-proxy-1").ok()
-        })
+        config
+            .public_key_pem
+            .as_ref()
+            .and_then(|pem| jwt::public_key_to_jwks(pem, config.algorithm, "ati-proxy-1").ok())
     });
 
     let state = Arc::new(ProxyState {
@@ -940,6 +1078,7 @@ pub async fn run(
         verbose,
         jwt_config,
         jwks_json,
+        auth_cache: AuthCache::new(),
     });
 
     let app = build_router(state);
@@ -971,6 +1110,30 @@ pub async fn run(
     Ok(())
 }
 
+/// Write an audit entry from the proxy server. Failures are silently ignored.
+fn write_proxy_audit(
+    call_req: &CallRequest,
+    agent_sub: &str,
+    duration: std::time::Duration,
+    error: Option<&str>,
+) {
+    let entry = crate::core::audit::AuditEntry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        tool: call_req.tool_name.clone(),
+        args: crate::core::audit::sanitize_args(&serde_json::json!(call_req.args)),
+        status: if error.is_some() {
+            crate::core::audit::AuditStatus::Error
+        } else {
+            crate::core::audit::AuditStatus::Ok
+        },
+        duration_ms: duration.as_millis() as u64,
+        agent_sub: agent_sub.to_string(),
+        error: error.map(|s| s.to_string()),
+        exit_code: None,
+    };
+    let _ = crate::core::audit::append(&entry);
+}
+
 // --- Helpers ---
 
 const HELP_SYSTEM_PROMPT: &str = r#"You are a helpful assistant for an AI agent that uses external tools via the `ati` CLI.
@@ -990,7 +1153,10 @@ Answer the agent's question naturally, like a knowledgeable colleague would. Kee
 Keep your answer concise — a few short paragraphs with embedded code blocks. Only recommend tools from the list above."#;
 
 fn build_tool_context(
-    tools: &[(&crate::core::manifest::Provider, &crate::core::manifest::Tool)],
+    tools: &[(
+        &crate::core::manifest::Provider,
+        &crate::core::manifest::Tool,
+    )],
 ) -> String {
     let mut summaries = Vec::new();
     for (provider, tool) in tools {
@@ -1027,8 +1193,7 @@ fn build_tool_context(
                         .map(|(k, v)| {
                             let type_str =
                                 v.get("type").and_then(|t| t.as_str()).unwrap_or("string");
-                            let desc =
-                                v.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                            let desc = v.get("description").and_then(|d| d.as_str()).unwrap_or("");
                             format!("    --{k} ({type_str}): {desc}")
                         })
                         .collect();
@@ -1063,19 +1228,33 @@ fn build_scoped_prompt(
         }
         if provider.is_cli() {
             let cmd = provider.cli_command.as_deref().unwrap_or("?");
-            details.push_str(&format!("\n**Usage**: `ati run {} -- <args>`  (passthrough to `{}`)\n", tool.name, cmd));
+            details.push_str(&format!(
+                "\n**Usage**: `ati run {} -- <args>`  (passthrough to `{}`)\n",
+                tool.name, cmd
+            ));
         } else if let Some(schema) = &tool.input_schema {
             if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
                 let required: Vec<String> = schema
                     .get("required")
                     .and_then(|r| r.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 details.push_str("\n**Parameters**:\n");
                 for (key, val) in props {
                     let type_str = val.get("type").and_then(|t| t.as_str()).unwrap_or("string");
-                    let desc = val.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                    let req = if required.contains(key) { " **(required)**" } else { "" };
+                    let desc = val
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
+                    let req = if required.contains(key) {
+                        " **(required)**"
+                    } else {
+                        ""
+                    };
                     details.push_str(&format!("- `--{key}` ({type_str}{req}): {desc}\n"));
                 }
             }

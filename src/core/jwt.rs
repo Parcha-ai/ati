@@ -6,10 +6,9 @@
 //!
 //! Supports ES256 (recommended) and HS256 (simpler, for single-machine setups).
 
-use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
-};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -62,6 +61,9 @@ impl std::fmt::Debug for JwtConfig {
 pub struct AtiNamespace {
     /// Claims schema version.
     pub v: u8,
+    /// Per-tool-pattern rate limits (e.g. {"tool:github__*": "10/hour"}).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub rate: HashMap<String, String>,
 }
 
 /// JWT claims per RFC 9068.
@@ -91,10 +93,7 @@ pub struct TokenClaims {
 impl TokenClaims {
     /// Parse the space-delimited scope string into a Vec.
     pub fn scopes(&self) -> Vec<String> {
-        self.scope
-            .split_whitespace()
-            .map(String::from)
-            .collect()
+        self.scope.split_whitespace().map(String::from).collect()
     }
 }
 
@@ -139,8 +138,7 @@ pub fn inspect(token: &str) -> Result<TokenClaims, JwtError> {
 
     // Use a dummy key since we're not validating
     let key = DecodingKey::from_secret(b"unused");
-    let token_data: TokenData<TokenClaims> =
-        jsonwebtoken::decode(token, &key, &validation)?;
+    let token_data: TokenData<TokenClaims> = jsonwebtoken::decode(token, &key, &validation)?;
 
     Ok(token_data.claims)
 }
@@ -176,11 +174,7 @@ pub fn load_private_key_pem(pem: &[u8], alg: Algorithm) -> Result<EncodingKey, J
 }
 
 /// Create a JwtConfig from an HS256 shared secret.
-pub fn config_from_secret(
-    secret: &[u8],
-    issuer: Option<String>,
-    audience: String,
-) -> JwtConfig {
+pub fn config_from_secret(secret: &[u8], issuer: Option<String>, audience: String) -> JwtConfig {
     JwtConfig {
         decoding_key: DecodingKey::from_secret(secret),
         encoding_key: Some(EncodingKey::from_secret(secret)),
@@ -225,14 +219,17 @@ pub fn public_key_to_jwks(
     kid: &str,
 ) -> Result<serde_json::Value, JwtError> {
     // Parse the PEM to extract the raw key bytes
-    let pem_str = std::str::from_utf8(pem)
-        .map_err(|e| JwtError::InvalidKey(e.to_string()))?;
+    let pem_str = std::str::from_utf8(pem).map_err(|e| JwtError::InvalidKey(e.to_string()))?;
 
     // Extract base64 content between PEM headers
     let key_type = match alg {
         Algorithm::ES256 | Algorithm::ES384 => "EC",
         Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => "RSA",
-        _ => return Err(JwtError::InvalidKey("Unsupported algorithm for JWKS".into())),
+        _ => {
+            return Err(JwtError::InvalidKey(
+                "Unsupported algorithm for JWKS".into(),
+            ))
+        }
     };
 
     let alg_str = match alg {
@@ -273,8 +270,7 @@ pub fn public_key_to_jwks(
 /// 3. Neither → None (JWT disabled)
 pub fn config_from_env() -> Result<Option<JwtConfig>, JwtError> {
     let issuer = std::env::var("ATI_JWT_ISSUER").ok();
-    let audience = std::env::var("ATI_JWT_AUDIENCE")
-        .unwrap_or_else(|_| "ati-proxy".to_string());
+    let audience = std::env::var("ATI_JWT_AUDIENCE").unwrap_or_else(|_| "ati-proxy".to_string());
 
     // Try ES256 first
     if let Ok(pub_key_path) = std::env::var("ATI_JWT_PUBLIC_KEY") {
@@ -323,7 +319,11 @@ mod tests {
     use super::*;
 
     fn hs256_config() -> JwtConfig {
-        config_from_secret(b"test-secret-key-32-bytes-long!!!", None, "ati-proxy".into())
+        config_from_secret(
+            b"test-secret-key-32-bytes-long!!!",
+            None,
+            "ati-proxy".into(),
+        )
     }
 
     fn hs256_config_with_issuer() -> JwtConfig {
@@ -344,7 +344,7 @@ mod tests {
             exp: now + 1800,
             jti: Some(uuid::Uuid::new_v4().to_string()),
             scope: scope.into(),
-            ati: Some(AtiNamespace { v: 1 }),
+            ati: Some(AtiNamespace { v: 1, rate: HashMap::new() }),
         }
     }
 
@@ -377,7 +377,8 @@ mod tests {
     #[test]
     fn test_wrong_secret_rejected() {
         let config1 = hs256_config();
-        let config2 = config_from_secret(b"different-secret-key-32-bytes!!", None, "ati-proxy".into());
+        let config2 =
+            config_from_secret(b"different-secret-key-32-bytes!!", None, "ati-proxy".into());
 
         let claims = make_claims("tool:web_search");
         let token = issue(&claims, &config1).unwrap();
@@ -459,7 +460,12 @@ mod tests {
         let scopes = claims.scopes();
         assert_eq!(
             scopes,
-            vec!["tool:web_search", "tool:github__*", "skill:research-*", "help"]
+            vec![
+                "tool:web_search",
+                "tool:github__*",
+                "skill:research-*",
+                "help"
+            ]
         );
     }
 

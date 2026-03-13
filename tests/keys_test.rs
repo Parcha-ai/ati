@@ -1,5 +1,4 @@
 /// Integration tests for `ati key set/list/remove`.
-
 use assert_cmd::Command;
 use tempfile::TempDir;
 
@@ -100,10 +99,9 @@ fn test_keys_remove() {
         .stderr(predicates::str::contains("Removed key_a"));
 
     // Verify removal
-    let content: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(ati_dir.join("credentials")).unwrap(),
-    )
-    .unwrap();
+    let content: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ati_dir.join("credentials")).unwrap())
+            .unwrap();
     assert!(content.get("key_a").is_none());
     assert_eq!(content["key_b"], "value_b");
 }
@@ -140,10 +138,9 @@ fn test_keys_set_overwrites_existing() {
         .assert()
         .success();
 
-    let content: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(ati_dir.join("credentials")).unwrap(),
-    )
-    .unwrap();
+    let content: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ati_dir.join("credentials")).unwrap())
+            .unwrap();
     assert_eq!(content["my_key"], "new_value");
 }
 
@@ -188,11 +185,7 @@ description = "Test tool"
     std::fs::write(manifests_dir.join("test.toml"), manifest).unwrap();
 
     // Write credentials file
-    std::fs::write(
-        ati_dir.join("credentials"),
-        r#"{"my_key":"my_value"}"#,
-    )
-    .unwrap();
+    std::fs::write(ati_dir.join("credentials"), r#"{"my_key":"my_value"}"#).unwrap();
 
     // ati run should work (will fail on actual HTTP but should find the tool via cascade)
     // We just test verbose mode prints "credentials (plaintext)"

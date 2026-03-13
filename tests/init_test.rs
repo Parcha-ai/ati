@@ -1,5 +1,4 @@
 /// Integration tests for `ati init`.
-
 use assert_cmd::Command;
 use tempfile::TempDir;
 
@@ -71,7 +70,10 @@ fn test_init_proxy_hs256() {
 
     let config = std::fs::read_to_string(ati_dir.join("config.toml")).unwrap();
     assert!(config.contains("HS256"), "config should mention HS256");
-    assert!(config.contains("[proxy.jwt]"), "config should have jwt section");
+    assert!(
+        config.contains("[proxy.jwt]"),
+        "config should have jwt section"
+    );
     assert!(config.contains("secret = "), "config should have a secret");
 }
 

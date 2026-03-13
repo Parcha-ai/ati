@@ -18,7 +18,11 @@ fn test_parse_string_args() {
 
 #[test]
 fn test_parse_boolean_flag() {
-    let args = vec!["--verbose".to_string(), "--query".to_string(), "test".to_string()];
+    let args = vec![
+        "--verbose".to_string(),
+        "--query".to_string(),
+        "test".to_string(),
+    ];
 
     let parsed = parse_tool_args(&args).unwrap();
     assert_eq!(parsed.get("verbose").unwrap(), &json!(true));
@@ -77,7 +81,10 @@ fn test_response_jsonpath_extraction() {
     // Verify we can extract to owned values
     let values: Vec<Value> = results.into_iter().map(|v| v.to_data()).collect();
     assert_eq!(values[0].get("title").unwrap(), &json!("Result 1"));
-    assert_eq!(values[2].get("url").unwrap(), &json!("https://example.com/3"));
+    assert_eq!(
+        values[2].get("url").unwrap(),
+        &json!("https://example.com/3")
+    );
 }
 
 #[test]
@@ -163,7 +170,7 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
 }
 
 fn format_as_table(value: &Value) -> String {
-    use comfy_table::{presets::UTF8_FULL_CONDENSED, Table, ContentArrangement};
+    use comfy_table::{presets::UTF8_FULL_CONDENSED, ContentArrangement, Table};
 
     match value {
         Value::Array(arr) if !arr.is_empty() && arr[0].is_object() => {

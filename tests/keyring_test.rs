@@ -14,7 +14,10 @@ fn test_encrypt_decrypt_roundtrip() {
     let mut keys = HashMap::new();
     keys.insert("parallel_api_key".to_string(), "pk_test_12345".to_string());
     keys.insert("epo_api_key".to_string(), "epo_secret_67890".to_string());
-    keys.insert("cerebras_api_key".to_string(), "csk-abc123def456".to_string());
+    keys.insert(
+        "cerebras_api_key".to_string(),
+        "csk-abc123def456".to_string(),
+    );
 
     let plaintext = serde_json::to_vec(&keys).unwrap();
 
@@ -68,7 +71,10 @@ fn test_tampered_ciphertext_fails() {
     }
 
     let result = decrypt_keyring(&session_key, &encrypted);
-    assert!(result.is_err(), "Tampered ciphertext should fail authentication");
+    assert!(
+        result.is_err(),
+        "Tampered ciphertext should fail authentication"
+    );
 }
 
 #[test]
@@ -77,10 +83,7 @@ fn test_keyring_file_roundtrip() {
     let session_key = generate_session_key();
 
     // Create keyring
-    let keys: HashMap<String, String> = [
-        ("api_key".into(), "secret123".into()),
-    ]
-    .into();
+    let keys: HashMap<String, String> = [("api_key".into(), "secret123".into())].into();
     let plaintext = serde_json::to_vec(&keys).unwrap();
     let encrypted = encrypt_keyring(&session_key, &plaintext).unwrap();
 
@@ -100,11 +103,9 @@ fn test_keyring_file_roundtrip() {
     let contents = std::fs::read_to_string(&key_path).unwrap();
     std::fs::remove_file(&key_path).unwrap();
 
-    let decoded = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        contents.trim(),
-    )
-    .unwrap();
+    let decoded =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, contents.trim())
+            .unwrap();
 
     assert_eq!(decoded.len(), 32);
     assert!(!key_path.exists(), "Key file should be deleted");
@@ -140,7 +141,7 @@ fn test_empty_keyring() {
 
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, AeadCore, Nonce,
+    AeadCore, Aes256Gcm, Nonce,
 };
 use base64;
 use rand::RngCore;
@@ -159,7 +160,9 @@ fn encrypt_keyring(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let cipher = Aes256Gcm::new_from_slice(session_key)?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let ciphertext = cipher.encrypt(&nonce, plaintext).map_err(|e| format!("{e}"))?;
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|e| format!("{e}"))?;
 
     let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
     result.extend_from_slice(&nonce);

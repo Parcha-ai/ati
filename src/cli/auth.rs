@@ -3,10 +3,7 @@ use crate::core::scope::ScopeConfig;
 use crate::{AuthCommands, Cli, OutputFormat};
 
 /// Execute: ati auth <subcommand>
-pub async fn execute(
-    cli: &Cli,
-    subcmd: &AuthCommands,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(cli: &Cli, subcmd: &AuthCommands) -> Result<(), Box<dyn std::error::Error>> {
     match subcmd {
         AuthCommands::Status => show_status(cli),
     }
@@ -23,9 +20,8 @@ fn show_status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Decode JWT (inspect without requiring verification key)
-    let claims = jwt::inspect(&token).map_err(|e| {
-        format!("Cannot decode ATI_SESSION_TOKEN: {e}")
-    })?;
+    let claims =
+        jwt::inspect(&token).map_err(|e| format!("Cannot decode ATI_SESSION_TOKEN: {e}"))?;
 
     // Check if we can fully validate
     let verified = match jwt::config_from_env() {
@@ -89,7 +85,11 @@ fn show_status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 println!("Expires:  never");
             }
 
-            let verified_str = if verified { "YES" } else { "NO (public key not available)" };
+            let verified_str = if verified {
+                "YES"
+            } else {
+                "NO (public key not available)"
+            };
             println!("Verified: {verified_str}");
 
             if scopes.is_expired() {

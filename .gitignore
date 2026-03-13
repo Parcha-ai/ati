@@ -13,6 +13,10 @@ JWT_FINDINGS_*.md
 *~
 .DS_Store
 
+# Coverage and mutation testing output
+coverage/
+mutants.out/
+
 # Contrib manifests/specs (local only, not distributed)
 contrib/manifests/
 contrib/specs/

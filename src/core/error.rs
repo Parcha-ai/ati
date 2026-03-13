@@ -16,7 +16,10 @@ pub fn classify_error(err: &dyn std::error::Error) -> &'static str {
         "auth.scope_denied"
     } else if msg.contains("expired") {
         "auth.expired"
-    } else if msg.contains("key not found") || msg.contains("missing key") || msg.contains("no keys found") {
+    } else if msg.contains("key not found")
+        || msg.contains("missing key")
+        || msg.contains("no keys found")
+    {
         "auth.missing_key"
     } else if msg.contains("timeout") {
         "provider.timeout"
@@ -28,6 +31,8 @@ pub fn classify_error(err: &dyn std::error::Error) -> &'static str {
         "input.missing_arg"
     } else if msg.contains("invalid") || msg.contains("parse") {
         "input.invalid_value"
+    } else if msg.contains("rate limit") || msg.contains("rate.exceeded") {
+        "rate.exceeded"
     } else {
         "tool.execution_failed"
     }
@@ -40,6 +45,7 @@ pub fn exit_code_for_error(err: &dyn std::error::Error) -> i32 {
         "input" => 2,
         "auth" => 3,
         "provider" => 4,
+        "rate" => 5,
         _ => 1,
     }
 }
@@ -71,7 +77,9 @@ pub fn format_structured_error(err: &dyn std::error::Error, verbose: bool) -> St
     }
 
     serde_json::to_string(&error_obj).unwrap_or_else(|_| {
-        format!("{{\"error\":{{\"code\":\"{code}\",\"message\":\"{message}\",\"exit_code\":{exit}}}}}")
+        format!(
+            "{{\"error\":{{\"code\":\"{code}\",\"message\":\"{message}\",\"exit_code\":{exit}}}}}"
+        )
     })
 }
 
@@ -122,6 +130,9 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(parsed["error"]["code"], "tool.not_found");
         assert_eq!(parsed["error"]["exit_code"], 1);
-        assert!(parsed["error"]["message"].as_str().unwrap().contains("nonexistent"));
+        assert!(parsed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("nonexistent"));
     }
 }

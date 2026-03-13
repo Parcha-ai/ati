@@ -1,5 +1,4 @@
 /// Integration tests for `ati provider load` and `ati provider unload`.
-
 use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -110,15 +109,21 @@ fn test_load_openapi_no_auth_json() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "petstore",
+            "--name",
+            "petstore",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["status"], "ready");
@@ -131,7 +136,10 @@ fn test_load_openapi_no_auth_json() {
     assert!(result["cached_until"].is_string());
 
     // Verify cache file was created
-    let cache_path = ati_dir.join("cache").join("providers").join("petstore.json");
+    let cache_path = ati_dir
+        .join("cache")
+        .join("providers")
+        .join("petstore.json");
     assert!(cache_path.exists(), "Cache file should exist");
 }
 
@@ -147,15 +155,21 @@ fn test_load_openapi_needs_auth_json() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "example",
+            "--name",
+            "example",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["status"], "needs_auth");
@@ -167,7 +181,10 @@ fn test_load_openapi_needs_auth_json() {
 
     let commands = result["setup_commands"].as_array().unwrap();
     assert_eq!(commands.len(), 1);
-    assert!(commands[0].as_str().unwrap().contains("ati key set example_api_key"));
+    assert!(commands[0]
+        .as_str()
+        .unwrap()
+        .contains("ati key set example_api_key"));
 }
 
 #[test]
@@ -182,15 +199,21 @@ fn test_load_openapi_header_auth_json() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "headerapi",
+            "--name",
+            "headerapi",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["status"], "needs_auth");
@@ -210,10 +233,13 @@ fn test_load_openapi_custom_auth_key() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "example",
-            "--auth-key", "my_custom_key",
+            "--name",
+            "example",
+            "--auth-key",
+            "my_custom_key",
             "-J",
         ])
         .output()
@@ -223,7 +249,10 @@ fn test_load_openapi_custom_auth_key() {
 
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["auth"]["key_name"], "my_custom_key");
-    assert!(result["setup_commands"][0].as_str().unwrap().contains("my_custom_key"));
+    assert!(result["setup_commands"][0]
+        .as_str()
+        .unwrap()
+        .contains("my_custom_key"));
 }
 
 #[test]
@@ -238,9 +267,11 @@ fn test_load_openapi_text_output() {
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "petstore",
+            "--name",
+            "petstore",
         ])
         .assert()
         .success()
@@ -260,17 +291,25 @@ fn test_load_mcp_http_json() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "http",
-            "--url", "https://mcp.example.com/mcp",
-            "--name", "testmcp",
+            "--transport",
+            "http",
+            "--url",
+            "https://mcp.example.com/mcp",
+            "--name",
+            "testmcp",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["status"], "ready");
@@ -293,19 +332,29 @@ fn test_load_mcp_stdio_json() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "stdio",
-            "--command", "npx",
-            "--args", "-y",
-            "--args", "@modelcontextprotocol/server-github",
-            "--name", "github",
+            "--transport",
+            "stdio",
+            "--command",
+            "npx",
+            "--args",
+            "-y",
+            "--args",
+            "@modelcontextprotocol/server-github",
+            "--name",
+            "github",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["status"], "ready");
@@ -323,29 +372,48 @@ fn test_load_mcp_with_env_keyring_ref() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "stdio",
-            "--command", "npx",
-            "--args", "-y",
-            "--args", "@modelcontextprotocol/server-github",
-            "--name", "github",
-            "--env", "GITHUB_PERSONAL_ACCESS_TOKEN=${github_token}",
+            "--transport",
+            "stdio",
+            "--command",
+            "npx",
+            "--args",
+            "-y",
+            "--args",
+            "@modelcontextprotocol/server-github",
+            "--name",
+            "github",
+            "--env",
+            "GITHUB_PERSONAL_ACCESS_TOKEN=${github_token}",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["status"], "needs_keys");
-    assert_eq!(result["env_vars"]["GITHUB_PERSONAL_ACCESS_TOKEN"]["keyring_ref"], "github_token");
-    assert_eq!(result["env_vars"]["GITHUB_PERSONAL_ACCESS_TOKEN"]["resolved"], false);
+    assert_eq!(
+        result["env_vars"]["GITHUB_PERSONAL_ACCESS_TOKEN"]["keyring_ref"],
+        "github_token"
+    );
+    assert_eq!(
+        result["env_vars"]["GITHUB_PERSONAL_ACCESS_TOKEN"]["resolved"],
+        false
+    );
 
     let commands = result["setup_commands"].as_array().unwrap();
     assert!(!commands.is_empty());
-    assert!(commands.iter().any(|c| c.as_str().unwrap().contains("github_token")));
+    assert!(commands
+        .iter()
+        .any(|c| c.as_str().unwrap().contains("github_token")));
 }
 
 #[test]
@@ -357,10 +425,13 @@ fn test_load_mcp_http_requires_url() {
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "http",
-            "--name", "bad",
+            "--transport",
+            "http",
+            "--name",
+            "bad",
         ])
         .assert()
         .failure()
@@ -376,10 +447,13 @@ fn test_load_mcp_stdio_requires_command() {
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "stdio",
-            "--name", "bad",
+            "--transport",
+            "stdio",
+            "--name",
+            "bad",
         ])
         .assert()
         .failure()
@@ -401,14 +475,19 @@ fn test_unload_removes_cache() {
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "petstore",
+            "--name",
+            "petstore",
         ])
         .assert()
         .success();
 
-    let cache_path = ati_dir.join("cache").join("providers").join("petstore.json");
+    let cache_path = ati_dir
+        .join("cache")
+        .join("providers")
+        .join("petstore.json");
     assert!(cache_path.exists());
 
     // Then unload
@@ -451,9 +530,11 @@ fn test_cached_provider_visible_in_tool_list() {
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "petstore",
+            "--name",
+            "petstore",
         ])
         .assert()
         .success();
@@ -485,9 +566,11 @@ fn test_cached_provider_visible_in_provider_list() {
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "petstore",
+            "--name",
+            "petstore",
         ])
         .assert()
         .success();
@@ -516,11 +599,15 @@ fn test_cached_mcp_provider_visible_in_provider_list() {
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "http",
-            "--url", "https://mcp.example.com/mcp",
-            "--name", "testmcp",
+            "--transport",
+            "http",
+            "--url",
+            "https://mcp.example.com/mcp",
+            "--name",
+            "testmcp",
         ])
         .assert()
         .success();
@@ -698,7 +785,11 @@ fn test_expired_cache_cleaned_up_on_load() {
     });
 
     let expired_path = cache_dir.join("expired_provider.json");
-    std::fs::write(&expired_path, serde_json::to_string_pretty(&expired_json).unwrap()).unwrap();
+    std::fs::write(
+        &expired_path,
+        serde_json::to_string_pretty(&expired_json).unwrap(),
+    )
+    .unwrap();
     assert!(expired_path.exists());
 
     // Running any command that loads the registry should clean up expired entries
@@ -710,7 +801,10 @@ fn test_expired_cache_cleaned_up_on_load() {
         .unwrap();
 
     // Expired file should be deleted
-    assert!(!expired_path.exists(), "Expired cache file should be cleaned up");
+    assert!(
+        !expired_path.exists(),
+        "Expired cache file should be cleaned up"
+    );
 }
 
 // ─── TTL override test ──────────────────────────────────────────────────────
@@ -727,10 +821,13 @@ fn test_load_with_custom_ttl() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "petstore",
-            "--ttl", "7200",
+            "--name",
+            "petstore",
+            "--ttl",
+            "7200",
             "-J",
         ])
         .output()
@@ -739,7 +836,10 @@ fn test_load_with_custom_ttl() {
     assert!(output.status.success());
 
     // Check the cache file has the right TTL
-    let cache_path = ati_dir.join("cache").join("providers").join("petstore.json");
+    let cache_path = ati_dir
+        .join("cache")
+        .join("providers")
+        .join("petstore.json");
     let cache_content = std::fs::read_to_string(&cache_path).unwrap();
     let cached: Value = serde_json::from_str(&cache_content).unwrap();
     assert_eq!(cached["ttl_seconds"], 7200);
@@ -755,10 +855,7 @@ fn test_load_openapi_without_spec_fails() {
 
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
-        .args([
-            "provider", "load",
-            "--name", "nospec",
-        ])
+        .args(["provider", "load", "--name", "nospec"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("requires a spec"));
@@ -775,23 +872,37 @@ fn test_load_mcp_with_auth_header_json() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "http",
-            "--url", "https://mcp.example.com/mcp",
-            "--name", "custom_header",
-            "--auth", "header",
-            "--auth-key", "custom_api_key",
-            "--auth-header", "x-api-key",
+            "--transport",
+            "http",
+            "--url",
+            "https://mcp.example.com/mcp",
+            "--name",
+            "custom_header",
+            "--auth",
+            "header",
+            "--auth-key",
+            "custom_api_key",
+            "--auth-header",
+            "x-api-key",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify the cache file has auth_header_name set
-    let cache_path = ati_dir.join("cache").join("providers").join("custom_header.json");
+    let cache_path = ati_dir
+        .join("cache")
+        .join("providers")
+        .join("custom_header.json");
     let cache_content = std::fs::read_to_string(&cache_path).unwrap();
     let cached: Value = serde_json::from_str(&cache_content).unwrap();
     assert_eq!(cached["auth_header_name"], "x-api-key");
@@ -806,23 +917,37 @@ fn test_load_mcp_with_auth_query_json() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "http",
-            "--url", "https://mcp.example.com/mcp",
-            "--name", "custom_query",
-            "--auth", "query",
-            "--auth-key", "custom_api_key",
-            "--auth-query", "api_token",
+            "--transport",
+            "http",
+            "--url",
+            "https://mcp.example.com/mcp",
+            "--name",
+            "custom_query",
+            "--auth",
+            "query",
+            "--auth-key",
+            "custom_api_key",
+            "--auth-query",
+            "api_token",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify the cache file has auth_query_name set
-    let cache_path = ati_dir.join("cache").join("providers").join("custom_query.json");
+    let cache_path = ati_dir
+        .join("cache")
+        .join("providers")
+        .join("custom_query.json");
     let cache_content = std::fs::read_to_string(&cache_path).unwrap();
     let cached: Value = serde_json::from_str(&cache_content).unwrap();
     assert_eq!(cached["auth_query_name"], "api_token");
@@ -840,20 +965,31 @@ fn test_load_openapi_with_auth_header_override() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             spec_path.to_str().unwrap(),
-            "--name", "overridden",
-            "--auth", "header",
-            "--auth-header", "X-Custom-Override",
+            "--name",
+            "overridden",
+            "--auth",
+            "header",
+            "--auth-header",
+            "X-Custom-Override",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify the cache file has the overridden auth_header_name
-    let cache_path = ati_dir.join("cache").join("providers").join("overridden.json");
+    let cache_path = ati_dir
+        .join("cache")
+        .join("providers")
+        .join("overridden.json");
     let cache_content = std::fs::read_to_string(&cache_path).unwrap();
     let cached: Value = serde_json::from_str(&cache_content).unwrap();
     assert_eq!(cached["auth_header_name"], "X-Custom-Override");
@@ -872,17 +1008,25 @@ fn test_load_mcp_probe_failure_still_caches() {
     let output = ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "http",
-            "--url", "https://unreachable.invalid/mcp",
-            "--name", "probefail",
+            "--transport",
+            "http",
+            "--url",
+            "https://unreachable.invalid/mcp",
+            "--name",
+            "probefail",
             "-J",
         ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["name"], "probefail");
@@ -891,8 +1035,14 @@ fn test_load_mcp_probe_failure_still_caches() {
     assert!(result["probe_error"].is_string());
 
     // Cache file should still exist
-    let cache_path = ati_dir.join("cache").join("providers").join("probefail.json");
-    assert!(cache_path.exists(), "Cache file should exist even when probe fails");
+    let cache_path = ati_dir
+        .join("cache")
+        .join("providers")
+        .join("probefail.json");
+    assert!(
+        cache_path.exists(),
+        "Cache file should exist even when probe fails"
+    );
 }
 
 #[test]
@@ -904,11 +1054,15 @@ fn test_load_mcp_probe_failure_text_output() {
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
         .args([
-            "provider", "load",
+            "provider",
+            "load",
             "--mcp",
-            "--transport", "http",
-            "--url", "https://unreachable.invalid/mcp",
-            "--name", "probefail_text",
+            "--transport",
+            "http",
+            "--url",
+            "https://unreachable.invalid/mcp",
+            "--name",
+            "probefail_text",
         ])
         .assert()
         .success()

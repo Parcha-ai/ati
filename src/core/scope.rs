@@ -7,6 +7,27 @@
 use crate::core::manifest::{Provider, Tool};
 use thiserror::Error;
 
+/// Check if a name matches a pattern with optional wildcard suffix.
+///
+/// Supports:
+/// - Exact match: `"foo"` matches `"foo"`
+/// - Wildcard suffix: `"foo*"` matches `"foobar"`
+/// - Global wildcard: `"*"` matches everything
+pub fn matches_wildcard(name: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if pattern == name {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        if name.starts_with(prefix) {
+            return true;
+        }
+    }
+    false
+}
+
 #[derive(Error, Debug)]
 pub enum ScopeError {
     #[error("Scopes have expired (expired at {0})")]
@@ -24,15 +45,25 @@ pub struct ScopeConfig {
     pub sub: String,
     /// Expiry timestamp (from JWT `exp` claim). 0 = no expiry.
     pub expires_at: u64,
+    /// Per-tool rate limits parsed from JWT claims.
+    pub rate_config: Option<crate::core::rate::RateConfig>,
 }
 
 impl ScopeConfig {
     /// Build a ScopeConfig from JWT TokenClaims.
     pub fn from_jwt(claims: &crate::core::jwt::TokenClaims) -> Self {
+        let rate_config = claims.ati.as_ref().and_then(|ns| {
+            if ns.rate.is_empty() {
+                None
+            } else {
+                crate::core::rate::parse_rate_config(&ns.rate).ok()
+            }
+        });
         ScopeConfig {
             scopes: claims.scopes(),
             sub: claims.sub.clone(),
             expires_at: claims.exp,
+            rate_config,
         }
     }
 
@@ -42,6 +73,7 @@ impl ScopeConfig {
             scopes: vec!["*".to_string()],
             sub: "dev".to_string(),
             expires_at: 0,
+            rate_config: None,
         }
     }
 
@@ -74,17 +106,8 @@ impl ScopeConfig {
         }
         // Check each scope pattern
         for scope in &self.scopes {
-            if scope == "*" {
+            if matches_wildcard(tool_scope, scope) {
                 return true;
-            }
-            if scope == tool_scope {
-                return true;
-            }
-            // Wildcard suffix match: "tool:github__*" matches "tool:github__search_repos"
-            if let Some(prefix) = scope.strip_suffix('*') {
-                if tool_scope.starts_with(prefix) {
-                    return true;
-                }
             }
         }
         false
@@ -119,12 +142,18 @@ impl ScopeConfig {
 
     /// Number of tool scopes (those starting with "tool:").
     pub fn tool_scope_count(&self) -> usize {
-        self.scopes.iter().filter(|s| s.starts_with("tool:")).count()
+        self.scopes
+            .iter()
+            .filter(|s| s.starts_with("tool:"))
+            .count()
     }
 
     /// Number of skill scopes (those starting with "skill:").
     pub fn skill_scope_count(&self) -> usize {
-        self.scopes.iter().filter(|s| s.starts_with("skill:")).count()
+        self.scopes
+            .iter()
+            .filter(|s| s.starts_with("skill:"))
+            .count()
     }
 
     /// Check if help is enabled.
@@ -165,6 +194,7 @@ mod tests {
             scopes: scopes.iter().map(|s| s.to_string()).collect(),
             sub: "test-agent".into(),
             expires_at: 0,
+            rate_config: None,
         }
     }
 
@@ -204,6 +234,7 @@ mod tests {
             scopes: vec!["tool:web_search".into()],
             sub: "test".into(),
             expires_at: 1,
+            rate_config: None,
         };
         assert!(config.is_expired());
         assert!(!config.is_allowed("tool:web_search"));
@@ -215,6 +246,7 @@ mod tests {
             scopes: vec!["tool:web_search".into()],
             sub: "test".into(),
             expires_at: 0,
+            rate_config: None,
         };
         assert!(!config.is_expired());
         assert!(config.is_allowed("tool:web_search"));
@@ -233,6 +265,7 @@ mod tests {
             scopes: vec!["tool:web_search".into()],
             sub: "test".into(),
             expires_at: 1,
+            rate_config: None,
         };
         let result = config.check_access("web_search", "tool:web_search");
         assert!(result.is_err());

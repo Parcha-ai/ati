@@ -32,12 +32,10 @@ async fn test_call_with_proxy_url_routes_to_proxy() {
     // Mock the /call endpoint
     Mock::given(method("POST"))
         .and(path("/call"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "result": {"data": "from proxy"},
-                "error": null
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": {"data": "from proxy"},
+            "error": null
+        })))
         .mount(&mock_server)
         .await;
 
@@ -68,12 +66,10 @@ async fn test_verbose_shows_proxy_mode() {
 
     Mock::given(method("POST"))
         .and(path("/call"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "result": "ok",
-                "error": null
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": "ok",
+            "error": null
+        })))
         .mount(&mock_server)
         .await;
 
@@ -119,12 +115,10 @@ async fn test_help_with_proxy_url_routes_to_proxy() {
 
     Mock::given(method("POST"))
         .and(path("/help"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "content": "Use ati run web_search --query \"your query\"",
-                "error": null
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "content": "Use ati run web_search --query \"your query\"",
+            "error": null
+        })))
         .mount(&mock_server)
         .await;
 

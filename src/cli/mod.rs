@@ -1,9 +1,11 @@
+pub mod audit;
 pub mod auth;
 pub mod call;
 pub mod common;
 pub mod help;
 pub mod init;
 pub mod keys;
+pub mod plan;
 pub mod provider;
 pub mod skills;
 pub mod token;

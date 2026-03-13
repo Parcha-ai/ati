@@ -8,7 +8,6 @@
 ///   - HTTP method from the spec
 ///
 /// Filters: include/exclude by tags and operationIds, max operations cap.
-
 use openapiv3::{
     OpenAPI, Operation, Parameter, ParameterData, ParameterSchemaOrContent, QueryStyle,
     ReferenceOr, Schema, SchemaKind, Type as OAType,
@@ -17,7 +16,9 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::manifest::{HttpMethod, OpenApiToolOverride, Provider, ResponseConfig, ResponseFormat, Tool};
+use crate::core::manifest::{
+    HttpMethod, OpenApiToolOverride, Provider, ResponseConfig, ResponseFormat, Tool,
+};
 
 /// Errors specific to OpenAPI spec loading.
 #[derive(Debug, thiserror::Error)]
@@ -157,17 +158,12 @@ pub fn extract_tools(spec: &OpenAPI, filters: &OpenApiFilters) -> Vec<OpenApiToo
             let op_tags: Vec<String> = operation.tags.clone();
 
             if !filters.include_tags.is_empty() {
-                let has_included = op_tags
-                    .iter()
-                    .any(|t| filters.include_tags.contains(t));
+                let has_included = op_tags.iter().any(|t| filters.include_tags.contains(t));
                 if !has_included {
                     continue;
                 }
             }
-            if op_tags
-                .iter()
-                .any(|t| filters.exclude_tags.contains(t))
-            {
+            if op_tags.iter().any(|t| filters.exclude_tags.contains(t)) {
                 continue;
             }
 
@@ -239,9 +235,7 @@ pub fn to_ati_tool(
     tags.sort();
     tags.dedup();
 
-    let examples = override_cfg
-        .map(|o| o.examples.clone())
-        .unwrap_or_default();
+    let examples = override_cfg.map(|o| o.examples.clone()).unwrap_or_default();
 
     let scope = override_cfg
         .and_then(|o| o.scope.clone())
@@ -333,11 +327,7 @@ fn parameter_location(param: &Parameter) -> &'static str {
 /// Resolve a $ref to a Parameter component.
 fn resolve_parameter_ref<'a>(reference: &str, spec: &'a OpenAPI) -> Option<&'a ParameterData> {
     let name = reference.strip_prefix("#/components/parameters/")?;
-    let param = spec
-        .components
-        .as_ref()?
-        .parameters
-        .get(name)?;
+    let param = spec.components.as_ref()?.parameters.get(name)?;
     match param {
         ReferenceOr::Item(p) => parameter_data(p),
         _ => None,
@@ -373,14 +363,20 @@ fn param_location_from_ref(param_ref: &ReferenceOr<Parameter>, spec: &OpenAPI) -
 /// - PipeDelimited → "pipes" (?status=a|b)
 fn collection_format_for_param(param: &Parameter) -> Option<&'static str> {
     let (style, data) = match param {
-        Parameter::Query { style, parameter_data, .. } => (style, parameter_data),
+        Parameter::Query {
+            style,
+            parameter_data,
+            ..
+        } => (style, parameter_data),
         _ => return None,
     };
 
     // Check if the parameter schema is an array type
     let is_array = match &data.format {
         ParameterSchemaOrContent::Schema(schema_ref) => match schema_ref {
-            ReferenceOr::Item(schema) => matches!(&schema.schema_kind, SchemaKind::Type(OAType::Array(_))),
+            ReferenceOr::Item(schema) => {
+                matches!(&schema.schema_kind, SchemaKind::Type(OAType::Array(_)))
+            }
             ReferenceOr::Reference { .. } => false, // Can't resolve inline, skip
         },
         _ => false,
@@ -394,7 +390,11 @@ fn collection_format_for_param(param: &Parameter) -> Option<&'static str> {
         QueryStyle::Form => {
             // Default explode for form is true
             let explode = data.explode.unwrap_or(true);
-            if explode { Some("multi") } else { Some("csv") }
+            if explode {
+                Some("multi")
+            } else {
+                Some("csv")
+            }
         }
         QueryStyle::SpaceDelimited => Some("ssv"),
         QueryStyle::PipeDelimited => Some("pipes"),
@@ -425,7 +425,8 @@ pub fn build_input_schema_with_locations(
     let mut required_fields: Vec<String> = Vec::new();
 
     // Process all parameter refs with location info
-    let all_param_refs: Vec<&ReferenceOr<Parameter>> = path_params.iter().chain(op_params.iter()).collect();
+    let all_param_refs: Vec<&ReferenceOr<Parameter>> =
+        path_params.iter().chain(op_params.iter()).collect();
 
     for param_ref in &all_param_refs {
         let location = param_location_from_ref(param_ref, spec);
@@ -479,7 +480,9 @@ pub fn build_input_schema_with_locations(
             if let Some(mt) = media_type {
                 if let Some(schema_ref) = &mt.schema {
                     let body_schema = resolve_schema_to_json(schema_ref, spec);
-                    if let Some(body_props) = body_schema.get("properties").and_then(|p| p.as_object()) {
+                    if let Some(body_props) =
+                        body_schema.get("properties").and_then(|p| p.as_object())
+                    {
                         let body_required: Vec<String> = body_schema
                             .get("required")
                             .and_then(|r| r.as_array())
@@ -640,7 +643,11 @@ fn resolve_schema_to_json(schema_ref: &ReferenceOr<Schema>, spec: &OpenAPI) -> V
     resolve_schema_to_json_depth(schema_ref, spec, 0)
 }
 
-fn resolve_schema_to_json_depth(schema_ref: &ReferenceOr<Schema>, spec: &OpenAPI, depth: usize) -> Value {
+fn resolve_schema_to_json_depth(
+    schema_ref: &ReferenceOr<Schema>,
+    spec: &OpenAPI,
+    depth: usize,
+) -> Value {
     if depth >= MAX_SCHEMA_DEPTH {
         return json!({"type": "object", "description": "(schema too deeply nested)"});
     }
@@ -676,7 +683,9 @@ fn resolve_schema_to_json_depth(schema_ref: &ReferenceOr<Schema>, spec: &OpenAPI
 
             result
         }
-        ReferenceOr::Reference { reference } => resolve_schema_ref_to_json_depth(reference, spec, depth + 1),
+        ReferenceOr::Reference { reference } => {
+            resolve_schema_ref_to_json_depth(reference, spec, depth + 1)
+        }
     }
 }
 
@@ -695,10 +704,7 @@ fn resolve_schema_ref_to_json_depth(reference: &str, spec: &OpenAPI, depth: usiz
         None => return json!({"type": "object"}),
     };
 
-    let schema = spec
-        .components
-        .as_ref()
-        .and_then(|c| c.schemas.get(name));
+    let schema = spec.components.as_ref().and_then(|c| c.schemas.get(name));
 
     match schema {
         Some(schema_ref) => resolve_schema_to_json_depth(schema_ref, spec, depth + 1),
@@ -737,7 +743,10 @@ pub fn detect_auth(spec: &OpenAPI) -> (String, HashMap<String, String>) {
         };
 
         match scheme {
-            openapiv3::SecurityScheme::HTTP { scheme: http_scheme, .. } => {
+            openapiv3::SecurityScheme::HTTP {
+                scheme: http_scheme,
+                ..
+            } => {
                 let scheme_lower = http_scheme.to_lowercase();
                 if scheme_lower == "bearer" {
                     return ("bearer".into(), extra);
@@ -745,21 +754,19 @@ pub fn detect_auth(spec: &OpenAPI) -> (String, HashMap<String, String>) {
                     return ("basic".into(), extra);
                 }
             }
-            openapiv3::SecurityScheme::APIKey { location, name, .. } => {
-                match location {
-                    openapiv3::APIKeyLocation::Header => {
-                        extra.insert("auth_header_name".into(), name.clone());
-                        return ("header".into(), extra);
-                    }
-                    openapiv3::APIKeyLocation::Query => {
-                        extra.insert("auth_query_name".into(), name.clone());
-                        return ("query".into(), extra);
-                    }
-                    openapiv3::APIKeyLocation::Cookie => {
-                        return ("none".into(), extra);
-                    }
+            openapiv3::SecurityScheme::APIKey { location, name, .. } => match location {
+                openapiv3::APIKeyLocation::Header => {
+                    extra.insert("auth_header_name".into(), name.clone());
+                    return ("header".into(), extra);
                 }
-            }
+                openapiv3::APIKeyLocation::Query => {
+                    extra.insert("auth_query_name".into(), name.clone());
+                    return ("query".into(), extra);
+                }
+                openapiv3::APIKeyLocation::Cookie => {
+                    return ("none".into(), extra);
+                }
+            },
             openapiv3::SecurityScheme::OAuth2 { flows, .. } => {
                 // Check for client_credentials flow
                 if let Some(cc) = &flows.client_credentials {
@@ -805,10 +812,9 @@ pub fn list_operations(spec: &OpenAPI) -> Vec<OperationSummary> {
 
         for (method, maybe_op) in methods {
             if let Some(op) = maybe_op {
-                let operation_id = op
-                    .operation_id
-                    .clone()
-                    .unwrap_or_else(|| auto_generate_operation_id(&method.to_lowercase(), path_str));
+                let operation_id = op.operation_id.clone().unwrap_or_else(|| {
+                    auto_generate_operation_id(&method.to_lowercase(), path_str)
+                });
                 let description = build_description(op);
                 ops.push(OperationSummary {
                     operation_id,

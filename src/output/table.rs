@@ -1,4 +1,4 @@
-use comfy_table::{presets::UTF8_FULL_CONDENSED, Table, ContentArrangement};
+use comfy_table::{presets::UTF8_FULL_CONDENSED, ContentArrangement, Table};
 use serde_json::Value;
 
 /// Format a JSON value as a table.
@@ -6,9 +6,7 @@ use serde_json::Value;
 /// Works best with arrays of objects. Falls back to JSON for other types.
 pub fn format(value: &Value) -> String {
     match value {
-        Value::Array(arr) if !arr.is_empty() && arr[0].is_object() => {
-            format_array_of_objects(arr)
-        }
+        Value::Array(arr) if !arr.is_empty() && arr[0].is_object() => format_array_of_objects(arr),
         Value::Object(obj) => {
             // Single object → key-value table
             let mut table = Table::new();

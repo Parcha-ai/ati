@@ -2,7 +2,6 @@
 ///
 /// Tests cover: SkillRegistry loading, tool/provider/category indexes,
 /// scope-driven resolution, search, backward compatibility, proxy /skills endpoints.
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -12,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+use ati::core::auth_generator::AuthCache;
 use ati::core::keyring::Keyring;
 use ati::core::manifest::ManifestRegistry;
 use ati::core::scope::ScopeConfig;
@@ -43,6 +43,7 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     })
 }
 
@@ -267,6 +268,7 @@ description = "Other skill"
         scopes: vec!["skill:target".to_string()],
         sub: String::new(),
         expires_at: 0,
+        rate_config: None,
     };
 
     let resolved = skill::resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -307,6 +309,7 @@ tools = ["other_tool"]
         scopes: vec!["tool:my_tool".to_string()],
         sub: String::new(),
         expires_at: 0,
+        rate_config: None,
     };
 
     let resolved = skill::resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -358,6 +361,7 @@ description = "Dependency B"
         scopes: vec!["tool:root_tool".to_string()],
         sub: String::new(),
         expires_at: 0,
+        rate_config: None,
     };
 
     let resolved = skill::resolve_skills(&skill_reg, &manifest_reg, &scopes);
@@ -583,10 +587,7 @@ keywords = ["test"]
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["name"], "meta-skill");
     assert_eq!(json["version"], "3.0.0");
-    assert_eq!(
-        json["tools"].as_array().unwrap().len(),
-        2
-    );
+    assert_eq!(json["tools"].as_array().unwrap().len(), 2);
     // Content should NOT be in metadata-only response
     assert!(json.get("content").is_none());
 }
@@ -715,16 +716,14 @@ description = "Test"
 
 #[test]
 fn test_build_skill_context_for_llm() {
-    let skills = vec![
-        SkillMeta {
-            name: "sanctions".to_string(),
-            version: "1.0.0".to_string(),
-            description: "Screen against sanctions".to_string(),
-            tools: vec!["ca_sanctions_search".to_string()],
-            hint: Some("Use when checking sanctions".to_string()),
-            ..Default::default()
-        },
-    ];
+    let skills = vec![SkillMeta {
+        name: "sanctions".to_string(),
+        version: "1.0.0".to_string(),
+        description: "Screen against sanctions".to_string(),
+        tools: vec!["ca_sanctions_search".to_string()],
+        hint: Some("Use when checking sanctions".to_string()),
+        ..Default::default()
+    }];
 
     let refs: Vec<&SkillMeta> = skills.iter().collect();
     let ctx = skill::build_skill_context(&refs);

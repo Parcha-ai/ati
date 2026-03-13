@@ -44,6 +44,7 @@ fn make_cli_provider(
         cli_default_args: default_args,
         cli_env,
         cli_timeout_secs: timeout,
+        auth_generator: None,
         category: None,
         skills: Vec::new(),
     }
@@ -85,13 +86,10 @@ async fn test_cli_echo_with_default_args() {
 async fn test_cli_json_output() {
     let provider = make_cli_provider("jsonecho", "echo", vec![], HashMap::new(), None);
     let keyring = Keyring::empty();
-    let result = cli_executor::execute(
-        &provider,
-        &[r#"{"key":"value","num":42}"#.into()],
-        &keyring,
-    )
-    .await
-    .unwrap();
+    let result =
+        cli_executor::execute(&provider, &[r#"{"key":"value","num":42}"#.into()], &keyring)
+            .await
+            .unwrap();
     // Should be parsed as JSON, not a string
     assert!(result.is_object());
     assert_eq!(result["key"], "value");
@@ -122,7 +120,13 @@ async fn test_cli_timeout() {
 
 #[tokio::test]
 async fn test_cli_missing_command() {
-    let provider = make_cli_provider("bad", "nonexistent_binary_xyz_abc", vec![], HashMap::new(), None);
+    let provider = make_cli_provider(
+        "bad",
+        "nonexistent_binary_xyz_abc",
+        vec![],
+        HashMap::new(),
+        None,
+    );
     let keyring = Keyring::empty();
     let err = cli_executor::execute(&provider, &[], &keyring)
         .await
@@ -170,9 +174,8 @@ async fn test_cli_env_var_missing_key() {
 #[test]
 fn test_credential_file_dev_mode() {
     let tmp = tempfile::tempdir().unwrap();
-    let cf =
-        cli_executor::materialize_credential_file("mykey", "content123", false, tmp.path())
-            .unwrap();
+    let cf = cli_executor::materialize_credential_file("mykey", "content123", false, tmp.path())
+        .unwrap();
     assert_eq!(cf.path, tmp.path().join(".creds/mykey"));
     assert_eq!(std::fs::read_to_string(&cf.path).unwrap(), "content123");
 }
@@ -181,8 +184,7 @@ fn test_credential_file_dev_mode() {
 fn test_credential_file_permissions() {
     let tmp = tempfile::tempdir().unwrap();
     let cf =
-        cli_executor::materialize_credential_file("permkey", "data", false, tmp.path())
-            .unwrap();
+        cli_executor::materialize_credential_file("permkey", "data", false, tmp.path()).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -210,8 +212,8 @@ fn test_credential_file_persists_dev_mode() {
     let tmp = tempfile::tempdir().unwrap();
     let path;
     {
-        let cf = cli_executor::materialize_credential_file("devkey", "data", false, tmp.path())
-            .unwrap();
+        let cf =
+            cli_executor::materialize_credential_file("devkey", "data", false, tmp.path()).unwrap();
         path = cf.path.clone();
         assert!(path.exists());
     }
@@ -222,10 +224,8 @@ fn test_credential_file_persists_dev_mode() {
 #[test]
 fn test_credential_file_prod_unique_paths() {
     let tmp = tempfile::tempdir().unwrap();
-    let cf1 =
-        cli_executor::materialize_credential_file("key", "val1", true, tmp.path()).unwrap();
-    let cf2 =
-        cli_executor::materialize_credential_file("key", "val2", true, tmp.path()).unwrap();
+    let cf1 = cli_executor::materialize_credential_file("key", "val1", true, tmp.path()).unwrap();
+    let cf2 = cli_executor::materialize_credential_file("key", "val2", true, tmp.path()).unwrap();
     assert_ne!(cf1.path, cf2.path, "prod mode should use unique paths");
 }
 
@@ -356,7 +356,10 @@ fn test_add_cli_help() {
         .success();
     let output = String::from_utf8_lossy(&cmd.get_output().stdout);
     assert!(output.contains("CLI"), "help should mention CLI");
-    assert!(output.contains("--command"), "help should show --command flag");
+    assert!(
+        output.contains("--command"),
+        "help should show --command flag"
+    );
 }
 
 #[test]
@@ -380,7 +383,10 @@ fn test_add_cli_creates_manifest() {
     let manifest_path = tmp.path().join("manifests/testecho.toml");
     assert!(manifest_path.exists(), "manifest should be created");
     let content = std::fs::read_to_string(&manifest_path).unwrap();
-    assert!(content.contains("handler = \"cli\""), "should be cli handler");
+    assert!(
+        content.contains("handler = \"cli\""),
+        "should be cli handler"
+    );
     assert!(
         content.contains("cli_command = \"echo\""),
         "should have correct command"

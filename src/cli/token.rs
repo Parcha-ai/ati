@@ -5,6 +5,8 @@
 //! ati token inspect      — Decode a JWT without verification
 //! ati token validate     — Fully verify a JWT
 
+use std::collections::HashMap;
+
 use crate::core::jwt::{self, AtiNamespace, TokenClaims};
 use crate::TokenCommands;
 
@@ -20,7 +22,17 @@ pub fn execute(subcmd: &TokenCommands) -> Result<(), Box<dyn std::error::Error>>
             iss,
             key,
             secret,
-        } => issue(sub, scope, *ttl, aud.as_deref(), iss.as_deref(), key.as_deref(), secret.as_deref()),
+            rate,
+        } => issue(
+            sub,
+            scope,
+            *ttl,
+            aud.as_deref(),
+            iss.as_deref(),
+            key.as_deref(),
+            secret.as_deref(),
+            rate,
+        ),
         TokenCommands::Inspect { token } => inspect(token),
         TokenCommands::Validate { token, key, secret } => {
             validate(token, key.as_deref(), secret.as_deref())
@@ -100,25 +112,37 @@ fn issue(
     iss: Option<&str>,
     key_path: Option<&str>,
     secret_hex: Option<&str>,
+    rate_args: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let now = jwt::now_secs();
+
+    let mut rate_map = HashMap::new();
+    for arg in rate_args {
+        let parts: Vec<&str> = arg.splitn(2, '=').collect();
+        if parts.len() == 2 {
+            rate_map.insert(parts[0].to_string(), parts[1].to_string());
+        } else {
+            return Err(format!("Invalid rate spec '{}': expected pattern=count/unit (e.g. tool:github__*=10/hour)", arg).into());
+        }
+    }
+
     let claims = TokenClaims {
-        iss: iss.map(String::from).or_else(|| {
-            std::env::var("ATI_JWT_ISSUER").ok()
-        }),
+        iss: iss
+            .map(String::from)
+            .or_else(|| std::env::var("ATI_JWT_ISSUER").ok()),
         sub: sub.to_string(),
         aud: aud.unwrap_or("ati-proxy").to_string(),
         iat: now,
         exp: now + ttl,
         jti: Some(uuid::Uuid::new_v4().to_string()),
         scope: scope.to_string(),
-        ati: Some(AtiNamespace { v: 1 }),
+        ati: Some(AtiNamespace { v: 1, rate: rate_map }),
     };
 
     // Build config from explicit args or env
     let config = if let Some(path) = key_path {
-        let pem = std::fs::read(path)
-            .map_err(|e| format!("Cannot read private key {path}: {e}"))?;
+        let pem =
+            std::fs::read(path).map_err(|e| format!("Cannot read private key {path}: {e}"))?;
         jwt::config_from_pem(
             &pem, // Use private key PEM as both for now — we just need encoding
             Some(&pem),
@@ -127,8 +151,7 @@ fn issue(
             claims.aud.clone(),
         )?
     } else if let Some(hex_str) = secret_hex {
-        let secret_bytes = hex::decode(hex_str)
-            .map_err(|e| format!("Invalid hex secret: {e}"))?;
+        let secret_bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex secret: {e}"))?;
         jwt::config_from_secret(&secret_bytes, claims.iss.clone(), claims.aud.clone())
     } else {
         // Try env
@@ -172,14 +195,12 @@ fn validate(
     secret_hex: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = if let Some(path) = key_path {
-        let pem = std::fs::read(path)
-            .map_err(|e| format!("Cannot read public key {path}: {e}"))?;
+        let pem = std::fs::read(path).map_err(|e| format!("Cannot read public key {path}: {e}"))?;
         let audience = std::env::var("ATI_JWT_AUDIENCE").unwrap_or_else(|_| "ati-proxy".into());
         let issuer = std::env::var("ATI_JWT_ISSUER").ok();
         jwt::config_from_pem(&pem, None, jsonwebtoken::Algorithm::ES256, issuer, audience)?
     } else if let Some(hex_str) = secret_hex {
-        let secret_bytes = hex::decode(hex_str)
-            .map_err(|e| format!("Invalid hex secret: {e}"))?;
+        let secret_bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex secret: {e}"))?;
         let audience = std::env::var("ATI_JWT_AUDIENCE").unwrap_or_else(|_| "ati-proxy".into());
         let issuer = std::env::var("ATI_JWT_ISSUER").ok();
         jwt::config_from_secret(&secret_bytes, issuer, audience)
@@ -190,7 +211,10 @@ fn validate(
 
     match jwt::validate(token, &config) {
         Ok(claims) => {
-            eprintln!("VALID — sub={} scope=\"{}\" exp={}", claims.sub, claims.scope, claims.exp);
+            eprintln!(
+                "VALID — sub={} scope=\"{}\" exp={}",
+                claims.sub, claims.scope, claims.exp
+            );
             Ok(())
         }
         Err(e) => {

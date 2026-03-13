@@ -3,7 +3,6 @@
 /// When ATI_PROXY_URL is set, `ati run <tool>` sends tool_name + args
 /// to the proxy. Authentication is via JWT in the Authorization header
 /// (ATI_SESSION_TOKEN env var).
-
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -59,7 +58,11 @@ pub struct ProxyHelpResponse {
 const PROXY_TIMEOUT_SECS: u64 = 120;
 
 /// Build an HTTP request builder with JWT Bearer auth from ATI_SESSION_TOKEN.
-fn build_proxy_request(client: &Client, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+fn build_proxy_request(
+    client: &Client,
+    method: reqwest::Method,
+    url: &str,
+) -> reqwest::RequestBuilder {
     let mut req = client.request(method, url);
     if let Ok(token) = std::env::var("ATI_SESSION_TOKEN") {
         if !token.is_empty() {

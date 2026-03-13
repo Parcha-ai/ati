@@ -1,6 +1,6 @@
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, AeadCore, Nonce,
+    AeadCore, Aes256Gcm, Nonce,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -64,7 +64,10 @@ impl Keyring {
     }
 
     /// Load from an already-known session key (for testing or orchestrator use).
-    pub fn load_with_key(keyring_path: &Path, session_key: &[u8; 32]) -> Result<Self, KeyringError> {
+    pub fn load_with_key(
+        keyring_path: &Path,
+        session_key: &[u8; 32],
+    ) -> Result<Self, KeyringError> {
         let encrypted = std::fs::read(keyring_path)?;
         let decrypted = decrypt_keyring(session_key, &encrypted)?;
 
@@ -119,14 +122,12 @@ impl Keyring {
     pub fn load_local(keyring_path: &Path, ati_dir: &Path) -> Result<Self, KeyringError> {
         let persistent_key_path = ati_dir.join(".keyring-key");
 
-        let contents = std::fs::read_to_string(&persistent_key_path)
-            .map_err(|e| KeyringError::Io(e))?;
+        let contents =
+            std::fs::read_to_string(&persistent_key_path).map_err(|e| KeyringError::Io(e))?;
 
-        let decoded = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            contents.trim(),
-        )
-        .map_err(|_| KeyringError::DecryptionFailed)?;
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, contents.trim())
+                .map_err(|_| KeyringError::DecryptionFailed)?;
 
         if decoded.len() != 32 {
             return Err(KeyringError::DecryptionFailed);
@@ -221,8 +222,8 @@ fn decrypt_keyring(session_key: &[u8; 32], encrypted: &[u8]) -> Result<Vec<u8>, 
     let (nonce_bytes, ciphertext) = encrypted.split_at(NONCE_SIZE);
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    let cipher = Aes256Gcm::new_from_slice(session_key)
-        .map_err(|_| KeyringError::DecryptionFailed)?;
+    let cipher =
+        Aes256Gcm::new_from_slice(session_key).map_err(|_| KeyringError::DecryptionFailed)?;
 
     cipher
         .decrypt(nonce, ciphertext)
@@ -232,8 +233,8 @@ fn decrypt_keyring(session_key: &[u8; 32], encrypted: &[u8]) -> Result<Vec<u8>, 
 /// Encrypt a keyring (for keygen tooling / orchestrator).
 /// Returns the encrypted blob: [12-byte nonce][ciphertext+tag]
 pub fn encrypt_keyring(session_key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, KeyringError> {
-    let cipher = Aes256Gcm::new_from_slice(session_key)
-        .map_err(|_| KeyringError::DecryptionFailed)?;
+    let cipher =
+        Aes256Gcm::new_from_slice(session_key).map_err(|_| KeyringError::DecryptionFailed)?;
 
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 

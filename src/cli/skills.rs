@@ -35,10 +35,7 @@ fn load_scopes_from_env() -> ScopeConfig {
 }
 
 /// Execute: ati skill <subcommand>
-pub async fn execute(
-    cli: &Cli,
-    subcmd: &SkillCommands,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(cli: &Cli, subcmd: &SkillCommands) -> Result<(), Box<dyn std::error::Error>> {
     // Check for proxy mode on read-only commands
     if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
         match subcmd {
@@ -60,7 +57,12 @@ pub async fn execute(
             category,
             provider,
             tool,
-        } => list_skills(cli, category.as_deref(), provider.as_deref(), tool.as_deref()),
+        } => list_skills(
+            cli,
+            category.as_deref(),
+            provider.as_deref(),
+            tool.as_deref(),
+        ),
         SkillCommands::Show { name, meta, refs } => show_skill(cli, name, *meta, *refs),
         SkillCommands::Search { query } => search_skills(cli, query),
         SkillCommands::Info { name } => info_skill(cli, name),
@@ -69,8 +71,13 @@ pub async fn execute(
             from_git,
             name,
             all,
-        } => install_skill(cli, source, from_git.as_deref(), name.as_deref(), *all).await,
-        SkillCommands::Read { name, tool, with_refs } => read_skill(cli, name.as_deref(), tool.as_deref(), *with_refs),
+            local,
+        } => install_skill(cli, source, from_git.as_deref(), name.as_deref(), *all, *local).await,
+        SkillCommands::Read {
+            name,
+            tool,
+            with_refs,
+        } => read_skill(cli, name.as_deref(), tool.as_deref(), *with_refs),
         SkillCommands::Remove { name } => remove_skill(cli, name),
         SkillCommands::Init {
             name,
@@ -79,6 +86,9 @@ pub async fn execute(
         } => init_skill(cli, name, tools, provider.as_deref()),
         SkillCommands::Validate { name, check_tools } => validate_skill(cli, name, *check_tools),
         SkillCommands::Resolve { scopes } => resolve_skills(cli, scopes.as_deref()),
+        SkillCommands::Verify { name } => verify_skill(name),
+        SkillCommands::Diff { source } => diff_skill(source).await,
+        SkillCommands::Update { name, force } => update_skill(name, *force).await,
     }
 }
 
@@ -137,10 +147,7 @@ async fn execute_via_proxy(
 
             let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
             if *meta {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&resp)?
-                );
+                println!("{}", serde_json::to_string_pretty(&resp)?);
             } else if let Some(content) = resp.get("content").and_then(|c| c.as_str()) {
                 println!("{content}");
                 if *refs {
@@ -169,7 +176,11 @@ async fn execute_via_proxy(
             let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
-        SkillCommands::Read { name, tool, with_refs } => {
+        SkillCommands::Read {
+            name,
+            tool,
+            with_refs,
+        } => {
             // Read is like show but for agent consumption — delegate to show endpoint
             if let Some(tool_name) = tool {
                 // Get all skills for this tool, then fetch each one's content
@@ -182,7 +193,8 @@ async fn execute_via_proxy(
                             if *with_refs {
                                 detail_url.push_str("?refs=true");
                             }
-                            let detail: serde_json::Value = client.get(&detail_url).send().await?.json().await?;
+                            let detail: serde_json::Value =
+                                client.get(&detail_url).send().await?.json().await?;
                             if let Some(content) = detail.get("content").and_then(|c| c.as_str()) {
                                 println!("{content}");
                             }
@@ -210,7 +222,8 @@ async fn execute_via_proxy(
                 serde_json::json!({"scopes": ["*"]})
             };
             let url = format!("{base}/skills/resolve");
-            let resp: serde_json::Value = client.post(&url).json(&body).send().await?.json().await?;
+            let resp: serde_json::Value =
+                client.post(&url).json(&body).send().await?.json().await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         _ => unreachable!("Non-proxy commands should not reach here"),
@@ -228,7 +241,10 @@ fn print_proxy_response(cli: &Cli, resp: &serde_json::Value) {
             if let Some(arr) = resp.as_array() {
                 for item in arr {
                     let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                    let desc = item.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                    let desc = item
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
                     let version = item.get("version").and_then(|v| v.as_str()).unwrap_or("");
                     if version.is_empty() {
                         println!("{name:30} {desc}");
@@ -326,9 +342,9 @@ fn show_skill(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = load_registry()?;
 
-    let skill = registry
-        .get_skill(name)
-        .ok_or_else(|| format!("Skill '{name}' not found. Run 'ati skill list' to see available skills."))?;
+    let skill = registry.get_skill(name).ok_or_else(|| {
+        format!("Skill '{name}' not found. Run 'ati skill list' to see available skills.")
+    })?;
 
     if meta_only {
         match cli.output {
@@ -511,7 +527,13 @@ pub fn install_skill_from_url(
     let tmp_dir = std::env::temp_dir().join(format!("ati-skill-install-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     let status = std::process::Command::new("git")
-        .args(["clone", "--depth", "1", clone_url, tmp_dir.to_str().unwrap()])
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            clone_url,
+            tmp_dir.to_str().unwrap(),
+        ])
         .status()?;
     if !status.success() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -543,10 +565,7 @@ pub fn install_skill_from_url(
     copy_dir_recursive(&source, &dest)?;
 
     // Install bundled provider.toml if present (sync fallback for non-async callers)
-    let manifests_dir = skills_dir
-        .parent()
-        .unwrap_or(skills_dir)
-        .join("manifests");
+    let manifests_dir = skills_dir.parent().unwrap_or(skills_dir).join("manifests");
     install_bundled_provider(&dest, &manifests_dir)?;
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -583,13 +602,20 @@ async fn install_from_git(
     dest_base: &PathBuf,
     name_override: Option<&str>,
     all: bool,
+    local: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (clone_url, subdir) = parse_git_url_fragment(git_url);
 
     let tmp_dir = std::env::temp_dir().join(format!("ati-skill-install-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     let status = std::process::Command::new("git")
-        .args(["clone", "--depth", "1", clone_url, tmp_dir.to_str().unwrap()])
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            clone_url,
+            tmp_dir.to_str().unwrap(),
+        ])
         .status()?;
     if !status.success() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -607,9 +633,82 @@ async fn install_from_git(
         tmp_dir.clone()
     };
 
-    let result = install_from_dir(&source, dest_base, name_override, all).await;
+    let result = install_from_dir(&source, dest_base, name_override, all, local).await;
     let _ = std::fs::remove_dir_all(&tmp_dir);
     result
+}
+
+/// Clone a git repo with optional SHA checkout and install skill(s) from it.
+async fn install_from_git_with_sha(
+    git_url: &str,
+    pinned_sha: Option<&str>,
+    dest_base: &PathBuf,
+    name_override: Option<&str>,
+    all: bool,
+    local: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (clone_url, subdir) = parse_git_url_fragment(git_url);
+
+    let tmp_dir = std::env::temp_dir().join(format!("ati-skill-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    // If we have a pinned SHA, we need a full clone (not shallow)
+    let mut clone_args = vec!["clone"];
+    if pinned_sha.is_none() {
+        clone_args.extend(["--depth", "1"]);
+    }
+    clone_args.push(clone_url);
+    clone_args.push(tmp_dir.to_str().unwrap());
+
+    let status = std::process::Command::new("git")
+        .args(&clone_args)
+        .status()?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(format!("Failed to clone '{clone_url}'").into());
+    }
+
+    // Checkout pinned SHA if provided
+    if let Some(sha) = pinned_sha {
+        let status = std::process::Command::new("git")
+            .args(["checkout", sha])
+            .current_dir(&tmp_dir)
+            .status()?;
+        if !status.success() {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(format!("Failed to checkout SHA '{sha}'").into());
+        }
+    }
+
+    let source = if let Some(sub) = subdir {
+        let sub_path = tmp_dir.join(sub);
+        if !sub_path.exists() {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(format!("Subdirectory '{sub}' not found in cloned repo").into());
+        }
+        sub_path
+    } else {
+        tmp_dir.clone()
+    };
+
+    let result = install_from_dir_with_integrity(
+        &source, dest_base, name_override, all, local,
+        Some(git_url), pinned_sha,
+    ).await;
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    result
+}
+
+/// Parse a source string with optional @SHA pinning.
+/// Only splits on @ if the suffix looks like a hex SHA (7+ hex chars).
+fn parse_source_with_sha(source: &str) -> (&str, Option<&str>) {
+    if let Some(at_pos) = source.rfind('@') {
+        let potential_sha = &source[at_pos + 1..];
+        if potential_sha.len() >= 7 && potential_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            return (&source[..at_pos], Some(potential_sha));
+        }
+    }
+    (source, None)
 }
 
 async fn install_skill(
@@ -618,27 +717,31 @@ async fn install_skill(
     from_git: Option<&str>,
     name_override: Option<&str>,
     all: bool,
+    local: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dest_base = skills_dir();
     std::fs::create_dir_all(&dest_base)?;
 
     // If --from-git is explicit, use it (backward compat)
     if let Some(git_url) = from_git {
-        return install_from_git(git_url, &dest_base, name_override, all).await;
+        return install_from_git(git_url, &dest_base, name_override, all, local).await;
     }
 
+    // Parse @SHA pinning from source
+    let (source_base, pinned_sha) = parse_source_with_sha(source);
+
     // Auto-detect git URLs
-    if is_git_url(source) {
-        return install_from_git(source, &dest_base, name_override, all).await;
+    if is_git_url(source_base) {
+        return install_from_git_with_sha(source_base, pinned_sha, &dest_base, name_override, all, local).await;
     }
 
     // Local path
-    let source_dir = PathBuf::from(source);
+    let source_dir = PathBuf::from(source_base);
     if !source_dir.exists() {
         return Err(format!("Source '{}' does not exist", source_dir.display()).into());
     }
 
-    install_from_dir(&source_dir, &dest_base, name_override, all).await?;
+    install_from_dir(&source_dir, &dest_base, name_override, all, local).await?;
     Ok(())
 }
 
@@ -647,11 +750,21 @@ async fn install_from_dir(
     dest_base: &PathBuf,
     name_override: Option<&str>,
     all: bool,
+    local: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let manifests_dir = dest_base
-        .parent()
-        .unwrap_or(dest_base)
-        .join("manifests");
+    install_from_dir_with_integrity(source, dest_base, name_override, all, local, None, None).await
+}
+
+async fn install_from_dir_with_integrity(
+    source: &PathBuf,
+    dest_base: &PathBuf,
+    name_override: Option<&str>,
+    all: bool,
+    local: bool,
+    source_url: Option<&str>,
+    pinned_sha: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifests_dir = dest_base.parent().unwrap_or(dest_base).join("manifests");
 
     if all {
         // Install all subdirectories that contain skill.toml or SKILL.md
@@ -659,8 +772,7 @@ async fn install_from_dir(
         for entry in std::fs::read_dir(source)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir()
-                && (path.join("skill.toml").exists() || path.join("SKILL.md").exists())
+            if path.is_dir() && (path.join("skill.toml").exists() || path.join("SKILL.md").exists())
             {
                 let skill_name = path
                     .file_name()
@@ -669,7 +781,8 @@ async fn install_from_dir(
                 validate_skill_name(skill_name)?;
                 let dest = dest_base.join(skill_name);
                 copy_dir_recursive(&path, &dest)?;
-                generate_manifest_from_skill(&dest, &manifests_dir).await;
+                write_integrity_info(&dest, source_url, pinned_sha)?;
+                generate_manifest_from_skill(&dest, &manifests_dir, local).await;
                 println!("Installed '{skill_name}'");
                 count += 1;
             }
@@ -696,7 +809,8 @@ async fn install_from_dir(
         let dest = dest_base.join(&skill_name);
         std::fs::create_dir_all(&dest)?;
         copy_dir_recursive(source, &dest)?;
-        generate_manifest_from_skill(&dest, &manifests_dir).await;
+        write_integrity_info(&dest, source_url, pinned_sha)?;
+        generate_manifest_from_skill(&dest, &manifests_dir, local).await;
         println!("Installed '{skill_name}' to {}", dest.display());
     }
 
@@ -723,11 +837,7 @@ fn init_skill(
     validate_skill_name(name)?;
     let skill_dir = skills_dir().join(name);
     if skill_dir.exists() {
-        return Err(format!(
-            "Skill '{name}' already exists at {}",
-            skill_dir.display()
-        )
-        .into());
+        return Err(format!("Skill '{name}' already exists at {}", skill_dir.display()).into());
     }
 
     std::fs::create_dir_all(&skill_dir)?;
@@ -754,7 +864,10 @@ fn init_skill(
 
     // Warn if name doesn't conform to Anthropic spec
     if !skill::is_anthropic_valid_name(name) {
-        eprintln!("Warning: name '{}' does not conform to Anthropic Agent Skills spec", name);
+        eprintln!(
+            "Warning: name '{}' does not conform to Anthropic Agent Skills spec",
+            name
+        );
         eprintln!("  (1-64 chars, lowercase + digits + hyphens, no consecutive hyphens)");
     }
 
@@ -778,7 +891,10 @@ fn validate_skill(
 
     // Anthropic naming validation (warning, not error)
     if !skill::is_anthropic_valid_name(&skill.name) {
-        println!("Warning: name '{}' does not conform to Anthropic Agent Skills spec", skill.name);
+        println!(
+            "Warning: name '{}' does not conform to Anthropic Agent Skills spec",
+            skill.name
+        );
         println!("  (1-64 chars, lowercase + digits + hyphens, no consecutive hyphens)");
     }
 
@@ -786,7 +902,11 @@ fn validate_skill(
     let skill_md = skill.dir.join("SKILL.md");
     if skill_md.exists() {
         let content = std::fs::read_to_string(&skill_md)?;
-        println!("SKILL.md: {} bytes, {} lines", content.len(), content.lines().count());
+        println!(
+            "SKILL.md: {} bytes, {} lines",
+            content.len(),
+            content.lines().count()
+        );
         if skill.has_frontmatter {
             println!("Frontmatter: present (Anthropic spec)");
         } else {
@@ -817,7 +937,10 @@ fn validate_skill(
             println!("No tool bindings defined.");
         }
     } else if !skill.tools.is_empty() {
-        println!("Tool bindings: {} (use --check-tools to validate)", skill.tools.len());
+        println!(
+            "Tool bindings: {} (use --check-tools to validate)",
+            skill.tools.len()
+        );
     }
 
     // Check dependencies
@@ -877,6 +1000,291 @@ fn resolve_skills(cli: &Cli, _scopes_path: Option<&str>) -> Result<(), Box<dyn s
 }
 
 // ---------------------------------------------------------------------------
+// Supply chain integrity
+// ---------------------------------------------------------------------------
+
+/// Write integrity information (content hash, source URL, pinned SHA) to skill.toml.
+fn write_integrity_info(
+    skill_dir: &std::path::Path,
+    source_url: Option<&str>,
+    pinned_sha: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let skill_md_path = skill_dir.join("SKILL.md");
+    if !skill_md_path.exists() {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&skill_md_path)?;
+    let hash = crate::core::skill::compute_content_hash(&content);
+
+    let toml_path = skill_dir.join("skill.toml");
+    let mut toml_content = if toml_path.exists() {
+        std::fs::read_to_string(&toml_path)?
+    } else {
+        String::new()
+    };
+
+    // Remove existing [ati.integrity] section if present
+    if let Some(start) = toml_content.find("[ati.integrity]") {
+        let end = toml_content[start + 1..]
+            .find("\n[")
+            .map(|pos| start + 1 + pos)
+            .unwrap_or(toml_content.len());
+        toml_content = format!("{}{}", &toml_content[..start], &toml_content[end..]);
+    }
+
+    // Append [ati.integrity] section
+    if !toml_content.is_empty() && !toml_content.ends_with('\n') {
+        toml_content.push('\n');
+    }
+    toml_content.push_str("\n[ati.integrity]\n");
+    toml_content.push_str(&format!("content_hash = \"{hash}\"\n"));
+    if let Some(url) = source_url {
+        toml_content.push_str(&format!("source_url = \"{url}\"\n"));
+    }
+    if let Some(sha) = pinned_sha {
+        toml_content.push_str(&format!("pinned_sha = \"{sha}\"\n"));
+    }
+
+    std::fs::write(&toml_path, toml_content)?;
+    Ok(())
+}
+
+/// Read integrity info from skill.toml's [ati.integrity] section.
+fn read_integrity_info(
+    skill_dir: &std::path::Path,
+) -> Result<(Option<String>, Option<String>, Option<String>), Box<dyn std::error::Error>> {
+    let toml_path = skill_dir.join("skill.toml");
+    if !toml_path.exists() {
+        return Ok((None, None, None));
+    }
+
+    let toml_content = std::fs::read_to_string(&toml_path)?;
+    let toml_val: toml::Value = toml::from_str(&toml_content)?;
+
+    let integrity = toml_val.get("ati").and_then(|a| a.get("integrity"));
+
+    let content_hash = integrity
+        .and_then(|i| i.get("content_hash"))
+        .and_then(|h| h.as_str())
+        .map(|s| s.to_string());
+    let source_url = integrity
+        .and_then(|i| i.get("source_url"))
+        .and_then(|h| h.as_str())
+        .map(|s| s.to_string());
+    let pinned_sha = integrity
+        .and_then(|i| i.get("pinned_sha"))
+        .and_then(|h| h.as_str())
+        .map(|s| s.to_string());
+
+    Ok((content_hash, source_url, pinned_sha))
+}
+
+fn verify_skill(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    validate_skill_name(name)?;
+    let skill_dir = skills_dir().join(name);
+    if !skill_dir.exists() {
+        return Err(format!("Skill '{}' is not installed", name).into());
+    }
+
+    let skill_md_path = skill_dir.join("SKILL.md");
+    if !skill_md_path.exists() {
+        return Err(format!("Skill '{}' has no SKILL.md", name).into());
+    }
+
+    let content = std::fs::read_to_string(&skill_md_path)?;
+    let current_hash = crate::core::skill::compute_content_hash(&content);
+
+    let (stored_hash, source_url, pinned_sha) = read_integrity_info(&skill_dir)?;
+
+    if let Some(ref url) = source_url {
+        println!("Source:  {url}");
+    }
+    if let Some(ref sha) = pinned_sha {
+        println!("Pinned:  {sha}");
+    }
+
+    match stored_hash {
+        Some(ref stored) if stored == &current_hash => {
+            println!(
+                "VERIFIED — '{}' integrity OK (SHA-256: {}...)",
+                name,
+                &current_hash[..16]
+            );
+            Ok(())
+        }
+        Some(ref stored) => {
+            eprintln!("WARNING — '{}' content has changed!", name);
+            eprintln!("  Stored:  {stored}");
+            eprintln!("  Current: {current_hash}");
+            Err(format!("Integrity check failed for '{}'", name).into())
+        }
+        None => {
+            eprintln!(
+                "No integrity hash stored for '{}'. Current SHA-256: {}",
+                name, current_hash
+            );
+            Ok(())
+        }
+    }
+}
+
+async fn diff_skill(source: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (source_base, pinned_sha) = parse_source_with_sha(source);
+
+    // Determine skill name from source
+    let (clone_url, subdir) = parse_git_url_fragment(source_base);
+    let skill_name = subdir
+        .or_else(|| {
+            clone_url
+                .rsplit('/')
+                .next()
+                .map(|s| s.trim_end_matches(".git"))
+        })
+        .ok_or("Cannot determine skill name from source")?;
+
+    let installed_md = skills_dir().join(skill_name).join("SKILL.md");
+    if !installed_md.exists() {
+        return Err(format!(
+            "Skill '{}' is not installed locally. Install it first.",
+            skill_name
+        )
+        .into());
+    }
+
+    // Clone source to temp dir
+    let tmp_dir = std::env::temp_dir().join(format!("ati-skill-diff-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mut clone_args = vec!["clone"];
+    if pinned_sha.is_none() {
+        clone_args.extend(["--depth", "1"]);
+    }
+    clone_args.push(clone_url);
+    clone_args.push(tmp_dir.to_str().unwrap());
+
+    let status = std::process::Command::new("git").args(&clone_args).status()?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(format!("Failed to clone '{clone_url}'").into());
+    }
+
+    if let Some(sha) = pinned_sha {
+        let status = std::process::Command::new("git")
+            .args(["checkout", sha])
+            .current_dir(&tmp_dir)
+            .status()?;
+        if !status.success() {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(format!("Failed to checkout SHA '{sha}'").into());
+        }
+    }
+
+    let source_md = if let Some(sub) = subdir {
+        tmp_dir.join(sub).join("SKILL.md")
+    } else {
+        tmp_dir.join("SKILL.md")
+    };
+
+    if !source_md.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err("Source does not contain SKILL.md".into());
+    }
+
+    let output = std::process::Command::new("diff")
+        .arg("-u")
+        .arg("--label")
+        .arg(format!("installed/{skill_name}/SKILL.md"))
+        .arg(&installed_md)
+        .arg("--label")
+        .arg(format!("source/{skill_name}/SKILL.md"))
+        .arg(&source_md)
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.is_empty() {
+                println!("No differences found.");
+            } else {
+                print!("{stdout}");
+            }
+        }
+        Err(_) => {
+            // diff not available, fall back to hash comparison
+            let installed_content = std::fs::read_to_string(&installed_md)?;
+            let source_content = std::fs::read_to_string(&source_md)?;
+            let installed_hash = crate::core::skill::compute_content_hash(&installed_content);
+            let source_hash = crate::core::skill::compute_content_hash(&source_content);
+
+            if installed_hash == source_hash {
+                println!("No differences (hashes match: {}).", &installed_hash[..16]);
+            } else {
+                println!("Files differ:");
+                println!("  Installed: {installed_hash}");
+                println!("  Source:    {source_hash}");
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    Ok(())
+}
+
+async fn update_skill(name: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    validate_skill_name(name)?;
+    let skill_dir = skills_dir().join(name);
+    if !skill_dir.exists() {
+        return Err(format!("Skill '{}' is not installed", name).into());
+    }
+
+    let (_, source_url, pinned_sha) = read_integrity_info(&skill_dir)?;
+
+    let source_url = source_url.ok_or_else(|| {
+        format!(
+            "Skill '{}' has no recorded source URL. Cannot update automatically.\n\
+             Re-install with: ati skill install <source>",
+            name
+        )
+    })?;
+
+    // Check current integrity before updating
+    let skill_md_path = skill_dir.join("SKILL.md");
+    if skill_md_path.exists() {
+        let content = std::fs::read_to_string(&skill_md_path)?;
+        let current_hash = crate::core::skill::compute_content_hash(&content);
+        let (stored_hash, _, _) = read_integrity_info(&skill_dir)?;
+
+        if let Some(ref stored) = stored_hash {
+            if stored != &current_hash && !force {
+                return Err(format!(
+                    "Skill '{}' has local modifications (hash mismatch).\n\
+                     Use --force to overwrite, or back up your changes first.\n\
+                     Stored:  {}\n\
+                     Current: {}",
+                    name, stored, current_hash
+                )
+                .into());
+            }
+        }
+    }
+
+    println!("Updating '{}' from {}", name, source_url);
+
+    // Re-install from source
+    let dest_base = skills_dir();
+    let sha_ref = pinned_sha.as_deref();
+
+    // Remove old installation
+    std::fs::remove_dir_all(&skill_dir)?;
+
+    install_from_git_with_sha(&source_url, sha_ref, &dest_base, Some(name), false, false).await?;
+
+    println!("Updated '{}'.", name);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -899,12 +1307,15 @@ fn validate_skill_name(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Generate a provider manifest from a skill's SKILL.md using Cerebras LLM.
-/// Falls back to bundled provider.toml if LLM is unavailable.
+/// Generate a provider manifest from a skill's SKILL.md using an LLM.
+/// Provider selection: --local flag or ATI_MANIFEST_PROVIDER=local uses ollama (zero network calls).
+/// Otherwise: ATI_MANIFEST_PROVIDER env preference, then CEREBRAS_API_KEY, then ANTHROPIC_API_KEY,
+/// then bundled provider.toml, then skip.
 /// Silently succeeds if no manifest can be generated (skill still installs fine).
 async fn generate_manifest_from_skill(
     skill_dir: &std::path::Path,
     manifests_dir: &std::path::Path,
+    use_local: bool,
 ) {
     // Read SKILL.md — if it doesn't exist, nothing to generate from
     let skill_md_path = skill_dir.join("SKILL.md");
@@ -914,16 +1325,16 @@ async fn generate_manifest_from_skill(
     };
 
     // Read skill.toml for provider hints (providers field)
-    let skill_toml_content = std::fs::read_to_string(skill_dir.join("skill.toml")).unwrap_or_default();
+    let skill_toml_content =
+        std::fs::read_to_string(skill_dir.join("skill.toml")).unwrap_or_default();
 
     // Extract provider name from skill.toml providers = ["fal"] or from skill name
-    let provider_name = extract_provider_name(&skill_toml_content)
-        .or_else(|| {
-            skill_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-        });
+    let provider_name = extract_provider_name(&skill_toml_content).or_else(|| {
+        skill_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+    });
 
     let provider_name = match provider_name {
         Some(name) => name,
@@ -938,37 +1349,88 @@ async fn generate_manifest_from_skill(
         return;
     }
 
-    // Try LLM generation first
-    let api_key = std::env::var("CEREBRAS_API_KEY")
-        .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
-        .ok();
+    let env_provider = std::env::var("ATI_MANIFEST_PROVIDER")
+        .ok()
+        .map(|s| s.to_lowercase());
 
-    if let Some(key) = api_key {
-        println!("Generating manifest for '{provider_name}' from SKILL.md...");
-        match call_cerebras_for_manifest(&key, &provider_name, &skill_md, &skill_toml_content).await {
+    // Determine which LLM backend to use
+    let want_local = use_local || env_provider.as_deref() == Some("local");
+
+    if want_local {
+        // --local is a HARD constraint: use ollama only, error if unavailable
+        println!("Generating manifest for '{provider_name}' from SKILL.md (local/ollama)...");
+        match call_ollama_for_manifest(&skill_md, &provider_name, &skill_toml_content) {
             Ok(manifest_toml) => {
-                // Validate the generated TOML parses
-                if manifest_toml.contains("[provider]") && manifest_toml.contains("name =") {
-                    if let Err(e) = std::fs::write(&dest, &manifest_toml) {
-                        eprintln!("Warning: Failed to write generated manifest: {e}");
-                    } else {
-                        println!("Generated manifest for '{provider_name}' at {}", dest.display());
-                        // Print key hint
-                        print_auth_key_hint(&manifest_toml);
-                        return;
-                    }
-                } else {
-                    eprintln!("Warning: LLM output didn't look like a valid manifest, trying fallback.");
+                if try_write_manifest(&dest, &manifest_toml, &provider_name) {
+                    return;
                 }
             }
             Err(e) => {
-                eprintln!("Warning: LLM manifest generation failed: {e}");
+                eprintln!("Error: Local manifest generation failed: {e}");
+                eprintln!(
+                    "  Is ollama running? Check with: curl http://localhost:11434/v1/models"
+                );
+                // --local means NO fallback to network — only try bundled provider.toml
+            }
+        }
+    } else {
+        // Network-based LLM generation with fallback chain
+        let api_key = match env_provider.as_deref() {
+            Some("cerebras") => std::env::var("CEREBRAS_API_KEY").ok(),
+            Some("anthropic") => std::env::var("ANTHROPIC_API_KEY").ok(),
+            _ => std::env::var("CEREBRAS_API_KEY")
+                .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+                .ok(),
+        };
+
+        if let Some(key) = api_key {
+            println!("Generating manifest for '{provider_name}' from SKILL.md...");
+            match call_cerebras_for_manifest(
+                &key,
+                &provider_name,
+                &skill_md,
+                &skill_toml_content,
+            )
+            .await
+            {
+                Ok(manifest_toml) => {
+                    if try_write_manifest(&dest, &manifest_toml, &provider_name) {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: LLM manifest generation failed: {e}");
+                }
             }
         }
     }
 
     // Fallback: try bundled provider.toml
     let _ = install_bundled_provider(skill_dir, manifests_dir);
+}
+
+/// Try to write a generated manifest TOML to disk.
+/// Returns true if written successfully, false otherwise.
+fn try_write_manifest(dest: &std::path::Path, manifest_toml: &str, provider_name: &str) -> bool {
+    if manifest_toml.contains("[provider]") && manifest_toml.contains("name =") {
+        match std::fs::write(dest, manifest_toml) {
+            Ok(()) => {
+                println!(
+                    "Generated manifest for '{provider_name}' at {}",
+                    dest.display()
+                );
+                print_auth_key_hint(manifest_toml);
+                true
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to write generated manifest: {e}");
+                false
+            }
+        }
+    } else {
+        eprintln!("Warning: LLM output didn't look like a valid manifest, trying fallback.");
+        false
+    }
 }
 
 /// Extract the first provider name from skill.toml's providers = ["..."] field.
@@ -1000,7 +1462,9 @@ fn print_auth_key_hint(manifest_toml: &str) {
             if let Some(val) = trimmed.split('=').nth(1) {
                 let key_name = val.trim().trim_matches('"').trim_matches('\'');
                 if !key_name.is_empty() {
-                    println!("  Hint: run `ati key set {key_name} <your-key>` to configure credentials.");
+                    println!(
+                        "  Hint: run `ati key set {key_name} <your-key>` to configure credentials."
+                    );
                 }
             }
             break;
@@ -1152,6 +1616,76 @@ async fn call_cerebras_for_manifest(
     Ok(cleaned)
 }
 
+/// Call a local ollama instance to extract a manifest from SKILL.md content.
+/// Uses the OpenAI-compatible `/v1/chat/completions` endpoint.
+/// Respects `OLLAMA_HOST` (default: http://localhost:11434) and `ATI_OLLAMA_MODEL` (default: llama3.1).
+fn call_ollama_for_manifest(
+    skill_md: &str,
+    provider_name: &str,
+    skill_toml: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let host = std::env::var("OLLAMA_HOST")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let model =
+        std::env::var("ATI_OLLAMA_MODEL").unwrap_or_else(|_| "llama3.1".to_string());
+    let url = format!("{}/v1/chat/completions", host.trim_end_matches('/'));
+
+    let user_content = format!(
+        "Provider name: {provider_name}\n\n## skill.toml\n```\n{skill_toml}\n```\n\n## SKILL.md\n```\n{skill_md}\n```\n\nGenerate the ATI manifest TOML for this provider. Output ONLY the TOML, nothing else."
+    );
+
+    let request_body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": MANIFEST_EXTRACTION_PROMPT},
+            {"role": "user", "content": user_content}
+        ],
+        "temperature": 0.1
+    });
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+
+    let response = client.post(&url).json(&request_body).send().map_err(|e| {
+        format!("Cannot connect to ollama at {host}: {e}")
+    })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(format!("Ollama error ({status}): {body}").into());
+    }
+
+    let body: serde_json::Value = response.json()?;
+    let raw = body
+        .pointer("/choices/0/message/content")
+        .and_then(|c| c.as_str())
+        .ok_or("No content in ollama response")?
+        .to_string();
+
+    // Strip markdown fences if the LLM wrapped the output
+    let cleaned = if raw.contains("```toml") {
+        raw.split("```toml")
+            .nth(1)
+            .and_then(|s| s.split("```").next())
+            .unwrap_or(&raw)
+            .trim()
+            .to_string()
+    } else if raw.contains("```") {
+        raw.split("```")
+            .nth(1)
+            .and_then(|s| s.split("```").next())
+            .unwrap_or(&raw)
+            .trim()
+            .to_string()
+    } else {
+        raw.trim().to_string()
+    };
+
+    Ok(cleaned)
+}
+
 /// Install a bundled provider.toml from a skill directory into the manifests directory.
 /// If the provider already exists, skip with a message.
 /// Used as a sync fallback when LLM generation is not available.
@@ -1188,14 +1722,15 @@ fn install_bundled_provider(
     let dest = manifests_dir.join(format!("{provider_name}.toml"));
 
     if dest.exists() {
-        println!(
-            "Provider '{provider_name}' already installed, skipping bundled manifest."
-        );
+        println!("Provider '{provider_name}' already installed, skipping bundled manifest.");
         return Ok(());
     }
 
     std::fs::copy(&provider_toml, &dest)?;
-    println!("Installed bundled provider '{provider_name}' to {}", dest.display());
+    println!(
+        "Installed bundled provider '{provider_name}' to {}",
+        dest.display()
+    );
     print_auth_key_hint(&content);
 
     Ok(())
@@ -1317,5 +1852,46 @@ mod tests {
         let (url, sub) = parse_git_url_fragment("https://github.com/org/repo#");
         assert_eq!(url, "https://github.com/org/repo");
         assert_eq!(sub, None);
+    }
+
+    #[test]
+    fn test_parse_source_with_sha_full_sha() {
+        let (base, sha) = parse_source_with_sha(
+            "https://github.com/org/repo#skill@abc1234def5678901234567890abcdef12345678",
+        );
+        assert_eq!(base, "https://github.com/org/repo#skill");
+        assert_eq!(
+            sha,
+            Some("abc1234def5678901234567890abcdef12345678")
+        );
+    }
+
+    #[test]
+    fn test_parse_source_with_sha_short_sha() {
+        let (base, sha) = parse_source_with_sha("https://github.com/org/repo@abc1234");
+        assert_eq!(base, "https://github.com/org/repo");
+        assert_eq!(sha, Some("abc1234"));
+    }
+
+    #[test]
+    fn test_parse_source_with_sha_no_sha() {
+        let (base, sha) = parse_source_with_sha("https://github.com/org/repo#subdir");
+        assert_eq!(base, "https://github.com/org/repo#subdir");
+        assert_eq!(sha, None);
+    }
+
+    #[test]
+    fn test_parse_source_with_sha_at_in_email() {
+        // @ in email-style URLs should NOT be treated as SHA
+        let (base, sha) = parse_source_with_sha("git@github.com:org/repo.git");
+        assert_eq!(base, "git@github.com:org/repo.git");
+        assert_eq!(sha, None); // "github.com:org/repo.git" is not hex
+    }
+
+    #[test]
+    fn test_parse_source_with_sha_too_short() {
+        let (base, sha) = parse_source_with_sha("https://github.com/repo@abc");
+        assert_eq!(base, "https://github.com/repo@abc");
+        assert_eq!(sha, None); // only 3 chars, need 7+
     }
 }

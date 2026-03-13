@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+use crate::core::auth_generator::{self, AuthCache, GenContext};
 use crate::core::keyring::Keyring;
 use crate::core::manifest::{AuthType, HttpMethod, Provider, Tool};
 
@@ -75,7 +76,8 @@ pub fn validate_url_not_private(url: &str) -> Result<(), HttpError> {
             || ip.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
             || ip.is_link_local()     // 169.254.0.0/16
             || ip.is_unspecified()    // 0.0.0.0
-            || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127)  // CGNAT 100.64.0.0/10
+            || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127)
+        // CGNAT 100.64.0.0/10
         {
             is_private = true;
         }
@@ -198,10 +200,7 @@ struct ClassifiedParams {
 
 /// Classify parameters by their `x-ati-param-location` metadata in the input schema.
 /// If no location metadata exists (legacy TOML tools), returns None for legacy fallback.
-fn classify_params(
-    tool: &Tool,
-    args: &HashMap<String, Value>,
-) -> Option<ClassifiedParams> {
+fn classify_params(tool: &Tool, args: &HashMap<String, Value>) -> Option<ClassifiedParams> {
     let schema = tool.input_schema.as_ref()?;
     let props = schema.get("properties")?.as_object()?;
 
@@ -260,7 +259,9 @@ fn classify_params(
                 }
             }
             "header" => {
-                classified.header.insert(key.clone(), value_to_string(value));
+                classified
+                    .header
+                    .insert(key.clone(), value_to_string(value));
             }
             _ => {
                 classified.body.insert(key.clone(), value.clone());
@@ -369,6 +370,18 @@ pub async fn execute_tool(
     args: &HashMap<String, Value>,
     keyring: &Keyring,
 ) -> Result<Value, HttpError> {
+    execute_tool_with_gen(provider, tool, args, keyring, None, None).await
+}
+
+/// Execute an HTTP tool call, optionally using a dynamic auth generator.
+pub async fn execute_tool_with_gen(
+    provider: &Provider,
+    tool: &Tool,
+    args: &HashMap<String, Value>,
+    keyring: &Keyring,
+    gen_ctx: Option<&GenContext>,
+    auth_cache: Option<&AuthCache>,
+) -> Result<Value, HttpError> {
     // SSRF protection: validate base_url is not targeting private networks
     validate_url_not_private(&provider.base_url)?;
 
@@ -446,7 +459,11 @@ pub async fn execute_tool(
         req
     } else {
         // Legacy mode: no x-ati-param-location metadata
-        let url = format!("{}{}", provider.base_url.trim_end_matches('/'), &tool.endpoint);
+        let url = format!(
+            "{}{}",
+            provider.base_url.trim_end_matches('/'),
+            &tool.endpoint
+        );
 
         match tool.method {
             HttpMethod::Get => {
@@ -462,8 +479,8 @@ pub async fn execute_tool(
         }
     };
 
-    // Inject authentication
-    request = inject_auth(request, provider, keyring).await?;
+    // Inject authentication (generator takes priority over static keyring)
+    request = inject_auth(request, provider, keyring, gen_ctx, auth_cache).await?;
 
     // Inject extra headers from provider config
     for (header_name, header_value) in &provider.extra_headers {
@@ -490,11 +507,51 @@ pub async fn execute_tool(
 }
 
 /// Inject authentication headers/params based on provider auth_type.
+///
+/// If the provider has an `auth_generator`, the generator is run first to produce
+/// dynamic credentials. Otherwise, static keyring credentials are used.
 async fn inject_auth(
     request: reqwest::RequestBuilder,
     provider: &Provider,
     keyring: &Keyring,
+    gen_ctx: Option<&GenContext>,
+    auth_cache: Option<&AuthCache>,
 ) -> Result<reqwest::RequestBuilder, HttpError> {
+    // Dynamic auth generator takes priority
+    if let Some(gen) = &provider.auth_generator {
+        let default_ctx = GenContext::default();
+        let ctx = gen_ctx.unwrap_or(&default_ctx);
+        let default_cache = AuthCache::new();
+        let cache = auth_cache.unwrap_or(&default_cache);
+
+        let cred = auth_generator::generate(provider, gen, ctx, keyring, cache)
+            .await
+            .map_err(|e| HttpError::MissingKey(format!("auth_generator: {e}")))?;
+
+        // Inject primary credential based on auth_type
+        let mut req = match provider.auth_type {
+            AuthType::Bearer => request.bearer_auth(&cred.value),
+            AuthType::Header => {
+                let name = provider.auth_header_name.as_deref().unwrap_or("X-Api-Key");
+                let val = match &provider.auth_value_prefix {
+                    Some(pfx) => format!("{pfx}{}", cred.value),
+                    None => cred.value.clone(),
+                };
+                request.header(name, val)
+            }
+            AuthType::Query => {
+                let name = provider.auth_query_name.as_deref().unwrap_or("api_key");
+                request.query(&[(name, &cred.value)])
+            }
+            _ => request,
+        };
+        // Inject extra headers from JSON inject targets
+        for (name, value) in &cred.extra_headers {
+            req = req.header(name.as_str(), value.as_str());
+        }
+        return Ok(req);
+    }
+
     match provider.auth_type {
         AuthType::None => Ok(request),
         AuthType::Bearer => {
@@ -515,10 +572,7 @@ async fn inject_auth(
             let key_value = keyring
                 .get(key_name)
                 .ok_or_else(|| HttpError::MissingKey(key_name.into()))?;
-            let header_name = provider
-                .auth_header_name
-                .as_deref()
-                .unwrap_or("X-Api-Key");
+            let header_name = provider.auth_header_name.as_deref().unwrap_or("X-Api-Key");
             let final_value = match &provider.auth_value_prefix {
                 Some(prefix) => format!("{}{}", prefix, key_value),
                 None => key_value.to_string(),
@@ -533,10 +587,7 @@ async fn inject_auth(
             let key_value = keyring
                 .get(key_name)
                 .ok_or_else(|| HttpError::MissingKey(key_name.into()))?;
-            let query_name = provider
-                .auth_query_name
-                .as_deref()
-                .unwrap_or("api_key");
+            let query_name = provider.auth_query_name.as_deref().unwrap_or("api_key");
             Ok(request.query(&[(query_name, key_value)]))
         }
         AuthType::Basic => {
@@ -557,10 +608,7 @@ async fn inject_auth(
 }
 
 /// Fetch (or return cached) OAuth2 access token via client_credentials grant.
-async fn get_oauth2_token(
-    provider: &Provider,
-    keyring: &Keyring,
-) -> Result<String, HttpError> {
+async fn get_oauth2_token(provider: &Provider, keyring: &Keyring) -> Result<String, HttpError> {
     let cache_key = provider.name.clone();
 
     // Check cache
@@ -602,9 +650,7 @@ async fn get_oauth2_token(
         return Err(HttpError::InsecureTokenUrl(token_url));
     }
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(15)).build()?;
 
     // Two OAuth2 client_credentials modes:
     // 1. Form body: client_id + client_secret in form data (Amadeus)
@@ -757,8 +803,7 @@ mod tests {
         let mut args = HashMap::new();
         args.insert("owner".to_string(), "acme".to_string());
         args.insert("repo".to_string(), "widgets".to_string());
-        let result =
-            substitute_path_params("/repos/{owner}/{repo}/issues", &args).unwrap();
+        let result = substitute_path_params("/repos/{owner}/{repo}/issues", &args).unwrap();
         assert_eq!(result, "/repos/acme/widgets/issues");
     }
 

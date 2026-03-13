@@ -19,7 +19,11 @@ fn load_scopes_from_env() -> ScopeConfig {
 }
 
 /// Discover and register tools from all MCP providers.
-pub(crate) async fn discover_mcp_tools(registry: &mut ManifestRegistry, keyring: &Keyring, verbose: bool) {
+pub(crate) async fn discover_mcp_tools(
+    registry: &mut ManifestRegistry,
+    keyring: &Keyring,
+    verbose: bool,
+) {
     let mcp_providers: Vec<_> = registry
         .list_mcp_providers()
         .into_iter()
@@ -32,18 +36,26 @@ pub(crate) async fn discover_mcp_tools(registry: &mut ManifestRegistry, keyring:
                 match client.list_tools().await {
                     Ok(tools) => {
                         if verbose {
-                            eprintln!("Discovered {} tools from MCP provider '{name}'", tools.len());
+                            eprintln!(
+                                "Discovered {} tools from MCP provider '{name}'",
+                                tools.len()
+                            );
                         }
-                        let tools = tools.into_iter().map(|t| crate::core::manifest::McpToolDef {
-                            name: t.name,
-                            description: t.description,
-                            input_schema: t.input_schema,
-                        }).collect();
+                        let tools = tools
+                            .into_iter()
+                            .map(|t| crate::core::manifest::McpToolDef {
+                                name: t.name,
+                                description: t.description,
+                                input_schema: t.input_schema,
+                            })
+                            .collect();
                         registry.register_mcp_tools(name, tools);
                     }
                     Err(e) => {
                         if verbose {
-                            eprintln!("Warning: failed to list tools from MCP provider '{name}': {e}");
+                            eprintln!(
+                                "Warning: failed to list tools from MCP provider '{name}': {e}"
+                            );
                         }
                     }
                 }
@@ -59,10 +71,7 @@ pub(crate) async fn discover_mcp_tools(registry: &mut ManifestRegistry, keyring:
 }
 
 /// Execute: ati tool <subcommand>
-pub async fn execute(
-    cli: &Cli,
-    subcmd: &ToolCommands,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(cli: &Cli, subcmd: &ToolCommands) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = common::ati_dir();
     let manifests_dir = ati_dir.join("manifests");
     let mut registry = ManifestRegistry::load(&manifests_dir)?;
@@ -121,15 +130,16 @@ fn list_tools(
             println!("{}", serde_json::to_string_pretty(&json_tools)?);
         }
         OutputFormat::Table | OutputFormat::Text => {
-            let value = serde_json::json!(
-                tools.iter().map(|(p, t)| {
+            let value = serde_json::json!(tools
+                .iter()
+                .map(|(p, t)| {
                     serde_json::json!({
                         "PROVIDER": p.name,
                         "TOOL": t.name,
                         "DESCRIPTION": t.description,
                     })
-                }).collect::<Vec<_>>()
-            );
+                })
+                .collect::<Vec<_>>());
             println!("{}", output::table::format(&value));
         }
     }
@@ -167,7 +177,10 @@ fn tool_info(
             if provider.is_mcp() {
                 println!("Transport:   MCP ({})", provider.mcp_transport_type());
             } else {
-                println!("Endpoint:    {} {}{}", tool.method, provider.base_url, tool.endpoint);
+                println!(
+                    "Endpoint:    {} {}{}",
+                    tool.method, provider.base_url, tool.endpoint
+                );
             }
             println!("Description: {}", tool.description);
             if let Some(scope) = &tool.scope {
@@ -229,7 +242,11 @@ fn search_tools(
     let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
 
     // Score each tool by how well it matches the query
-    let mut scored: Vec<(f64, &crate::core::manifest::Provider, &crate::core::manifest::Tool)> = tools
+    let mut scored: Vec<(
+        f64,
+        &crate::core::manifest::Provider,
+        &crate::core::manifest::Tool,
+    )> = tools
         .iter()
         .filter_map(|(p, t)| {
             let score = score_tool_match(p, t, &query_terms);
@@ -270,15 +287,16 @@ fn search_tools(
             println!("{}", serde_json::to_string_pretty(&json_tools)?);
         }
         OutputFormat::Table | OutputFormat::Text => {
-            let value = serde_json::json!(
-                scored.iter().map(|(_score, p, t)| {
+            let value = serde_json::json!(scored
+                .iter()
+                .map(|(_score, p, t)| {
                     serde_json::json!({
                         "PROVIDER": p.name,
                         "TOOL": t.name,
                         "DESCRIPTION": t.description,
                     })
-                }).collect::<Vec<_>>()
-            );
+                })
+                .collect::<Vec<_>>());
             println!("{}", output::table::format(&value));
         }
     }
@@ -290,17 +308,14 @@ fn search_tools(
 /// Returns 0.0 for no match, higher scores for better matches.
 /// Common stop words to skip during fuzzy matching.
 const STOP_WORDS: &[&str] = &[
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "must",
-    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "they",
-    "how", "what", "when", "where", "which", "who", "whom", "why",
-    "to", "of", "in", "for", "on", "with", "at", "by", "from", "about",
-    "into", "through", "during", "before", "after", "above", "below",
-    "and", "but", "or", "nor", "not", "so", "if", "than", "that", "this",
-    "there", "here", "all", "each", "every", "both", "few", "more", "most",
-    "some", "any", "no", "only", "very", "just", "also", "then",
-    "use", "using", "want", "like", "way",
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+    "need", "must", "i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "they", "how",
+    "what", "when", "where", "which", "who", "whom", "why", "to", "of", "in", "for", "on", "with",
+    "at", "by", "from", "about", "into", "through", "during", "before", "after", "above", "below",
+    "and", "but", "or", "nor", "not", "so", "if", "than", "that", "this", "there", "here", "all",
+    "each", "every", "both", "few", "more", "most", "some", "any", "no", "only", "very", "just",
+    "also", "then", "use", "using", "want", "like", "way",
 ];
 
 /// Jaro-Winkler threshold for considering two words a fuzzy match.
@@ -353,11 +368,7 @@ pub(crate) fn score_tool_match(
     let name_lower = tool.name.to_lowercase();
     let desc_lower = tool.description.to_lowercase();
     let provider_lower = provider.name.to_lowercase();
-    let category_lower = provider
-        .category
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase();
+    let category_lower = provider.category.as_deref().unwrap_or("").to_lowercase();
     let tags_lower: Vec<String> = tool.tags.iter().map(|t| t.to_lowercase()).collect();
 
     // Filter out stop words
@@ -422,4 +433,3 @@ pub(crate) fn score_tool_match(
     let match_ratio = matched_terms as f64 / content_terms.len() as f64;
     score * match_ratio
 }
-

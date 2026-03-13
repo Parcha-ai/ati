@@ -6,7 +6,6 @@
 /// `ati provider list` — list all configured providers
 /// `ati provider remove <name>` — remove a provider manifest
 /// `ati provider info <name>` — show provider details
-
 use super::common;
 use crate::cli::call::load_keyring;
 use crate::core::keyring::Keyring;
@@ -76,7 +75,13 @@ pub async fn execute(
                 Some(n) => n.clone(),
                 None => derive_provider_name(spec),
             };
-            import_openapi(spec, &resolved_name, auth_key.as_deref(), include_tags, *dry_run)
+            import_openapi(
+                spec,
+                &resolved_name,
+                auth_key.as_deref(),
+                include_tags,
+                *dry_run,
+            )
         }
         ProviderCommands::InspectOpenapi { spec, include_tags } => {
             inspect_openapi(spec, include_tags)
@@ -376,9 +381,7 @@ fn derive_provider_name(spec: &str) -> String {
             0 | 1 => host.to_string(),
             _ => {
                 let skip_prefixes = ["api", "www", "mcp", "rest"];
-                let skip_tlds = [
-                    "com", "org", "net", "io", "dev", "ai", "co", "gov", "edu",
-                ];
+                let skip_tlds = ["com", "org", "net", "io", "dev", "ai", "co", "gov", "edu"];
                 let meaningful: Vec<&str> = parts
                     .iter()
                     .enumerate()
@@ -652,10 +655,7 @@ fn list_providers(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 None => continue,
             };
 
-            let name = provider
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("?");
+            let name = provider.get("name").and_then(|n| n.as_str()).unwrap_or("?");
             let description = provider
                 .get("description")
                 .and_then(|d| d.as_str())
@@ -749,7 +749,10 @@ fn list_providers(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Skip if a permanent provider with same name already listed
-            if providers.iter().any(|p| p["name"].as_str() == Some(&cached.name)) {
+            if providers
+                .iter()
+                .any(|p| p["name"].as_str() == Some(&cached.name))
+            {
                 continue;
             }
 
@@ -786,10 +789,7 @@ fn list_providers(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.output {
         OutputFormat::Json => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&providers)?
-            );
+            println!("{}", serde_json::to_string_pretty(&providers)?);
         }
         OutputFormat::Table | OutputFormat::Text => {
             let table_data: Vec<serde_json::Value> = providers
@@ -843,7 +843,11 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
         .list_providers()
         .into_iter()
         .find(|p| p.name == name)
-        .ok_or_else(|| format!("Provider '{name}' not found. Run 'ati provider list' to see available providers."))?;
+        .ok_or_else(|| {
+            format!(
+                "Provider '{name}' not found. Run 'ati provider list' to see available providers."
+            )
+        })?;
 
     let auth_str = format!("{:?}", provider.auth_type).to_lowercase();
 
@@ -917,10 +921,7 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
                     "Skills:      {} declared ({} installed, {} not installed)",
                     skills_declared, skills_installed, not_installed
                 );
-                println!(
-                    "  Install:   ati provider install-skills {}",
-                    provider.name
-                );
+                println!("  Install:   ati provider install-skills {}", provider.name);
             }
         }
     }
@@ -994,9 +995,35 @@ async fn load_provider(
     ttl: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if mcp {
-        load_mcp_provider(cli, name, transport, url, command, args, env, auth, auth_key, auth_header, auth_query, save, ttl).await
+        load_mcp_provider(
+            cli,
+            name,
+            transport,
+            url,
+            command,
+            args,
+            env,
+            auth,
+            auth_key,
+            auth_header,
+            auth_query,
+            save,
+            ttl,
+        )
+        .await
     } else {
-        load_openapi_provider(cli, spec, name, auth, auth_key, auth_header, auth_query, save, ttl).await
+        load_openapi_provider(
+            cli,
+            spec,
+            name,
+            auth,
+            auth_key,
+            auth_header,
+            auth_query,
+            save,
+            ttl,
+        )
+        .await
     }
 }
 
@@ -1012,17 +1039,12 @@ async fn load_openapi_provider(
     save: bool,
     ttl: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let spec_path = spec.ok_or("OpenAPI mode requires a spec path or URL. Use --mcp for MCP providers.")?;
+    let spec_path =
+        spec.ok_or("OpenAPI mode requires a spec path or URL. Use --mcp for MCP providers.")?;
 
     // If --save, delegate to existing import_openapi
     if save {
-        return import_openapi(
-            spec_path,
-            name,
-            auth_key,
-            &[],
-            false,
-        );
+        return import_openapi(spec_path, name, auth_key, &[], false);
     }
 
     // Fetch/read the spec content
@@ -1068,8 +1090,12 @@ async fn load_openapi_provider(
         } else {
             None
         },
-        auth_header_name: auth_header_override.map(|s| s.to_string()).or_else(|| auth_extra.get("auth_header_name").cloned()),
-        auth_query_name: auth_query_override.map(|s| s.to_string()).or_else(|| auth_extra.get("auth_query_name").cloned()),
+        auth_header_name: auth_header_override
+            .map(|s| s.to_string())
+            .or_else(|| auth_extra.get("auth_header_name").cloned()),
+        auth_query_name: auth_query_override
+            .map(|s| s.to_string())
+            .or_else(|| auth_extra.get("auth_query_name").cloned()),
         spec_content: Some(content),
         mcp_transport: None,
         mcp_url: None,
@@ -1202,17 +1228,7 @@ async fn load_mcp_provider(
     if save {
         let auth_str = auth.unwrap_or("none");
         return add_mcp(
-            name,
-            transport,
-            url,
-            command,
-            args,
-            env,
-            auth_str,
-            auth_key,
-            None,
-            None,
-            None,
+            name, transport, url, command, args, env, auth_str, auth_key, None, None, None,
         );
     }
 
@@ -1354,7 +1370,11 @@ async fn load_mcp_provider(
                 Ok(tool_names) => {
                     eprintln!(
                         "Loaded {} (mcp/{}, {} tools, cached {}) — status: {}",
-                        name, transport, tool_names.len(), ttl_label, status
+                        name,
+                        transport,
+                        tool_names.len(),
+                        ttl_label,
+                        status
                     );
                     if !tool_names.is_empty() {
                         eprintln!("  Tools: {}", tool_names.join(", "));
@@ -1396,7 +1416,10 @@ async fn probe_mcp_provider(
 
 fn unload_provider(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = common::ati_dir();
-    let cache_path = ati_dir.join("cache").join("providers").join(format!("{name}.json"));
+    let cache_path = ati_dir
+        .join("cache")
+        .join("providers")
+        .join(format!("{name}.json"));
 
     if !cache_path.exists() {
         return Err(format!("No cached provider '{name}' found.").into());
@@ -1532,10 +1555,7 @@ mod tests {
 
     #[test]
     fn test_derive_provider_name_file_path_nested() {
-        assert_eq!(
-            derive_provider_name("/path/to/my-spec.yaml"),
-            "my_spec"
-        );
+        assert_eq!(derive_provider_name("/path/to/my-spec.yaml"), "my_spec");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use serde_json::Value;
 /// Live MCP integration tests — tests against real MCP servers.
 ///
 /// These tests require:
@@ -7,11 +8,9 @@
 ///
 /// Run with: cargo test --test mcp_live_test -- --nocapture
 /// Skip with: cargo test --test mcp_live_test -- --ignored (they're not ignored by default)
-
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // Credential helpers — read tokens from env vars or ~/.claude.json
@@ -27,22 +26,29 @@ fn read_claude_json() -> Option<Value> {
 fn get_github_token() -> Option<String> {
     // Try env vars first
     if let Ok(t) = std::env::var("GITHUB_PERSONAL_ACCESS_TOKEN") {
-        if !t.is_empty() { return Some(t); }
+        if !t.is_empty() {
+            return Some(t);
+        }
     }
     // Try reading the freshest token from ~/.github-token (auto-refreshed via cron)
-    if let Ok(contents) = std::fs::read_to_string(
-        format!("{}/.github-token", std::env::var("HOME").unwrap_or_default())
-    ) {
+    if let Ok(contents) = std::fs::read_to_string(format!(
+        "{}/.github-token",
+        std::env::var("HOME").unwrap_or_default()
+    )) {
         for line in contents.lines() {
             // Lines like: export GH_TOKEN=ghs_xxx
             if let Some(val) = line.strip_prefix("export GH_TOKEN=") {
                 let val = val.trim().trim_matches('"');
-                if !val.is_empty() { return Some(val.to_string()); }
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
             }
         }
     }
     if let Ok(t) = std::env::var("GH_TOKEN") {
-        if !t.is_empty() { return Some(t); }
+        if !t.is_empty() {
+            return Some(t);
+        }
     }
     // Fall back to ~/.claude.json
     let config = read_claude_json()?;
@@ -55,10 +61,14 @@ fn get_github_token() -> Option<String> {
 fn get_linear_token() -> Option<String> {
     // Try env vars first
     if let Ok(t) = std::env::var("LINEAR_API_KEY") {
-        if !t.is_empty() { return Some(t); }
+        if !t.is_empty() {
+            return Some(t);
+        }
     }
     if let Ok(t) = std::env::var("LINEAR_PERSONAL_API_KEY") {
-        if !t.is_empty() { return Some(t); }
+        if !t.is_empty() {
+            return Some(t);
+        }
     }
     // Fall back to ~/.claude.json — Linear stores "Bearer <token>" in headers
     let config = read_claude_json()?;
@@ -71,7 +81,9 @@ fn get_linear_token() -> Option<String> {
 
 fn get_sentry_token() -> Option<String> {
     if let Ok(t) = std::env::var("SENTRY_AUTH_TOKEN") {
-        if !t.is_empty() { return Some(t); }
+        if !t.is_empty() {
+            return Some(t);
+        }
     }
     // Fall back to ~/.claude.json — Sentry passes token as --access-token=TOKEN arg
     let config = read_claude_json()?;
@@ -119,7 +131,12 @@ impl StdioMcpHelper {
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let reader = BufReader::new(stdout);
-        StdioMcpHelper { child, stdin, reader, next_id: 1 }
+        StdioMcpHelper {
+            child,
+            stdin,
+            reader,
+            next_id: 1,
+        }
     }
 
     fn send_request(&mut self, method: &str, params: Option<Value>) -> Value {
@@ -143,7 +160,10 @@ impl StdioMcpHelper {
         // Read response (skip notifications)
         loop {
             let mut buf = String::new();
-            let n = self.reader.read_line(&mut buf).expect("Failed to read from MCP server");
+            let n = self
+                .reader
+                .read_line(&mut buf)
+                .expect("Failed to read from MCP server");
             if n == 0 {
                 panic!("MCP server closed stdout unexpectedly");
             }
@@ -191,12 +211,17 @@ impl Drop for StdioMcpHelper {
 // ---------------------------------------------------------------------------
 
 fn stdio_initialize(helper: &mut StdioMcpHelper) -> Value {
-    let init_resp = helper.send_request("initialize", Some(serde_json::json!({
-        "protocolVersion": "2025-03-26",
-        "capabilities": {},
-        "clientInfo": { "name": "ati-test", "version": "0.1.0" }
-    })));
-    let init_result = init_resp.get("result").expect("initialize should have result");
+    let init_resp = helper.send_request(
+        "initialize",
+        Some(serde_json::json!({
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "ati-test", "version": "0.1.0" }
+        })),
+    );
+    let init_result = init_resp
+        .get("result")
+        .expect("initialize should have result");
     helper.send_notification("notifications/initialized", None);
     init_result.clone()
 }
@@ -266,7 +291,9 @@ fn http_mcp_request(
         for line in body.lines() {
             if let Some(data) = line.strip_prefix("data:") {
                 let data = data.trim();
-                if data.is_empty() { continue; }
+                if data.is_empty() {
+                    continue;
+                }
                 let parsed: Value = serde_json::from_str(data).unwrap_or(Value::Null);
                 // Could be a batch
                 let messages = if parsed.is_array() {
@@ -363,59 +390,97 @@ fn test_github_mcp_stdio_initialize_and_list_tools() {
     // 1. Initialize
     eprintln!("  Sending initialize...");
     let init_result = stdio_initialize(&mut helper);
-    eprintln!("  Server: {}", init_result.get("serverInfo").unwrap_or(&Value::Null));
+    eprintln!(
+        "  Server: {}",
+        init_result.get("serverInfo").unwrap_or(&Value::Null)
+    );
 
     // Verify capabilities include tools
     let caps = init_result.get("capabilities").unwrap();
-    assert!(caps.get("tools").is_some(), "Server must support tools capability");
+    assert!(
+        caps.get("tools").is_some(),
+        "Server must support tools capability"
+    );
 
     // 2. List tools
     eprintln!("  Sending tools/list...");
     let list_resp = helper.send_request("tools/list", None);
-    let list_result = list_resp.get("result").expect("tools/list should have result");
-    let tools = list_result.get("tools").and_then(|t| t.as_array()).expect("should have tools array");
+    let list_result = list_resp
+        .get("result")
+        .expect("tools/list should have result");
+    let tools = list_result
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .expect("should have tools array");
 
     eprintln!("  Discovered {} tools:", tools.len());
     assert!(!tools.is_empty(), "GitHub MCP server should expose tools");
 
     for tool in tools.iter().take(10) {
         let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-        let desc = tool.get("description").and_then(|d| d.as_str()).unwrap_or("?");
+        let desc = tool
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("?");
         eprintln!("    - {name}: {}", &desc[..desc.len().min(80)]);
 
         // Every tool must have a name and inputSchema
         assert!(!name.is_empty(), "Tool name must not be empty");
-        assert!(tool.get("inputSchema").is_some(), "Tool {name} must have inputSchema");
+        assert!(
+            tool.get("inputSchema").is_some(),
+            "Tool {name} must have inputSchema"
+        );
     }
 
     // 3. Call a read-only tool — search repos
     eprintln!("  Calling search_repositories...");
-    let search_tool = tools.iter().find(|t| {
-        t.get("name").and_then(|n| n.as_str()) == Some("search_repositories")
-    });
+    let search_tool = tools
+        .iter()
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("search_repositories"));
 
     if search_tool.is_some() {
-        let call_resp = helper.send_request("tools/call", Some(serde_json::json!({
-            "name": "search_repositories",
-            "arguments": {
-                "query": "parcha language:python"
-            }
-        })));
+        let call_resp = helper.send_request(
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "search_repositories",
+                "arguments": {
+                    "query": "parcha language:python"
+                }
+            })),
+        );
 
-        let call_result = call_resp.get("result").expect("tools/call should have result");
+        let call_result = call_resp
+            .get("result")
+            .expect("tools/call should have result");
         let content = call_result.get("content").and_then(|c| c.as_array());
-        assert!(content.is_some(), "tools/call result must have content array");
+        assert!(
+            content.is_some(),
+            "tools/call result must have content array"
+        );
         let content = content.unwrap();
-        assert!(!content.is_empty(), "search_repositories should return content");
+        assert!(
+            !content.is_empty(),
+            "search_repositories should return content"
+        );
 
         let first = &content[0];
-        assert_eq!(first.get("type").and_then(|t| t.as_str()), Some("text"), "Content type should be text");
+        assert_eq!(
+            first.get("type").and_then(|t| t.as_str()),
+            Some("text"),
+            "Content type should be text"
+        );
         let text = first.get("text").and_then(|t| t.as_str()).unwrap_or("");
         assert!(!text.is_empty(), "Result text should not be empty");
         eprintln!("  search_repositories returned {} chars", text.len());
 
-        let is_error = call_result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
-        assert!(!is_error, "search_repositories should not return isError=true");
+        let is_error = call_result
+            .get("isError")
+            .and_then(|e| e.as_bool())
+            .unwrap_or(false);
+        assert!(
+            !is_error,
+            "search_repositories should not return isError=true"
+        );
     } else {
         eprintln!("  WARN: search_repositories not found, skipping call test");
     }
@@ -455,16 +520,30 @@ fn test_linear_mcp_http_initialize_and_list_tools() {
         None,
     );
 
-    let init_result = init_resp.get("result").expect("initialize should have result");
-    eprintln!("  Server: {}", init_result.get("serverInfo").unwrap_or(&Value::Null));
+    let init_result = init_resp
+        .get("result")
+        .expect("initialize should have result");
+    eprintln!(
+        "  Server: {}",
+        init_result.get("serverInfo").unwrap_or(&Value::Null)
+    );
     eprintln!("  Session ID: {:?}", session_id);
 
     // Verify tools capability
     let caps = init_result.get("capabilities").unwrap_or(&Value::Null);
-    assert!(caps.get("tools").is_some(), "Linear must support tools capability");
+    assert!(
+        caps.get("tools").is_some(),
+        "Linear must support tools capability"
+    );
 
     // 2. Send initialized notification
-    http_mcp_notification(url, "notifications/initialized", None, Some(&auth), session_id.as_deref());
+    http_mcp_notification(
+        url,
+        "notifications/initialized",
+        None,
+        Some(&auth),
+        session_id.as_deref(),
+    );
 
     // 3. List tools
     eprintln!("  Sending tools/list to Linear MCP...");
@@ -477,19 +556,30 @@ fn test_linear_mcp_http_initialize_and_list_tools() {
         session_id.as_deref(),
     );
 
-    let list_result = list_resp.get("result").expect("tools/list should have result");
-    let tools = list_result.get("tools").and_then(|t| t.as_array()).expect("should have tools array");
+    let list_result = list_resp
+        .get("result")
+        .expect("tools/list should have result");
+    let tools = list_result
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .expect("should have tools array");
 
     eprintln!("  Discovered {} tools:", tools.len());
     assert!(!tools.is_empty(), "Linear MCP server should expose tools");
 
     for tool in tools.iter().take(10) {
         let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-        let desc = tool.get("description").and_then(|d| d.as_str()).unwrap_or("?");
+        let desc = tool
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("?");
         eprintln!("    - {name}: {}", &desc[..desc.len().min(80)]);
 
         assert!(!name.is_empty(), "Tool name must not be empty");
-        assert!(tool.get("inputSchema").is_some(), "Tool {name} must have inputSchema");
+        assert!(
+            tool.get("inputSchema").is_some(),
+            "Tool {name} must have inputSchema"
+        );
     }
 
     // 4. Call a read-only tool
@@ -523,7 +613,10 @@ fn test_linear_mcp_http_initialize_and_list_tools() {
             }
         } else if let Some(err) = call_resp.get("error") {
             // Some tools require specific args — that's OK, we verified protocol works
-            eprintln!("  {} returned protocol error (expected for missing args): {}", tool_name, err);
+            eprintln!(
+                "  {} returned protocol error (expected for missing args): {}",
+                tool_name, err
+            );
         }
     }
 
@@ -551,34 +644,48 @@ fn test_sentry_mcp_stdio_initialize_and_list_tools() {
 
     eprintln!("Spawning Sentry MCP server...");
     let access_flag = format!("--access-token={sentry_token}");
-    let mut helper = StdioMcpHelper::spawn(
-        "npx",
-        &["@sentry/mcp-server@latest", &access_flag],
-        vec![],
-    );
+    let mut helper =
+        StdioMcpHelper::spawn("npx", &["@sentry/mcp-server@latest", &access_flag], vec![]);
 
     // 1. Initialize
     eprintln!("  Sending initialize...");
     let init_result = stdio_initialize(&mut helper);
-    eprintln!("  Server: {}", init_result.get("serverInfo").unwrap_or(&Value::Null));
+    eprintln!(
+        "  Server: {}",
+        init_result.get("serverInfo").unwrap_or(&Value::Null)
+    );
 
     let caps = init_result.get("capabilities").unwrap_or(&Value::Null);
-    assert!(caps.get("tools").is_some(), "Sentry must support tools capability");
+    assert!(
+        caps.get("tools").is_some(),
+        "Sentry must support tools capability"
+    );
 
     // 2. List tools
     eprintln!("  Sending tools/list...");
     let list_resp = helper.send_request("tools/list", None);
-    let list_result = list_resp.get("result").expect("tools/list should have result");
-    let tools = list_result.get("tools").and_then(|t| t.as_array()).expect("should have tools array");
+    let list_result = list_resp
+        .get("result")
+        .expect("tools/list should have result");
+    let tools = list_result
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .expect("should have tools array");
 
     eprintln!("  Discovered {} tools:", tools.len());
     assert!(!tools.is_empty(), "Sentry MCP server should expose tools");
 
     for tool in tools.iter().take(15) {
         let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-        let desc = tool.get("description").and_then(|d| d.as_str()).unwrap_or("?");
+        let desc = tool
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("?");
         eprintln!("    - {name}: {}", &desc[..desc.len().min(80)]);
-        assert!(tool.get("inputSchema").is_some(), "Tool {name} must have inputSchema");
+        assert!(
+            tool.get("inputSchema").is_some(),
+            "Tool {name} must have inputSchema"
+        );
     }
 
     eprintln!("  Sentry MCP test PASSED");
@@ -627,6 +734,7 @@ fn test_ati_mcp_client_against_linear() {
         cli_default_args: Vec::new(),
         cli_env: HashMap::new(),
         cli_timeout_secs: None,
+        auth_generator: None,
         category: None,
         skills: Vec::new(),
     };
@@ -663,8 +771,11 @@ fn test_ati_mcp_client_against_linear() {
                 eprintln!("  Connect failed (expected if auth required): {msg}");
                 // Verify it's an auth/transport error, not a code bug
                 assert!(
-                    msg.contains("HTTP") || msg.contains("401") || msg.contains("403")
-                        || msg.contains("auth") || msg.contains("Unauthorized")
+                    msg.contains("HTTP")
+                        || msg.contains("401")
+                        || msg.contains("403")
+                        || msg.contains("auth")
+                        || msg.contains("Unauthorized")
                         || msg.contains("error"),
                     "Error should be auth/transport-related, got: {msg}"
                 );
@@ -715,7 +826,10 @@ fn test_ati_mcp_client_against_github_stdio() {
         handler: "mcp".to_string(),
         mcp_transport: Some("stdio".to_string()),
         mcp_command: Some("npx".to_string()),
-        mcp_args: vec!["-y".to_string(), "@modelcontextprotocol/server-github".to_string()],
+        mcp_args: vec![
+            "-y".to_string(),
+            "@modelcontextprotocol/server-github".to_string(),
+        ],
         mcp_url: None,
         mcp_env,
         openapi_spec: None,
@@ -729,6 +843,7 @@ fn test_ati_mcp_client_against_github_stdio() {
         cli_default_args: Vec::new(),
         cli_env: HashMap::new(),
         cli_timeout_secs: None,
+        auth_generator: None,
         category: None,
         skills: Vec::new(),
     };
@@ -739,7 +854,8 @@ fn test_ati_mcp_client_against_github_stdio() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         eprintln!("  Connecting to GitHub MCP via ATI McpClient...");
-        let client = ati::core::mcp_client::McpClient::connect(&provider, &keyring).await
+        let client = ati::core::mcp_client::McpClient::connect(&provider, &keyring)
+            .await
             .expect("Should connect to GitHub MCP");
 
         eprintln!("  Connected! Listing tools...");
@@ -761,15 +877,23 @@ fn test_ati_mcp_client_against_github_stdio() {
         if has_search {
             eprintln!("  Calling search_repositories via ATI McpClient...");
             let mut args = HashMap::new();
-            args.insert("query".to_string(), serde_json::json!("parcha language:python"));
+            args.insert(
+                "query".to_string(),
+                serde_json::json!("parcha language:python"),
+            );
 
-            let result = client.call_tool("search_repositories", args).await
+            let result = client
+                .call_tool("search_repositories", args)
+                .await
                 .expect("search_repositories should succeed");
 
             assert!(!result.content.is_empty(), "Should have content");
             assert!(!result.is_error, "Should not be an error");
             if let Some(text) = &result.content[0].text {
-                eprintln!("  search_repositories returned {} chars via ATI McpClient", text.len());
+                eprintln!(
+                    "  search_repositories returned {} chars via ATI McpClient",
+                    text.len()
+                );
                 assert!(!text.is_empty());
             }
         }
@@ -827,7 +951,10 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"get_issue
         }
     }
 
-    assert!(found_response, "Should have found the tools/list response in SSE stream");
+    assert!(
+        found_response,
+        "Should have found the tools/list response in SSE stream"
+    );
     eprintln!("  SSE parsing test PASSED");
 }
 
@@ -900,10 +1027,13 @@ fn test_github_mcp_protocol_error_handling() {
 
     // Call a non-existent tool — should get an error response
     eprintln!("  Calling non-existent tool...");
-    let err_resp = helper.send_request("tools/call", Some(serde_json::json!({
-        "name": "this_tool_does_not_exist_12345",
-        "arguments": {}
-    })));
+    let err_resp = helper.send_request(
+        "tools/call",
+        Some(serde_json::json!({
+            "name": "this_tool_does_not_exist_12345",
+            "arguments": {}
+        })),
+    );
 
     // Should get either a JSON-RPC error or a tool result with isError=true
     let has_error = err_resp.get("error").is_some();
@@ -940,19 +1070,33 @@ fn test_everything_mcp_stdio() {
 
     // Initialize
     let init_result = stdio_initialize(&mut helper);
-    eprintln!("  Server: {}", init_result.get("serverInfo").unwrap_or(&Value::Null));
+    eprintln!(
+        "  Server: {}",
+        init_result.get("serverInfo").unwrap_or(&Value::Null)
+    );
 
     // List tools
     let list_resp = helper.send_request("tools/list", None);
-    let list_result = list_resp.get("result").expect("tools/list should have result");
-    let tools = list_result.get("tools").and_then(|t| t.as_array()).expect("should have tools array");
+    let list_result = list_resp
+        .get("result")
+        .expect("tools/list should have result");
+    let tools = list_result
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .expect("should have tools array");
 
     eprintln!("  Discovered {} tools:", tools.len());
-    assert!(!tools.is_empty(), "Everything MCP server should expose tools");
+    assert!(
+        !tools.is_empty(),
+        "Everything MCP server should expose tools"
+    );
 
     for tool in tools.iter() {
         let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-        let desc = tool.get("description").and_then(|d| d.as_str()).unwrap_or("?");
+        let desc = tool
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("?");
         eprintln!("    - {name}: {}", &desc[..desc.len().min(80)]);
     }
 
@@ -965,10 +1109,13 @@ fn test_everything_mcp_stdio() {
     if let Some(tool) = echo_tool {
         let tool_name = tool.get("name").and_then(|n| n.as_str()).unwrap();
         eprintln!("  Calling {tool_name}...");
-        let call_resp = helper.send_request("tools/call", Some(serde_json::json!({
-            "name": tool_name,
-            "arguments": { "message": "Hello from ATI tests!" }
-        })));
+        let call_resp = helper.send_request(
+            "tools/call",
+            Some(serde_json::json!({
+                "name": tool_name,
+                "arguments": { "message": "Hello from ATI tests!" }
+            })),
+        );
 
         if let Some(result) = call_resp.get("result") {
             let content = result.get("content").and_then(|c| c.as_array());
@@ -976,7 +1123,10 @@ fn test_everything_mcp_stdio() {
                 eprintln!("  {} returned {} content items", tool_name, content.len());
                 assert!(!content.is_empty(), "Echo should return content");
             }
-            let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
+            let is_error = result
+                .get("isError")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false);
             assert!(!is_error, "Echo should not be an error");
         }
     } else {
@@ -1009,37 +1159,62 @@ fn test_deepwiki_mcp_http_full_flow() {
         None,
     );
 
-    let init_result = init_resp.get("result").expect("initialize should have result");
-    eprintln!("  Server: {}", init_result.get("serverInfo").unwrap_or(&Value::Null));
+    let init_result = init_resp
+        .get("result")
+        .expect("initialize should have result");
+    eprintln!(
+        "  Server: {}",
+        init_result.get("serverInfo").unwrap_or(&Value::Null)
+    );
     eprintln!("  Session ID: {:?}", session_id);
 
     let caps = init_result.get("capabilities").unwrap_or(&Value::Null);
-    assert!(caps.get("tools").is_some(), "DeepWiki must support tools capability");
+    assert!(
+        caps.get("tools").is_some(),
+        "DeepWiki must support tools capability"
+    );
 
     // 2. Send initialized notification
-    http_mcp_notification(url, "notifications/initialized", None, None, session_id.as_deref());
+    http_mcp_notification(
+        url,
+        "notifications/initialized",
+        None,
+        None,
+        session_id.as_deref(),
+    );
 
     // 3. List tools
     eprintln!("  Sending tools/list...");
     let (list_resp, _) = http_mcp_request(url, "tools/list", None, 2, None, session_id.as_deref());
 
-    let list_result = list_resp.get("result").expect("tools/list should have result");
-    let tools = list_result.get("tools").and_then(|t| t.as_array()).expect("should have tools array");
+    let list_result = list_resp
+        .get("result")
+        .expect("tools/list should have result");
+    let tools = list_result
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .expect("should have tools array");
 
     eprintln!("  Discovered {} tools:", tools.len());
     assert!(!tools.is_empty(), "DeepWiki should expose tools");
 
     for tool in tools.iter() {
         let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-        let desc = tool.get("description").and_then(|d| d.as_str()).unwrap_or("?");
+        let desc = tool
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("?");
         eprintln!("    - {name}: {}", &desc[..desc.len().min(80)]);
-        assert!(tool.get("inputSchema").is_some(), "Tool {name} must have inputSchema");
+        assert!(
+            tool.get("inputSchema").is_some(),
+            "Tool {name} must have inputSchema"
+        );
     }
 
     // 4. Call read_wiki_structure on a well-known repo
-    let has_wiki_structure = tools.iter().any(|t| {
-        t.get("name").and_then(|n| n.as_str()) == Some("read_wiki_structure")
-    });
+    let has_wiki_structure = tools
+        .iter()
+        .any(|t| t.get("name").and_then(|n| n.as_str()) == Some("read_wiki_structure"));
 
     if has_wiki_structure {
         eprintln!("  Calling read_wiki_structure for tokio-rs/tokio...");
@@ -1058,12 +1233,24 @@ fn test_deepwiki_mcp_http_full_flow() {
         if let Some(result) = call_resp.get("result") {
             let content = result.get("content").and_then(|c| c.as_array());
             if let Some(content) = content {
-                assert!(!content.is_empty(), "read_wiki_structure should return content");
-                let text = content[0].get("text").and_then(|t| t.as_str()).unwrap_or("");
+                assert!(
+                    !content.is_empty(),
+                    "read_wiki_structure should return content"
+                );
+                let text = content[0]
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
                 eprintln!("  read_wiki_structure returned {} chars", text.len());
-                assert!(text.len() > 10, "Should have meaningful wiki structure content");
+                assert!(
+                    text.len() > 10,
+                    "Should have meaningful wiki structure content"
+                );
             }
-            let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
+            let is_error = result
+                .get("isError")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false);
             assert!(!is_error, "read_wiki_structure should not be an error");
         } else if let Some(err) = call_resp.get("error") {
             eprintln!("  read_wiki_structure returned error: {err}");
@@ -1105,6 +1292,7 @@ fn test_deepwiki_mcp_http_full_flow() {
         cli_default_args: Vec::new(),
         cli_env: HashMap::new(),
         cli_timeout_secs: None,
+        auth_generator: None,
         category: Some("documentation".to_string()),
         skills: Vec::new(),
     };
@@ -1113,7 +1301,8 @@ fn test_deepwiki_mcp_http_full_flow() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let client = ati::core::mcp_client::McpClient::connect(&provider, &keyring).await
+        let client = ati::core::mcp_client::McpClient::connect(&provider, &keyring)
+            .await
             .expect("Should connect to DeepWiki MCP (no auth)");
 
         let tools = client.list_tools().await.expect("Should list tools");
@@ -1123,21 +1312,32 @@ fn test_deepwiki_mcp_http_full_flow() {
         // Verify tool structure
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         eprintln!("  Tools: {:?}", tool_names);
-        assert!(tool_names.contains(&"read_wiki_structure"), "Should have read_wiki_structure");
-        assert!(tool_names.contains(&"ask_question"), "Should have ask_question");
+        assert!(
+            tool_names.contains(&"read_wiki_structure"),
+            "Should have read_wiki_structure"
+        );
+        assert!(
+            tool_names.contains(&"ask_question"),
+            "Should have ask_question"
+        );
 
         // Call read_wiki_structure via ATI McpClient
         eprintln!("  Calling read_wiki_structure via ATI McpClient...");
         let mut args = HashMap::new();
         args.insert("repoName".to_string(), serde_json::json!("tokio-rs/tokio"));
 
-        let result = client.call_tool("read_wiki_structure", args).await
+        let result = client
+            .call_tool("read_wiki_structure", args)
+            .await
             .expect("read_wiki_structure should succeed");
 
         assert!(!result.content.is_empty(), "Should have content");
         assert!(!result.is_error, "Should not be an error");
         if let Some(text) = &result.content[0].text {
-            eprintln!("  ATI McpClient got {} chars from read_wiki_structure", text.len());
+            eprintln!(
+                "  ATI McpClient got {} chars from read_wiki_structure",
+                text.len()
+            );
             assert!(text.len() > 10, "Should have meaningful content");
         }
 

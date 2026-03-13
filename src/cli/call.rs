@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::common;
+use crate::core::auth_generator::{AuthCache, GenContext};
 use crate::core::jwt;
 use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
@@ -120,7 +121,9 @@ fn load_scopes_from_env(verbose: bool) -> ScopeConfig {
                 Ok(None) => {
                     // No JWT config — inspect without verification
                     if verbose {
-                        eprintln!("No JWT public key configured — inspecting token without verification");
+                        eprintln!(
+                            "No JWT public key configured — inspecting token without verification"
+                        );
                     }
                     match jwt::inspect(&token) {
                         Ok(claims) => ScopeConfig::from_jwt(&claims),
@@ -155,6 +158,19 @@ pub async fn execute(
     tool_name: &str,
     raw_args: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    execute_with_registry(cli, tool_name, raw_args, None).await
+}
+
+/// Execute a tool call, optionally reusing a pre-loaded ManifestRegistry.
+///
+/// When `registry` is `Some`, skips loading manifests from disk (useful for
+/// batch execution like `ati plan execute` where the registry is validated once).
+pub async fn execute_with_registry(
+    cli: &Cli,
+    tool_name: &str,
+    raw_args: &[String],
+    registry: Option<ManifestRegistry>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_tool_args(raw_args)?;
 
     // Auto-detect: proxy mode if ATI_PROXY_URL is set
@@ -169,7 +185,7 @@ pub async fn execute(
     if cli.verbose {
         eprintln!("Mode: local (no ATI_PROXY_URL)");
     }
-    execute_local(cli, tool_name, &args, raw_args).await
+    execute_local(cli, tool_name, &args, raw_args, registry).await
 }
 
 /// Load keyring using cascade: keyring.enc (sealed) → keyring.enc (persistent) → credentials → empty.
@@ -215,6 +231,7 @@ async fn execute_local(
     tool_name: &str,
     args: &HashMap<String, Value>,
     raw_args: &[String],
+    preloaded_registry: Option<ManifestRegistry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = common::ati_dir();
 
@@ -224,9 +241,12 @@ async fn execute_local(
         eprintln!("ATI dir: {}", ati_dir.display());
     }
 
-    // Load manifests
+    // Load manifests (or reuse pre-loaded registry)
     let manifests_dir = ati_dir.join("manifests");
-    let mut registry = ManifestRegistry::load(&manifests_dir)?;
+    let mut registry = match preloaded_registry {
+        Some(r) => r,
+        None => ManifestRegistry::load(&manifests_dir)?,
+    };
 
     // Load keyring using cascade
     let keyring = load_keyring(&ati_dir, cli.verbose);
@@ -235,17 +255,23 @@ async fn execute_local(
     if registry.get_tool(tool_name).is_none() {
         if let Some(mcp_provider) = registry.find_mcp_provider_for_tool(tool_name) {
             if cli.verbose {
-                eprintln!("Tool not in static index, discovering from MCP provider '{}'...", mcp_provider.name);
+                eprintln!(
+                    "Tool not in static index, discovering from MCP provider '{}'...",
+                    mcp_provider.name
+                );
             }
             let provider_name = mcp_provider.name.clone();
             let client = mcp_client::McpClient::connect(mcp_provider, &keyring).await?;
             let mcp_tools = client.list_tools().await?;
             client.disconnect().await;
-            let tools = mcp_tools.into_iter().map(|t| crate::core::manifest::McpToolDef {
-                name: t.name,
-                description: t.description,
-                input_schema: t.input_schema,
-            }).collect();
+            let tools = mcp_tools
+                .into_iter()
+                .map(|t| crate::core::manifest::McpToolDef {
+                    name: t.name,
+                    description: t.description,
+                    input_schema: t.input_schema,
+                })
+                .collect();
             registry.register_mcp_tools(&provider_name, tools);
         }
     }
@@ -285,21 +311,90 @@ async fn execute_local(
         scopes.check_access(tool_name, scope)?;
     }
 
-    // Execute — dispatch based on handler type
-    let result = match provider.handler.as_str() {
-        "mcp" => {
-            let value = mcp_client::execute(provider, tool_name, &args, &keyring).await?;
-            output::format_output(&value, &cli.output)
-        }
-        "cli" => {
-            let value = crate::core::cli_executor::execute(provider, raw_args, &keyring).await?;
-            output::format_output(&value, &cli.output)
-        }
-        _ => {
-            generic::execute(provider, tool, &args, &keyring, &cli.output).await?
-        }
-    };
+    // Rate limit check
+    if let Some(ref rate_config) = scopes.rate_config {
+        crate::core::rate::check_and_record(tool_name, rate_config)?;
+    }
 
+    // Build auth generator context from scope/JWT claims
+    let gen_ctx = GenContext {
+        jwt_sub: scopes.sub.clone(),
+        jwt_scope: scopes.scopes.join(" "),
+        tool_name: tool_name.to_string(),
+        timestamp: crate::core::jwt::now_secs(),
+    };
+    let auth_cache = AuthCache::new();
+
+    // Execute — dispatch based on handler type, with timing for audit
+    let start = std::time::Instant::now();
+    let exec_result: Result<String, Box<dyn std::error::Error>> =
+        match provider.handler.as_str() {
+            "mcp" => {
+                match mcp_client::execute_with_gen(
+                    provider,
+                    tool_name,
+                    &args,
+                    &keyring,
+                    Some(&gen_ctx),
+                    Some(&auth_cache),
+                )
+                .await
+                {
+                    Ok(value) => Ok(output::format_output(&value, &cli.output)),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            "cli" => {
+                match crate::core::cli_executor::execute_with_gen(
+                    provider,
+                    raw_args,
+                    &keyring,
+                    Some(&gen_ctx),
+                    Some(&auth_cache),
+                )
+                .await
+                {
+                    Ok(value) => Ok(output::format_output(&value, &cli.output)),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            _ => {
+                generic::execute_with_gen(
+                    provider,
+                    tool,
+                    &args,
+                    &keyring,
+                    &cli.output,
+                    Some(&gen_ctx),
+                    Some(&auth_cache),
+                )
+                .await
+            }
+        };
+    let duration = start.elapsed();
+
+    // Build and write audit entry
+    let (status, error_msg) = match &exec_result {
+        Ok(_) => (crate::core::audit::AuditStatus::Ok, None),
+        Err(e) => (crate::core::audit::AuditStatus::Error, Some(e.to_string())),
+    };
+    let audit_entry = crate::core::audit::AuditEntry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        tool: tool_name.to_string(),
+        args: crate::core::audit::sanitize_args(&serde_json::json!(args)),
+        status,
+        duration_ms: duration.as_millis() as u64,
+        agent_sub: scopes.sub.clone(),
+        error: error_msg,
+        exit_code: None,
+    };
+    if let Err(e) = crate::core::audit::append(&audit_entry) {
+        if cli.verbose {
+            eprintln!("Warning: failed to write audit log: {e}");
+        }
+    }
+
+    let result = exec_result?;
     println!("{result}");
     Ok(())
 }
@@ -318,10 +413,33 @@ async fn execute_via_proxy(
         eprintln!("Proxy: {proxy_url}");
     }
 
-    let result = proxy_client::call_tool(proxy_url, tool_name, args, Some(raw_args)).await?;
+    let scopes = load_scopes_from_env(cli.verbose);
+    let start = std::time::Instant::now();
+    let exec_result = proxy_client::call_tool(proxy_url, tool_name, args, Some(raw_args)).await;
+    let duration = start.elapsed();
 
+    let (status, error_msg) = match &exec_result {
+        Ok(_) => (crate::core::audit::AuditStatus::Ok, None),
+        Err(e) => (crate::core::audit::AuditStatus::Error, Some(e.to_string())),
+    };
+    let audit_entry = crate::core::audit::AuditEntry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        tool: tool_name.to_string(),
+        args: crate::core::audit::sanitize_args(&serde_json::json!(args)),
+        status,
+        duration_ms: duration.as_millis() as u64,
+        agent_sub: scopes.sub.clone(),
+        error: error_msg,
+        exit_code: None,
+    };
+    if let Err(e) = crate::core::audit::append(&audit_entry) {
+        if cli.verbose {
+            eprintln!("Warning: failed to write audit log: {e}");
+        }
+    }
+
+    let result = exec_result?;
     let formatted = output::format_output(&result, &cli.output);
     println!("{formatted}");
     Ok(())
 }
-

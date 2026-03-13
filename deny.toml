@@ -1,0 +1,30 @@
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+#
+# Blocks supply chain vectors: typosquatting via alt registries,
+# git-source dependency hijacking, known vulns, license violations.
+
+[advisories]
+# All vulnerability advisories are errors by default in 0.19+.
+# Unmaintained crates are warnings (won't block CI).
+unmaintained = "none"
+yanked = "warn"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+unused-allowed-license = "warn"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

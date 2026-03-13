@@ -10,6 +10,7 @@ use tower::ServiceExt;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use ati::core::auth_generator::AuthCache;
 use ati::core::keyring::Keyring;
 use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
@@ -159,6 +160,7 @@ async fn test_proxy_help_returns_llm_recommendations() {
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
     let app = build_router(state);
 
@@ -219,6 +221,7 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
     let app = build_router(state);
 
@@ -256,6 +259,7 @@ async fn test_proxy_help_missing_llm_key_returns_503() {
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
     let app = build_router(state);
 
@@ -304,6 +308,7 @@ async fn test_proxy_help_llm_error_returns_502() {
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
     let app = build_router(state);
 
@@ -606,6 +611,7 @@ async fn test_proxy_help_excludes_internal_tools() {
         verbose: false,
         jwt_config: None,
         jwks_json: None,
+        auth_cache: AuthCache::new(),
     });
     let app = build_router(state);
 
