@@ -6,7 +6,6 @@
 /// - Streamable HTTP transport: POST with Accept: application/json, text/event-stream
 ///   Server may respond with JSON or SSE stream. Supports Mcp-Session-Id for sessions.
 /// - Lifecycle: initialize → tools/list → tools/call → shutdown
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -16,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::core::auth_generator::{self, AuthCache, GenContext};
 use crate::core::keyring::Keyring;
 use crate::core::manifest::Provider;
 
@@ -153,12 +153,21 @@ impl McpClient {
     /// For stdio: spawns the subprocess with env vars resolved from keyring.
     /// For HTTP: creates an HTTP client with auth headers.
     pub async fn connect(provider: &Provider, keyring: &Keyring) -> Result<Self, McpError> {
+        Self::connect_with_gen(provider, keyring, None, None).await
+    }
+
+    /// Connect to an MCP server, optionally using a dynamic auth generator.
+    pub async fn connect_with_gen(
+        provider: &Provider,
+        keyring: &Keyring,
+        gen_ctx: Option<&GenContext>,
+        auth_cache: Option<&AuthCache>,
+    ) -> Result<Self, McpError> {
         let transport = match provider.mcp_transport_type() {
             "stdio" => {
-                let command = provider
-                    .mcp_command
-                    .as_deref()
-                    .ok_or_else(|| McpError::Config("mcp_command required for stdio transport".into()))?;
+                let command = provider.mcp_command.as_deref().ok_or_else(|| {
+                    McpError::Config("mcp_command required for stdio transport".into())
+                })?;
 
                 // Resolve env vars: "${key_name}" → keyring value
                 let mut env_map: HashMap<String, String> = HashMap::new();
@@ -175,6 +184,25 @@ impl McpClient {
                     env_map.insert(k.clone(), resolved);
                 }
 
+                // If auth_generator is configured, run it and inject into env
+                if let Some(gen) = &provider.auth_generator {
+                    let default_ctx = GenContext::default();
+                    let ctx = gen_ctx.unwrap_or(&default_ctx);
+                    let default_cache = AuthCache::new();
+                    let cache = auth_cache.unwrap_or(&default_cache);
+                    match auth_generator::generate(provider, gen, ctx, keyring, cache).await {
+                        Ok(cred) => {
+                            env_map.insert("ATI_AUTH_TOKEN".to_string(), cred.value);
+                            for (k, v) in &cred.extra_env {
+                                env_map.insert(k.clone(), v.clone());
+                            }
+                        }
+                        Err(e) => {
+                            return Err(McpError::Config(format!("auth_generator failed: {e}")));
+                        }
+                    }
+                }
+
                 let mut child = Command::new(command)
                     .args(&provider.mcp_args)
                     .stdin(Stdio::piped())
@@ -183,22 +211,58 @@ impl McpClient {
                     .env_clear()
                     .envs(&env_map)
                     .spawn()
-                    .map_err(|e| McpError::Transport(format!("Failed to spawn MCP server '{command}': {e}")))?;
+                    .map_err(|e| {
+                        McpError::Transport(format!("Failed to spawn MCP server '{command}': {e}"))
+                    })?;
 
-                let stdin = child.stdin.take().ok_or_else(|| McpError::Transport("No stdin".into()))?;
-                let stdout = child.stdout.take().ok_or_else(|| McpError::Transport("No stdout".into()))?;
+                let stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| McpError::Transport("No stdin".into()))?;
+                let stdout = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| McpError::Transport("No stdout".into()))?;
                 let reader = BufReader::new(stdout);
 
-                Transport::Stdio(StdioTransport { child, stdin: Some(stdin), reader })
+                Transport::Stdio(StdioTransport {
+                    child,
+                    stdin: Some(stdin),
+                    reader,
+                })
             }
             "http" => {
-                let url = provider
-                    .mcp_url
-                    .as_deref()
-                    .ok_or_else(|| McpError::Config("mcp_url required for HTTP transport".into()))?;
+                let url = provider.mcp_url.as_deref().ok_or_else(|| {
+                    McpError::Config("mcp_url required for HTTP transport".into())
+                })?;
 
-                // Build auth header from keyring
-                let auth_header = build_auth_header(provider, keyring);
+                // Build auth header: generator takes priority over static keyring
+                let auth_header = if let Some(gen) = &provider.auth_generator {
+                    let default_ctx = GenContext::default();
+                    let ctx = gen_ctx.unwrap_or(&default_ctx);
+                    let default_cache = AuthCache::new();
+                    let cache = auth_cache.unwrap_or(&default_cache);
+                    match auth_generator::generate(provider, gen, ctx, keyring, cache).await {
+                        Ok(cred) => match &provider.auth_type {
+                            super::manifest::AuthType::Bearer => {
+                                Some(format!("Bearer {}", cred.value))
+                            }
+                            super::manifest::AuthType::Header => {
+                                if let Some(prefix) = &provider.auth_value_prefix {
+                                    Some(format!("{prefix}{}", cred.value))
+                                } else {
+                                    Some(cred.value)
+                                }
+                            }
+                            _ => Some(cred.value),
+                        },
+                        Err(e) => {
+                            return Err(McpError::Config(format!("auth_generator failed: {e}")));
+                        }
+                    }
+                } else {
+                    build_auth_header(provider, keyring)
+                };
 
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(300))
@@ -207,7 +271,9 @@ impl McpClient {
                 // Resolve ${key_name} placeholders in the URL from keyring
                 let resolved_url = resolve_env_value(url, keyring);
 
-                let auth_header_name = provider.auth_header_name.clone()
+                let auth_header_name = provider
+                    .auth_header_name
+                    .clone()
                     .unwrap_or_else(|| "Authorization".to_string());
 
                 Transport::Http(HttpTransport {
@@ -220,7 +286,9 @@ impl McpClient {
                 })
             }
             other => {
-                return Err(McpError::Config(format!("Unknown MCP transport: '{other}' (expected 'stdio' or 'http')")));
+                return Err(McpError::Config(format!(
+                    "Unknown MCP transport: '{other}' (expected 'stdio' or 'http')"
+                )));
             }
         };
 
@@ -259,7 +327,8 @@ impl McpClient {
         // Extract session ID from HTTP transport response (handled inside send_request)
 
         // Send initialized notification
-        self.send_notification("notifications/initialized", None).await?;
+        self.send_notification("notifications/initialized", None)
+            .await?;
 
         Ok(())
     }
@@ -371,12 +440,8 @@ impl McpClient {
 
         let mut transport = self.transport.lock().await;
         match &mut *transport {
-            Transport::Stdio(stdio) => {
-                send_stdio_request(stdio, &request).await
-            }
-            Transport::Http(http) => {
-                send_http_request(http, &request, &self.provider_name).await
-            }
+            Transport::Stdio(stdio) => send_stdio_request(stdio, &request).await,
+            Transport::Http(http) => send_http_request(http, &request, &self.provider_name).await,
         }
     }
 
@@ -392,7 +457,10 @@ impl McpClient {
         let mut transport = self.transport.lock().await;
         match &mut *transport {
             Transport::Stdio(stdio) => {
-                let stdin = stdio.stdin.as_mut().ok_or_else(|| McpError::Transport("stdin closed".into()))?;
+                let stdin = stdio
+                    .stdin
+                    .as_mut()
+                    .ok_or_else(|| McpError::Transport("stdin closed".into()))?;
                 let msg = serde_json::to_string(&notification)?;
                 stdin.write_all(msg.as_bytes())?;
                 stdin.write_all(b"\n")?;
@@ -400,7 +468,9 @@ impl McpClient {
                 Ok(())
             }
             Transport::Http(http) => {
-                let mut req = http.client.post(&http.url)
+                let mut req = http
+                    .client
+                    .post(&http.url)
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json, text/event-stream")
                     .json(&notification);
@@ -438,7 +508,10 @@ async fn send_stdio_request(
     stdio: &mut StdioTransport,
     request: &JsonRpcRequest,
 ) -> Result<Value, McpError> {
-    let stdin = stdio.stdin.as_mut().ok_or_else(|| McpError::Transport("stdin closed".into()))?;
+    let stdin = stdio
+        .stdin
+        .as_mut()
+        .ok_or_else(|| McpError::Transport("stdin closed".into()))?;
 
     // Serialize and send (newline-delimited)
     let msg = serde_json::to_string(request)?;
@@ -476,19 +549,23 @@ async fn send_stdio_request(
                 // It's our response
                 if let Some(err) = parsed.get("error") {
                     let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-                    let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error");
+                    let message = err
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Unknown error");
                     return Err(McpError::Protocol {
                         code,
                         message: message.to_string(),
                     });
                 }
 
-                return parsed.get("result").cloned().ok_or_else(|| {
-                    McpError::Protocol {
+                return parsed
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| McpError::Protocol {
                         code: -1,
                         message: "Response missing 'result' field".into(),
-                    }
-                });
+                    });
             }
         }
 
@@ -512,7 +589,9 @@ async fn send_http_request(
     request: &JsonRpcRequest,
     provider_name: &str,
 ) -> Result<Value, McpError> {
-    let mut req = http.client.post(&http.url)
+    let mut req = http
+        .client
+        .post(&http.url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .json(request);
@@ -532,9 +611,10 @@ async fn send_http_request(
         req = req.header(name.as_str(), value.as_str());
     }
 
-    let response = req.send().await.map_err(|e| {
-        McpError::Transport(format!("[{provider_name}] HTTP request failed: {e}"))
-    })?;
+    let response = req
+        .send()
+        .await
+        .map_err(|e| McpError::Transport(format!("[{provider_name}] HTTP request failed: {e}")))?;
 
     // Capture session ID from response header (usually set during initialize)
     if let Some(session_val) = response.headers().get("mcp-session-id") {
@@ -583,11 +663,15 @@ async fn send_http_request(
 /// Maximum SSE response body size (50 MB) to prevent OOM from malicious servers.
 const MAX_SSE_BODY_SIZE: usize = 50 * 1024 * 1024;
 
-async fn parse_sse_response(response: reqwest::Response, request_id: u64) -> Result<Value, McpError> {
+async fn parse_sse_response(
+    response: reqwest::Response,
+    request_id: u64,
+) -> Result<Value, McpError> {
     // Enforce size limit on SSE stream body
-    let bytes = response.bytes().await.map_err(|e| {
-        McpError::SseParse(format!("Failed to read SSE stream: {e}"))
-    })?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| McpError::SseParse(format!("Failed to read SSE stream: {e}")))?;
     if bytes.len() > MAX_SSE_BODY_SIZE {
         return Err(McpError::SseParse(format!(
             "SSE response body exceeds maximum size ({} bytes > {} bytes)",
@@ -632,6 +716,7 @@ async fn parse_sse_response(response: reqwest::Response, request_id: u64) -> Res
     ))
 }
 
+#[derive(Debug)]
 enum SseParseResult {
     OurResponse(Result<Value, McpError>),
     NotOurMessage,
@@ -682,10 +767,12 @@ fn extract_jsonrpc_result(msg: &Value, _request_id: u64) -> Result<Value, McpErr
         });
     }
 
-    msg.get("result").cloned().ok_or_else(|| McpError::Protocol {
-        code: -1,
-        message: "Response missing 'result' field".into(),
-    })
+    msg.get("result")
+        .cloned()
+        .ok_or_else(|| McpError::Protocol {
+            code: -1,
+            message: "Response missing 'result' field".into(),
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -756,7 +843,19 @@ pub async fn execute(
     args: &HashMap<String, Value>,
     keyring: &Keyring,
 ) -> Result<Value, McpError> {
-    let client = McpClient::connect(provider, keyring).await?;
+    execute_with_gen(provider, tool_name, args, keyring, None, None).await
+}
+
+/// Execute an MCP tool call with optional dynamic auth generator.
+pub async fn execute_with_gen(
+    provider: &Provider,
+    tool_name: &str,
+    args: &HashMap<String, Value>,
+    keyring: &Keyring,
+    gen_ctx: Option<&GenContext>,
+    auth_cache: Option<&AuthCache>,
+) -> Result<Value, McpError> {
+    let client = McpClient::connect_with_gen(provider, keyring, gen_ctx, auth_cache).await?;
 
     // Strip provider prefix: "github__read_file" → "read_file"
     let mcp_tool_name = tool_name
@@ -824,7 +923,10 @@ mod tests {
     fn test_resolve_env_value_keyring() {
         let keyring = Keyring::empty();
         // No key in keyring — should return the raw value
-        assert_eq!(resolve_env_value("${missing_key}", &keyring), "${missing_key}");
+        assert_eq!(
+            resolve_env_value("${missing_key}", &keyring),
+            "${missing_key}"
+        );
         // Plain value — no resolution
         assert_eq!(resolve_env_value("plain_value", &keyring), "plain_value");
     }
@@ -855,7 +957,10 @@ mod tests {
             "https://example.com/${unknown}/path"
         );
         // No placeholder
-        assert_eq!(resolve_env_value("no_placeholder", &keyring), "no_placeholder");
+        assert_eq!(
+            resolve_env_value("no_placeholder", &keyring),
+            "no_placeholder"
+        );
     }
 
     #[test]
@@ -869,7 +974,10 @@ mod tests {
             }],
             is_error: false,
         };
-        assert_eq!(mcp_result_to_value(&result), Value::String("hello world".into()));
+        assert_eq!(
+            mcp_result_to_value(&result),
+            Value::String("hello world".into())
+        );
     }
 
     #[test]
@@ -942,5 +1050,122 @@ mod tests {
             }
             _ => panic!("Expected OurResponse from batch"),
         }
+    }
+
+    #[test]
+    fn test_process_sse_data_invalid_json() {
+        let data = "not valid json {{{}";
+        match process_sse_data(data, 1) {
+            SseParseResult::ParseError(_) => {}
+            other => panic!("Expected ParseError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_process_sse_data_wrong_id() {
+        let data = r#"{"jsonrpc":"2.0","id":99,"result":{"data":"wrong"}}"#;
+        match process_sse_data(data, 1) {
+            SseParseResult::NotOurMessage => {}
+            _ => panic!("Expected NotOurMessage for wrong ID"),
+        }
+    }
+
+    #[test]
+    fn test_process_sse_data_empty_batch() {
+        let data = "[]";
+        match process_sse_data(data, 1) {
+            SseParseResult::NotOurMessage => {}
+            _ => panic!("Expected NotOurMessage for empty batch"),
+        }
+    }
+
+    #[test]
+    fn test_extract_jsonrpc_result_missing_result() {
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1
+        });
+        let err = extract_jsonrpc_result(&msg, 1).unwrap_err();
+        assert!(matches!(err, McpError::Protocol { code: -1, .. }));
+    }
+
+    #[test]
+    fn test_extract_jsonrpc_error_defaults() {
+        // Error with missing code and message fields
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {}
+        });
+        let err = extract_jsonrpc_result(&msg, 1).unwrap_err();
+        match err {
+            McpError::Protocol { code, message } => {
+                assert_eq!(code, -1);
+                assert_eq!(message, "Unknown error");
+            }
+            _ => panic!("Expected Protocol error"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_result_to_value_error() {
+        let result = McpToolResult {
+            content: vec![McpContent {
+                content_type: "text".into(),
+                text: Some("Something went wrong".into()),
+                data: None,
+                mime_type: None,
+            }],
+            is_error: true,
+        };
+        let val = mcp_result_to_value(&result);
+        assert_eq!(val, Value::String("Something went wrong".into()));
+    }
+
+    #[test]
+    fn test_mcp_result_to_value_multiple_content() {
+        let result = McpToolResult {
+            content: vec![
+                McpContent {
+                    content_type: "text".into(),
+                    text: Some("Part 1".into()),
+                    data: None,
+                    mime_type: None,
+                },
+                McpContent {
+                    content_type: "text".into(),
+                    text: Some("Part 2".into()),
+                    data: None,
+                    mime_type: None,
+                },
+            ],
+            is_error: false,
+        };
+        let val = mcp_result_to_value(&result);
+        // Multiple items → {"content": [...], "isError": false}
+        let content_arr = val["content"].as_array().unwrap();
+        assert_eq!(content_arr.len(), 2);
+        assert_eq!(val["isError"], false);
+    }
+
+    #[test]
+    fn test_mcp_result_to_value_empty_content() {
+        let result = McpToolResult {
+            content: vec![],
+            is_error: false,
+        };
+        let val = mcp_result_to_value(&result);
+        // Empty content → {"content": [], "isError": false}
+        assert_eq!(val["content"].as_array().unwrap().len(), 0);
+        assert_eq!(val["isError"], false);
+    }
+
+    #[test]
+    fn test_resolve_env_value_unclosed_brace() {
+        let keyring = Keyring::empty();
+        assert_eq!(
+            resolve_env_value("${unclosed", &keyring),
+            "${unclosed"
+        );
     }
 }
