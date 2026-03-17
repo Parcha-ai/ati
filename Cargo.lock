@@ -38,6 +38,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-tools-interface"
+version = "0.1.1"
+dependencies = [
+ "aes-gcm",
+ "assert_cmd",
+ "axum",
+ "base64",
+ "chrono",
+ "clap",
+ "comfy-table",
+ "glob",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "jsonpath-rust",
+ "jsonwebtoken",
+ "libc",
+ "openapiv3",
+ "predicates",
+ "rand 0.8.5",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "strsim",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+ "zeroize",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -134,47 +175,6 @@ dependencies = [
  "predicates-core",
  "predicates-tree",
  "wait-timeout",
-]
-
-[[package]]
-name = "ati"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "assert_cmd",
- "axum",
- "base64",
- "chrono",
- "clap",
- "comfy-table",
- "glob",
- "hex",
- "hmac",
- "http-body-util",
- "jsonpath-rust",
- "jsonwebtoken",
- "libc",
- "openapiv3",
- "predicates",
- "rand 0.8.5",
- "reqwest",
- "ring",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "strsim",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "wiremock",
- "zeroize",
 ]
 
 [[package]]
