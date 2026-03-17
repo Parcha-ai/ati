@@ -1,6 +1,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Parcha-ai/ati/ci.yml?branch=main&label=CI)](https://github.com/Parcha-ai/ati/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/Parcha-ai/ati)](LICENSE)
-[![443 tests](https://img.shields.io/badge/tests-443-brightgreen)](#building)
+[![642 tests](https://img.shields.io/badge/tests-642-brightgreen)](#building)
+[![PyPI](https://img.shields.io/pypi/v/ati-client)](https://pypi.org/project/ati-client/)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-blue)](#building)
 
 # ATI — Agent Tools Interface
@@ -30,6 +31,10 @@ curl -fsSL https://github.com/Parcha-ai/ati/releases/latest/download/ati-x86_64-
 
 # Linux (x86_64, static musl binary)
 curl -fsSL https://github.com/Parcha-ai/ati/releases/latest/download/ati-x86_64-unknown-linux-musl.tar.gz \
+  | tar xz && sudo mv ati /usr/local/bin/
+
+# Linux (ARM64, static musl binary)
+curl -fsSL https://github.com/Parcha-ai/ati/releases/latest/download/ati-aarch64-unknown-linux-musl.tar.gz \
   | tar xz && sudo mv ati /usr/local/bin/
 ```
 
@@ -852,6 +857,56 @@ All endpoints except `/health` and JWKS require `Authorization: Bearer <JWT>` wh
 
 ---
 
+## Python SDK
+
+The `ati-client` Python package provides orchestrator provisioning and JWT token utilities for integrating ATI into Python orchestrators.
+
+```bash
+pip install ati-client
+```
+
+### Orchestrator Provisioning
+
+```python
+from ati import AtiOrchestrator
+
+orch = AtiOrchestrator(
+    proxy_url="https://ati-proxy.example.com",
+    secret="17332cf135d362f79a2ed700b13e1215978be1d6ae6e133d25b6b3f21fa10299",
+)
+
+# One call — returns env vars to inject into the sandbox
+env_vars = orch.provision_sandbox(
+    agent_id=f"sandbox:{sandbox_id}",
+    tools=["finnhub_quote", "web_search", "github__*"],
+    skills=["financial-analysis"],
+    ttl_seconds=7200,
+    rate={"tool:github__*": "10/hour"},
+)
+# env_vars = {"ATI_PROXY_URL": "...", "ATI_SESSION_TOKEN": "eyJ..."}
+```
+
+### Token Utilities
+
+```python
+from ati import issue_token, validate_token, inspect_token
+
+token = issue_token(
+    secret="17332cf135d362f79a...",
+    sub="agent-7",
+    scope="tool:web_search tool:finnhub_quote",
+    ttl_seconds=3600,
+)
+
+claims = validate_token(token, secret="17332cf135d362f79a...")
+print(claims.sub)       # "agent-7"
+print(claims.scopes())  # ["tool:web_search", "tool:finnhub_quote"]
+```
+
+Tokens are HS256-signed JWTs fully compatible with the Rust proxy — tested bidirectionally. See [`ati-client/python/`](ati-client/python/) for full docs.
+
+---
+
 ## CLI Reference
 
 ```
@@ -917,7 +972,7 @@ cargo build                                            # Debug
 cargo build --release                                  # Release
 cargo build --release --target x86_64-unknown-linux-musl  # Static binary (no glibc)
 
-cargo test                                             # 419 tests
+cargo test                                             # 642 tests
 bash scripts/test_skills_e2e.sh                        # Skill e2e tests
 cargo test --test mcp_live_test -- --ignored           # Live MCP tests (needs API keys)
 ```
@@ -934,6 +989,7 @@ ati/
 ├── contrib/                # 35+ additional manifests and specs (gitignored)
 ├── skills/                 # Skill methodology documents
 ├── examples/               # 6 SDK integrations (Claude, OpenAI, ADK, LangChain, Codex, Pi)
+├── ati-client/python/      # Python SDK (pip install ati-client)
 ├── scripts/                # E2E test scripts
 ├── docs/
 │   ├── SECURITY.md         # Threat model and security design
