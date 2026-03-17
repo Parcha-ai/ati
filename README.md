@@ -2,6 +2,7 @@
 [![License](https://img.shields.io/github/license/Parcha-ai/ati)](LICENSE)
 [![642 tests](https://img.shields.io/badge/tests-642-brightgreen)](#building)
 [![PyPI](https://img.shields.io/pypi/v/ati-client)](https://pypi.org/project/ati-client/)
+[![crates.io](https://img.shields.io/crates/v/agent-tools-interface)](https://crates.io/crates/agent-tools-interface)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-blue)](#building)
 
 # ATI — Agent Tools Interface
@@ -41,7 +42,10 @@ curl -fsSL https://github.com/Parcha-ai/ati/releases/latest/download/ati-aarch64
 ### From source
 
 ```bash
-# With cargo
+# From crates.io
+cargo install agent-tools-interface
+
+# Or from git
 cargo install --git https://github.com/Parcha-ai/ati.git
 
 # Or clone and build
