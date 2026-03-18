@@ -198,12 +198,12 @@ auth_type = "none"
     assert!(tools.len() >= 6, "Expected >= 6 tools, got {}", tools.len());
 
     // Check specific tools exist with correct prefixed names
-    assert!(registry.get_tool("petstore__getPetById").is_some());
-    assert!(registry.get_tool("petstore__addPet").is_some());
-    assert!(registry.get_tool("petstore__findPetsByStatus").is_some());
-    assert!(registry.get_tool("petstore__getInventory").is_some());
-    assert!(registry.get_tool("petstore__getUserByName").is_some());
-    assert!(registry.get_tool("petstore__deletePet").is_some());
+    assert!(registry.get_tool("petstore:getPetById").is_some());
+    assert!(registry.get_tool("petstore:addPet").is_some());
+    assert!(registry.get_tool("petstore:findPetsByStatus").is_some());
+    assert!(registry.get_tool("petstore:getInventory").is_some());
+    assert!(registry.get_tool("petstore:getUserByName").is_some());
+    assert!(registry.get_tool("petstore:deletePet").is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -237,8 +237,8 @@ openapi_include_tags = ["pet"]
     );
 
     // Store and user tools should NOT be present
-    assert!(registry.get_tool("petstore__getInventory").is_none());
-    assert!(registry.get_tool("petstore__getUserByName").is_none());
+    assert!(registry.get_tool("petstore:getInventory").is_none());
+    assert!(registry.get_tool("petstore:getUserByName").is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -263,9 +263,9 @@ openapi_exclude_tags = ["store", "user"]
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     // Only pet-tagged operations remain
-    assert!(registry.get_tool("petstore__getInventory").is_none());
-    assert!(registry.get_tool("petstore__getUserByName").is_none());
-    assert!(registry.get_tool("petstore__getPetById").is_some());
+    assert!(registry.get_tool("petstore:getInventory").is_none());
+    assert!(registry.get_tool("petstore:getUserByName").is_none());
+    assert!(registry.get_tool("petstore:getPetById").is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -319,10 +319,10 @@ openapi_exclude_operations = ["deletePet", "getInventory"]
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
-    assert!(registry.get_tool("petstore__deletePet").is_none());
-    assert!(registry.get_tool("petstore__getInventory").is_none());
-    assert!(registry.get_tool("petstore__getPetById").is_some());
-    assert!(registry.get_tool("petstore__addPet").is_some());
+    assert!(registry.get_tool("petstore:deletePet").is_none());
+    assert!(registry.get_tool("petstore:getInventory").is_none());
+    assert!(registry.get_tool("petstore:getPetById").is_some());
+    assert!(registry.get_tool("petstore:addPet").is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ auth_type = "none"
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     // Check getPetById tool properties
-    let (provider, tool) = registry.get_tool("petstore__getPetById").unwrap();
+    let (provider, tool) = registry.get_tool("petstore:getPetById").unwrap();
     assert_eq!(provider.name, "petstore");
     assert_eq!(provider.handler, "openapi");
     assert!(tool.description.contains("Find pet by ID"));
@@ -397,7 +397,7 @@ auth_type = "none"
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
-    let (_, tool) = registry.get_tool("petstore__addPet").unwrap();
+    let (_, tool) = registry.get_tool("petstore:addPet").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
 
@@ -433,7 +433,7 @@ auth_type = "none"
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
-    let (_, tool) = registry.get_tool("petstore__findPetsByStatus").unwrap();
+    let (_, tool) = registry.get_tool("petstore:findPetsByStatus").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
 
@@ -473,7 +473,7 @@ tags = ["lookup", "single-entity"]
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
-    let (_, tool) = registry.get_tool("petstore__getPetById").unwrap();
+    let (_, tool) = registry.get_tool("petstore:getPetById").unwrap();
     assert_eq!(tool.description, "Get a pet (overridden)");
     assert_eq!(
         tool.hint.as_deref(),
@@ -571,7 +571,7 @@ description = "Search query"
     assert!(providers.len() >= 2);
 
     // Both tool types should be accessible
-    assert!(registry.get_tool("petstore__getPetById").is_some());
+    assert!(registry.get_tool("petstore:getPetById").is_some());
     assert!(registry.get_tool("search").is_some());
 
     // Total tools: 6 OpenAPI + 1 HTTP = 7
@@ -800,10 +800,10 @@ auth_type = "none"
     // Verify a specific tool appears with correct name
     let pet_tool = tools_list
         .iter()
-        .find(|t| t["name"] == "petstore__getPetById");
+        .find(|t| t["name"] == "petstore:getPetById");
     assert!(
         pet_tool.is_some(),
-        "petstore__getPetById not in MCP tools/list"
+        "petstore:getPetById not in MCP tools/list"
     );
     let pet_tool = pet_tool.unwrap();
     assert!(pet_tool["description"]
@@ -901,7 +901,7 @@ auth_type = "none"
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
-    let (_, tool) = registry.get_tool("test__findPets").unwrap();
+    let (_, tool) = registry.get_tool("test:findPets").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let status = props.get("status").unwrap();
@@ -961,7 +961,7 @@ auth_type = "none"
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
-    let (_, tool) = registry.get_tool("test__findPets").unwrap();
+    let (_, tool) = registry.get_tool("test:findPets").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let ids = props.get("ids").unwrap();
@@ -1019,7 +1019,7 @@ auth_type = "none"
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
-    let (_, tool) = registry.get_tool("test__findPets").unwrap();
+    let (_, tool) = registry.get_tool("test:findPets").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let tags = props.get("tags").unwrap();
@@ -1077,7 +1077,7 @@ auth_type = "none"
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
-    let (_, tool) = registry.get_tool("test__findPets").unwrap();
+    let (_, tool) = registry.get_tool("test:findPets").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let colors = props.get("colors").unwrap();
@@ -1113,7 +1113,7 @@ auth_type = "none"
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     // findPetsByStatus has a scalar string query param "status" (not array)
-    let (_, tool) = registry.get_tool("petstore__findPetsByStatus").unwrap();
+    let (_, tool) = registry.get_tool("petstore:findPetsByStatus").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
     let props = schema.get("properties").unwrap().as_object().unwrap();
     let status = props.get("status").unwrap();
@@ -1174,7 +1174,7 @@ auth_type = "none"
     let dir = create_test_ati_dir(manifest, spec_json, "test.json");
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
-    let (_, tool) = registry.get_tool("test__getToken").unwrap();
+    let (_, tool) = registry.get_tool("test:getToken").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
 
     assert_eq!(
@@ -1204,7 +1204,7 @@ auth_type = "none"
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
     // addPet has a JSON body
-    let (_, tool) = registry.get_tool("petstore__addPet").unwrap();
+    let (_, tool) = registry.get_tool("petstore:addPet").unwrap();
     let schema = tool.input_schema.as_ref().unwrap();
 
     assert!(

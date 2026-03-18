@@ -19,10 +19,13 @@ fn test_parse_rate_spec_variants() {
     ];
 
     for (spec, expected_count, expected_window) in specs {
-        let rl = rate::parse_rate_spec(spec)
-            .unwrap_or_else(|e| panic!("Failed to parse '{spec}': {e}"));
+        let rl =
+            rate::parse_rate_spec(spec).unwrap_or_else(|e| panic!("Failed to parse '{spec}': {e}"));
         assert_eq!(rl.count, expected_count, "count mismatch for {spec}");
-        assert_eq!(rl.window_secs, expected_window, "window mismatch for {spec}");
+        assert_eq!(
+            rl.window_secs, expected_window,
+            "window mismatch for {spec}"
+        );
     }
 }
 
@@ -38,12 +41,12 @@ fn test_parse_rate_spec_invalid() {
 #[test]
 fn test_parse_rate_config_from_map() {
     let mut map = HashMap::new();
-    map.insert("tool:github__*".to_string(), "10/hour".to_string());
+    map.insert("tool:github:*".to_string(), "10/hour".to_string());
     map.insert("tool:*".to_string(), "100/hour".to_string());
 
     let config = rate::parse_rate_config(&map).unwrap();
     assert_eq!(config.limits.len(), 2);
-    assert_eq!(config.limits["tool:github__*"].count, 10);
+    assert_eq!(config.limits["tool:github:*"].count, 10);
     assert_eq!(config.limits["tool:*"].count, 100);
 }
 
@@ -77,7 +80,10 @@ fn test_check_and_record_stateful() {
             err_msg.contains("Rate limit exceeded"),
             "Expected 'Rate limit exceeded' in: {err_msg}"
         );
-        assert!(err_msg.contains("tool:*"), "Expected 'tool:*' in: {err_msg}");
+        assert!(
+            err_msg.contains("tool:*"),
+            "Expected 'tool:*' in: {err_msg}"
+        );
     }
 
     // --- Test: persistence ---
@@ -88,7 +94,11 @@ fn test_check_and_record_stateful() {
         let content = std::fs::read_to_string(&state_path).unwrap();
         let state: serde_json::Value = serde_json::from_str(&content).unwrap();
         let calls = state["calls"]["tool:*"].as_array().unwrap();
-        assert_eq!(calls.len(), 2, "Should have recorded 2 calls (not the failed 3rd)");
+        assert_eq!(
+            calls.len(),
+            2,
+            "Should have recorded 2 calls (not the failed 3rd)"
+        );
     }
 
     // --- Test: wildcard pattern matching with fresh state ---
@@ -99,7 +109,7 @@ fn test_check_and_record_stateful() {
 
         let mut limits = HashMap::new();
         limits.insert(
-            "tool:github__*".to_string(),
+            "tool:github:*".to_string(),
             RateLimit {
                 count: 2,
                 window_secs: 3600,
@@ -108,16 +118,16 @@ fn test_check_and_record_stateful() {
         let config = RateConfig { limits };
 
         // github tools should count against the limit
-        assert!(rate::check_and_record("github__search", &config).is_ok());
-        assert!(rate::check_and_record("github__create_issue", &config).is_ok());
+        assert!(rate::check_and_record("github:search", &config).is_ok());
+        assert!(rate::check_and_record("github:create_issue", &config).is_ok());
 
         // Third github call should fail
-        let result = rate::check_and_record("github__list_repos", &config);
+        let result = rate::check_and_record("github:list_repos", &config);
         assert!(result.is_err(), "Third github call should be rate limited");
 
         // Non-github tool should not be affected (no matching pattern)
         assert!(
-            rate::check_and_record("linear__list_issues", &config).is_ok(),
+            rate::check_and_record("linear:list_issues", &config).is_ok(),
             "Non-matching tool should not be rate limited"
         );
     }

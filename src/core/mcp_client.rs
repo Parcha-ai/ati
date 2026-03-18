@@ -834,7 +834,7 @@ fn build_auth_header(provider: &Provider, keyring: &Keyring) -> Option<String> {
 /// Execute an MCP tool call — high-level entry point for cli/call.rs dispatch.
 ///
 /// 1. Connects to the MCP server (or reuses connection via cache — future optimization)
-/// 2. Strips the provider prefix from the tool name (e.g., "github__read_file" → "read_file")
+/// 2. Strips the provider prefix from the tool name (e.g., "github:read_file" → "read_file")
 /// 3. Calls tools/call with the raw MCP tool name
 /// 4. Returns the result as a serde_json::Value
 pub async fn execute(
@@ -857,9 +857,13 @@ pub async fn execute_with_gen(
 ) -> Result<Value, McpError> {
     let client = McpClient::connect_with_gen(provider, keyring, gen_ctx, auth_cache).await?;
 
-    // Strip provider prefix: "github__read_file" → "read_file"
+    // Strip provider prefix: "github:read_file" → "read_file"
     let mcp_tool_name = tool_name
-        .strip_prefix(&format!("{}__", provider.name))
+        .strip_prefix(&format!(
+            "{}{}",
+            provider.name,
+            crate::core::manifest::TOOL_SEP_STR
+        ))
         .unwrap_or(tool_name);
 
     let result = client.call_tool(mcp_tool_name, args.clone()).await?;
@@ -1163,9 +1167,6 @@ mod tests {
     #[test]
     fn test_resolve_env_value_unclosed_brace() {
         let keyring = Keyring::empty();
-        assert_eq!(
-            resolve_env_value("${unclosed", &keyring),
-            "${unclosed"
-        );
+        assert_eq!(resolve_env_value("${unclosed", &keyring), "${unclosed");
     }
 }

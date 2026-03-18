@@ -32,7 +32,7 @@ __all__ = [
     "ProvisionError",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 class AtiOrchestrator:
@@ -80,11 +80,11 @@ class AtiOrchestrator:
 
         Args:
             agent_id: Unique identifier for this sandbox/agent (becomes JWT ``sub``).
-            tools: Tool names to grant access to (e.g. ``["web_search", "github__*"]``).
+            tools: Tool names to grant access to (e.g. ``["web_search", "github:*"]``).
             skills: Skill names to grant (e.g. ``["financial-analysis"]``).
             extra_scopes: Additional raw scope strings (e.g. ``["help"]``).
             ttl_seconds: Token lifetime (default 3600).
-            rate: Per-tool rate limits (e.g. ``{"tool:github__*": "10/hour"}``).
+            rate: Per-tool rate limits (e.g. ``{"tool:github:*": "10/hour"}``).
 
         Returns:
             Dict with ``ATI_PROXY_URL`` and ``ATI_SESSION_TOKEN``.

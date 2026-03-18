@@ -124,19 +124,19 @@ fn test_wildcard_scope() {
 
 #[test]
 fn test_wildcard_suffix_matching() {
-    let scopes = make_scopes(&["tool:github__*"]);
-    assert!(scopes.is_allowed("tool:github__search_repos"));
-    assert!(scopes.is_allowed("tool:github__create_issue"));
-    assert!(!scopes.is_allowed("tool:linear__list_issues"));
+    let scopes = make_scopes(&["tool:github:*"]);
+    assert!(scopes.is_allowed("tool:github:search_repos"));
+    assert!(scopes.is_allowed("tool:github:create_issue"));
+    assert!(!scopes.is_allowed("tool:linear:list_issues"));
 }
 
 #[test]
 fn test_mixed_scope_patterns() {
-    let scopes = make_scopes(&["tool:web_search", "tool:github__*", "skill:research-*"]);
+    let scopes = make_scopes(&["tool:web_search", "tool:github:*", "skill:research-*"]);
     assert!(scopes.is_allowed("tool:web_search"));
-    assert!(scopes.is_allowed("tool:github__search_repos"));
+    assert!(scopes.is_allowed("tool:github:search_repos"));
     assert!(scopes.is_allowed("skill:research-general-overview"));
-    assert!(!scopes.is_allowed("tool:linear__list_issues"));
+    assert!(!scopes.is_allowed("tool:linear:list_issues"));
     assert!(!scopes.is_allowed("skill:patent-analysis"));
 }
 
@@ -151,14 +151,17 @@ fn test_scope_from_jwt_claims() {
         iat: 1000000,
         exp: 4102444800, // Year 2100
         jti: None,
-        scope: "tool:web_search tool:github__* help".into(),
-        ati: Some(AtiNamespace { v: 1, rate: std::collections::HashMap::new() }),
+        scope: "tool:web_search tool:github:* help".into(),
+        ati: Some(AtiNamespace {
+            v: 1,
+            rate: std::collections::HashMap::new(),
+        }),
     };
 
     let scopes = ScopeConfig::from_jwt(&claims);
     assert_eq!(scopes.sub, "agent-7");
     assert!(scopes.is_allowed("tool:web_search"));
-    assert!(scopes.is_allowed("tool:github__search_repos"));
+    assert!(scopes.is_allowed("tool:github:search_repos"));
     assert!(scopes.help_enabled());
     assert!(!scopes.is_allowed("tool:patent_search"));
     assert_eq!(scopes.tool_scope_count(), 2);

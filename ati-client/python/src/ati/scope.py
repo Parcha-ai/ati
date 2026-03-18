@@ -33,8 +33,8 @@ def build_scope_string(
 ) -> str:
     """Build a space-delimited scope string from typed lists.
 
-    >>> build_scope_string(tools=["web_search", "github__*"], skills=["research-*"])
-    'tool:web_search tool:github__* skill:research-*'
+    >>> build_scope_string(tools=["web_search", "github:*"], skills=["research-*"])
+    'tool:web_search tool:github:* skill:research-*'
     """
     parts: list[str] = []
     for t in tools or []:

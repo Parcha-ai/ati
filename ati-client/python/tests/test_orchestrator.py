@@ -39,12 +39,12 @@ class TestAtiOrchestrator:
     def test_provision_with_rate_limits(self):
         env = self.orch.provision_sandbox(
             agent_id="agent-1",
-            tools=["github__*"],
-            rate={"tool:github__*": "10/hour"},
+            tools=["github:*"],
+            rate={"tool:github:*": "10/hour"},
         )
         claims = inspect_token(env["ATI_SESSION_TOKEN"])
         assert claims.ati is not None
-        assert claims.ati.rate == {"tool:github__*": "10/hour"}
+        assert claims.ati.rate == {"tool:github:*": "10/hour"}
 
     def test_provision_with_extra_scopes(self):
         env = self.orch.provision_sandbox(

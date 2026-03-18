@@ -95,7 +95,7 @@ fn test_append_and_tail_roundtrip() {
     unsafe { std::env::set_var("ATI_AUDIT_FILE", &path) };
 
     let entry1 = make_entry("web_search", AuditStatus::Ok, None);
-    let entry2 = make_entry("github__list_repos", AuditStatus::Error, Some("timeout"));
+    let entry2 = make_entry("github:list_repos", AuditStatus::Error, Some("timeout"));
 
     audit::append(&entry1).unwrap();
     audit::append(&entry2).unwrap();
@@ -104,14 +104,14 @@ fn test_append_and_tail_roundtrip() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].tool, "web_search");
     assert_eq!(entries[0].status, AuditStatus::Ok);
-    assert_eq!(entries[1].tool, "github__list_repos");
+    assert_eq!(entries[1].tool, "github:list_repos");
     assert_eq!(entries[1].status, AuditStatus::Error);
     assert_eq!(entries[1].error.as_deref(), Some("timeout"));
 
     // Tail with limit
     let entries = audit::tail(1).unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].tool, "github__list_repos");
+    assert_eq!(entries[0].tool, "github:list_repos");
 
     unsafe { std::env::remove_var("ATI_AUDIT_FILE") };
 }
@@ -124,7 +124,7 @@ fn test_search_by_tool_exact() {
 
     let entries = vec![
         make_entry("web_search", AuditStatus::Ok, None),
-        make_entry("github__list_repos", AuditStatus::Ok, None),
+        make_entry("github:list_repos", AuditStatus::Ok, None),
         make_entry("web_search", AuditStatus::Error, Some("fail")),
     ];
     write_entries_to_file(tmp.path(), &entries);
@@ -149,16 +149,16 @@ fn test_search_by_tool_wildcard() {
     let path = tmp.path().to_string_lossy().to_string();
 
     let entries = vec![
-        make_entry("github__list_repos", AuditStatus::Ok, None),
-        make_entry("github__search", AuditStatus::Ok, None),
+        make_entry("github:list_repos", AuditStatus::Ok, None),
+        make_entry("github:search", AuditStatus::Ok, None),
         make_entry("web_search", AuditStatus::Ok, None),
     ];
     write_entries_to_file(tmp.path(), &entries);
 
     unsafe { std::env::set_var("ATI_AUDIT_FILE", &path) };
-    let results = audit::search(Some("github__*"), None).unwrap();
+    let results = audit::search(Some("github:*"), None).unwrap();
     assert_eq!(results.len(), 2);
-    assert!(results.iter().all(|e| e.tool.starts_with("github__")));
+    assert!(results.iter().all(|e| e.tool.starts_with("github:")));
     unsafe { std::env::remove_var("ATI_AUDIT_FILE") };
 }
 
@@ -196,7 +196,10 @@ fn test_empty_audit_file_returns_empty() {
 #[test]
 fn test_nonexistent_audit_file_returns_empty() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let unique = format!("/tmp/ati_nonexistent_audit_test_{}.jsonl", std::process::id());
+    let unique = format!(
+        "/tmp/ati_nonexistent_audit_test_{}.jsonl",
+        std::process::id()
+    );
     let _ = std::fs::remove_file(&unique);
     unsafe { std::env::set_var("ATI_AUDIT_FILE", &unique) };
 

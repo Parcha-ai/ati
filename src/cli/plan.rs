@@ -25,10 +25,9 @@ pub struct PlanStep {
 /// Execute: ati plan <subcommand>
 pub async fn execute(cli: &Cli, subcmd: &PlanCommands) -> Result<(), Box<dyn std::error::Error>> {
     match subcmd {
-        PlanCommands::Execute {
-            file,
-            confirm_each,
-        } => execute_plan(cli, file, *confirm_each).await,
+        PlanCommands::Execute { file, confirm_each } => {
+            execute_plan(cli, file, *confirm_each).await
+        }
     }
 }
 
@@ -85,11 +84,7 @@ async fn execute_plan(
         }
 
         if confirm_each && is_tty {
-            eprintln!(
-                "  ati run {} {}",
-                step.tool,
-                raw_args.join(" ")
-            );
+            eprintln!("  ati run {} {}", step.tool, raw_args.join(" "));
             eprint!("  Execute? [Y/n] ");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
@@ -153,9 +148,7 @@ pub fn parse_plan_response(response: &str, query: &str) -> Result<Plan, String> 
 
 fn plan_from_value(val: &Value, query: &str) -> Result<Plan, String> {
     let steps_val = val.get("steps").ok_or("Missing 'steps' key in plan JSON")?;
-    let steps_arr = steps_val
-        .as_array()
-        .ok_or("'steps' is not an array")?;
+    let steps_arr = steps_val.as_array().ok_or("'steps' is not an array")?;
 
     let mut steps = Vec::new();
     for (i, step_val) in steps_arr.iter().enumerate() {

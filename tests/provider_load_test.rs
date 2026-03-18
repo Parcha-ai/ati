@@ -548,7 +548,7 @@ fn test_cached_provider_visible_in_tool_list() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("petstore__getPetById") || stdout.contains("getPetById"),
+        stdout.contains("petstore:getPetById") || stdout.contains("getPetById"),
         "Tool list should contain petstore tools: {}",
         stdout
     );

@@ -2,7 +2,7 @@
 //!
 //! Scopes are carried inside JWT claims as a space-delimited `scope` string.
 //! This module provides matching logic: exact matches, wildcard patterns
-//! (`tool:github__*`), and tool filtering.
+//! (`tool:github:*`), and tool filtering.
 
 use crate::core::manifest::{Provider, Tool};
 use thiserror::Error;
@@ -39,7 +39,7 @@ pub enum ScopeError {
 /// Scope configuration — constructed from JWT claims or programmatically.
 #[derive(Debug, Clone)]
 pub struct ScopeConfig {
-    /// Parsed scope strings (e.g. ["tool:web_search", "tool:github__*", "help"]).
+    /// Parsed scope strings (e.g. ["tool:web_search", "tool:github:*", "help"]).
     pub scopes: Vec<String>,
     /// Agent identity (from JWT `sub` claim).
     pub sub: String,
@@ -93,7 +93,7 @@ impl ScopeConfig {
     ///
     /// Supports:
     /// - Exact match: `"tool:web_search"` matches `"tool:web_search"`
-    /// - Wildcard suffix: `"tool:github__*"` matches `"tool:github__search_repos"`
+    /// - Wildcard suffix: `"tool:github:*"` matches `"tool:github:search_repos"`
     /// - Global wildcard: `"*"` matches everything
     /// - Empty tool scope: always allowed (tool has no scope requirement)
     pub fn is_allowed(&self, tool_scope: &str) -> bool {
@@ -208,10 +208,10 @@ mod tests {
 
     #[test]
     fn test_wildcard_suffix() {
-        let config = make_scopes(&["tool:github__*"]);
-        assert!(config.is_allowed("tool:github__search_repos"));
-        assert!(config.is_allowed("tool:github__create_issue"));
-        assert!(!config.is_allowed("tool:linear__list_issues"));
+        let config = make_scopes(&["tool:github:*"]);
+        assert!(config.is_allowed("tool:github:search_repos"));
+        assert!(config.is_allowed("tool:github:create_issue"));
+        assert!(!config.is_allowed("tool:linear:list_issues"));
     }
 
     #[test]
@@ -295,11 +295,11 @@ mod tests {
 
     #[test]
     fn test_mixed_patterns() {
-        let config = make_scopes(&["tool:web_search", "tool:github__*", "skill:research-*"]);
+        let config = make_scopes(&["tool:web_search", "tool:github:*", "skill:research-*"]);
         assert!(config.is_allowed("tool:web_search"));
-        assert!(config.is_allowed("tool:github__search_repos"));
+        assert!(config.is_allowed("tool:github:search_repos"));
         assert!(config.is_allowed("skill:research-general"));
-        assert!(!config.is_allowed("tool:linear__list_issues"));
+        assert!(!config.is_allowed("tool:linear:list_issues"));
         assert!(!config.is_allowed("skill:patent-analysis"));
     }
 }

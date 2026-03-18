@@ -23,7 +23,7 @@ fn test_plan_json_roundtrip() {
         query: "test query".to_string(),
         steps: vec![
             PlanStep {
-                tool: "hackernews__top_stories".to_string(),
+                tool: "hackernews:top_stories".to_string(),
                 args: {
                     let mut m = HashMap::new();
                     m.insert("limit".to_string(), serde_json::json!(5));
@@ -48,7 +48,7 @@ fn test_plan_json_roundtrip() {
     let parsed: Plan = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.query, "test query");
     assert_eq!(parsed.steps.len(), 2);
-    assert_eq!(parsed.steps[0].tool, "hackernews__top_stories");
+    assert_eq!(parsed.steps[0].tool, "hackernews:top_stories");
     assert_eq!(parsed.steps[1].tool, "web_search");
     assert_eq!(parsed.steps[0].description, "Get top stories");
 }
@@ -71,8 +71,7 @@ fn test_plan_save_and_load() {
     let json = serde_json::to_string_pretty(&plan).unwrap();
     std::fs::write(&plan_path, &json).unwrap();
 
-    let loaded: Plan =
-        serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let loaded: Plan = serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
     assert_eq!(loaded.query, "find info");
     assert_eq!(loaded.steps.len(), 1);
 }
@@ -139,7 +138,7 @@ fn test_plan_execute_unknown_tool() {
     let plan = Plan {
         query: "test".to_string(),
         steps: vec![PlanStep {
-            tool: "nonexistent_tool__xyz".to_string(),
+            tool: "nonexistent_tool:xyz".to_string(),
             args: HashMap::new(),
             description: "should fail".to_string(),
         }],
@@ -170,8 +169,14 @@ fn test_assist_help_shows_plan_flag() {
         .unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--plan"), "assist --help should mention --plan");
-    assert!(stdout.contains("--save"), "assist --help should mention --save");
+    assert!(
+        stdout.contains("--plan"),
+        "assist --help should mention --plan"
+    );
+    assert!(
+        stdout.contains("--save"),
+        "assist --help should mention --save"
+    );
 }
 
 /// Test `ati --format json` alias works (output contract).

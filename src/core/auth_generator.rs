@@ -179,65 +179,63 @@ pub async fn generate(
     final_env.extend(expanded_env);
 
     // 4. Spawn subprocess
-    let output = match gen.gen_type {
-        AuthGenType::Command => {
-            let command = gen
-                .command
-                .as_deref()
-                .ok_or_else(|| AuthGenError::Config("command required for type=command".into()))?;
+    let output =
+        match gen.gen_type {
+            AuthGenType::Command => {
+                let command = gen.command.as_deref().ok_or_else(|| {
+                    AuthGenError::Config("command required for type=command".into())
+                })?;
 
-            let child = tokio::process::Command::new(command)
-                .args(&expanded_args)
-                .env_clear()
-                .envs(&final_env)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| AuthGenError::Spawn(format!("{command}: {e}")))?;
+                let child = tokio::process::Command::new(command)
+                    .args(&expanded_args)
+                    .env_clear()
+                    .envs(&final_env)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .map_err(|e| AuthGenError::Spawn(format!("{command}: {e}")))?;
 
-            let timeout = Duration::from_secs(gen.timeout_secs);
-            tokio::time::timeout(timeout, child.wait_with_output())
-                .await
-                .map_err(|_| AuthGenError::Timeout(gen.timeout_secs))?
-                .map_err(AuthGenError::Io)?
-        }
-        AuthGenType::Script => {
-            let interpreter = gen
-                .interpreter
-                .as_deref()
-                .ok_or_else(|| AuthGenError::Config("interpreter required for type=script".into()))?;
-            let script = gen
-                .script
-                .as_deref()
-                .ok_or_else(|| AuthGenError::Config("script required for type=script".into()))?;
+                let timeout = Duration::from_secs(gen.timeout_secs);
+                tokio::time::timeout(timeout, child.wait_with_output())
+                    .await
+                    .map_err(|_| AuthGenError::Timeout(gen.timeout_secs))?
+                    .map_err(AuthGenError::Io)?
+            }
+            AuthGenType::Script => {
+                let interpreter = gen.interpreter.as_deref().ok_or_else(|| {
+                    AuthGenError::Config("interpreter required for type=script".into())
+                })?;
+                let script = gen.script.as_deref().ok_or_else(|| {
+                    AuthGenError::Config("script required for type=script".into())
+                })?;
 
-            // Write script to a temp file
-            let suffix: u32 = rand::random();
-            let tmp_path = std::env::temp_dir().join(format!("ati_gen_{suffix}.tmp"));
-            std::fs::write(&tmp_path, script).map_err(AuthGenError::Io)?;
+                // Write script to a temp file
+                let suffix: u32 = rand::random();
+                let tmp_path = std::env::temp_dir().join(format!("ati_gen_{suffix}.tmp"));
+                std::fs::write(&tmp_path, script).map_err(AuthGenError::Io)?;
 
-            let child = tokio::process::Command::new(interpreter)
-                .arg(&tmp_path)
-                .env_clear()
-                .envs(&final_env)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| AuthGenError::Spawn(format!("{interpreter}: {e}")))?;
+                let child = tokio::process::Command::new(interpreter)
+                    .arg(&tmp_path)
+                    .env_clear()
+                    .envs(&final_env)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .map_err(|e| AuthGenError::Spawn(format!("{interpreter}: {e}")))?;
 
-            let timeout = Duration::from_secs(gen.timeout_secs);
-            let result = tokio::time::timeout(timeout, child.wait_with_output())
-                .await
-                .map_err(|_| AuthGenError::Timeout(gen.timeout_secs))?
-                .map_err(AuthGenError::Io)?;
+                let timeout = Duration::from_secs(gen.timeout_secs);
+                let result = tokio::time::timeout(timeout, child.wait_with_output())
+                    .await
+                    .map_err(|_| AuthGenError::Timeout(gen.timeout_secs))?
+                    .map_err(AuthGenError::Io)?;
 
-            // Clean up temp file
-            let _ = std::fs::remove_file(&tmp_path);
-            result
-        }
-    };
+                // Clean up temp file
+                let _ = std::fs::remove_file(&tmp_path);
+                result
+            }
+        };
 
     if !output.status.success() {
         let code = output.status.code().unwrap_or(-1);
@@ -274,13 +272,12 @@ pub async fn generate(
                 // Extract fields per inject map
                 let mut found_primary = false;
                 for (json_path, target) in &gen.inject {
-                    let extracted = extract_json_path(&json, json_path)
-                        .ok_or_else(|| {
-                            AuthGenError::OutputParse(format!(
-                                "JSON path '{}' not found in output",
-                                json_path
-                            ))
-                        })?;
+                    let extracted = extract_json_path(&json, json_path).ok_or_else(|| {
+                        AuthGenError::OutputParse(format!(
+                            "JSON path '{}' not found in output",
+                            json_path
+                        ))
+                    })?;
 
                     match target.inject_type.as_str() {
                         "header" => {
@@ -316,7 +313,12 @@ pub async fn generate(
     };
 
     // 6. Cache
-    cache.insert(&provider.name, &ctx.jwt_sub, cred.clone(), gen.cache_ttl_secs);
+    cache.insert(
+        &provider.name,
+        &ctx.jwt_sub,
+        cred.clone(),
+        gen.cache_ttl_secs,
+    );
 
     Ok(cred)
 }
@@ -397,8 +399,8 @@ mod tests {
     fn test_expand_variables_context() {
         let ctx = GenContext {
             jwt_sub: "agent-7".into(),
-            jwt_scope: "tool:brain__*".into(),
-            tool_name: "brain__query".into(),
+            jwt_scope: "tool:brain:*".into(),
+            tool_name: "brain:query".into(),
             timestamp: 1773096459,
         };
         let keyring = Keyring::empty();
@@ -409,7 +411,7 @@ mod tests {
         );
         assert_eq!(
             expand_variables("${TOOL_NAME}", &ctx, &keyring).unwrap(),
-            "brain__query"
+            "brain:query"
         );
         assert_eq!(
             expand_variables("${TIMESTAMP}", &ctx, &keyring).unwrap(),
@@ -417,7 +419,7 @@ mod tests {
         );
         assert_eq!(
             expand_variables("sub=${JWT_SUB}&tool=${TOOL_NAME}", &ctx, &keyring).unwrap(),
-            "sub=agent-7&tool=brain__query"
+            "sub=agent-7&tool=brain:query"
         );
     }
 
@@ -455,8 +457,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_path_simple() {
-        let json: serde_json::Value =
-            serde_json::json!({"token": "abc123", "expires_in": 3600});
+        let json: serde_json::Value = serde_json::json!({"token": "abc123", "expires_in": 3600});
         assert_eq!(extract_json_path(&json, "token"), Some("abc123".into()));
         assert_eq!(extract_json_path(&json, "expires_in"), Some("3600".into()));
     }
@@ -860,7 +861,7 @@ mod tests {
         let ctx = GenContext {
             jwt_sub: "agent-42".into(),
             jwt_scope: "*".into(),
-            tool_name: "brain__query".into(),
+            tool_name: "brain:query".into(),
             timestamp: 1234567890,
         };
         let keyring = Keyring::empty();

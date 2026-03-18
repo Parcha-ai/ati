@@ -61,7 +61,7 @@ impl std::fmt::Debug for JwtConfig {
 pub struct AtiNamespace {
     /// Claims schema version.
     pub v: u8,
-    /// Per-tool-pattern rate limits (e.g. {"tool:github__*": "10/hour"}).
+    /// Per-tool-pattern rate limits (e.g. {"tool:github:*": "10/hour"}).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub rate: HashMap<String, String>,
 }
@@ -344,22 +344,25 @@ mod tests {
             exp: now + 1800,
             jti: Some(uuid::Uuid::new_v4().to_string()),
             scope: scope.into(),
-            ati: Some(AtiNamespace { v: 1, rate: HashMap::new() }),
+            ati: Some(AtiNamespace {
+                v: 1,
+                rate: HashMap::new(),
+            }),
         }
     }
 
     #[test]
     fn test_hs256_round_trip() {
         let config = hs256_config();
-        let claims = make_claims("tool:web_search tool:github__*");
+        let claims = make_claims("tool:web_search tool:github:*");
 
         let token = issue(&claims, &config).unwrap();
         let decoded = validate(&token, &config).unwrap();
 
         assert_eq!(decoded.sub, "agent-7");
         assert_eq!(decoded.aud, "ati-proxy");
-        assert_eq!(decoded.scope, "tool:web_search tool:github__*");
-        assert_eq!(decoded.scopes(), vec!["tool:web_search", "tool:github__*"]);
+        assert_eq!(decoded.scope, "tool:web_search tool:github:*");
+        assert_eq!(decoded.scopes(), vec!["tool:web_search", "tool:github:*"]);
         assert_eq!(decoded.iss, Some("ati-orchestrator".into()));
     }
 
@@ -456,13 +459,13 @@ mod tests {
 
     #[test]
     fn test_scope_parsing() {
-        let claims = make_claims("tool:web_search tool:github__* skill:research-* help");
+        let claims = make_claims("tool:web_search tool:github:* skill:research-* help");
         let scopes = claims.scopes();
         assert_eq!(
             scopes,
             vec![
                 "tool:web_search",
-                "tool:github__*",
+                "tool:github:*",
                 "skill:research-*",
                 "help"
             ]

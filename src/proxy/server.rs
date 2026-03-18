@@ -50,9 +50,76 @@ pub struct ProxyState {
 #[derive(Debug, Deserialize)]
 pub struct CallRequest {
     pub tool_name: String,
-    pub args: HashMap<String, Value>,
+    /// Tool arguments — accepts a JSON object (key-value pairs) for HTTP/MCP/OpenAPI tools,
+    /// or a JSON array of strings / a single string for CLI tools.
+    /// The proxy auto-detects the handler type and routes accordingly.
+    #[serde(default = "default_args")]
+    pub args: Value,
+    /// Deprecated: use `args` with an array value instead.
+    /// Kept for backward compatibility — if present, takes precedence for CLI tools.
     #[serde(default)]
     pub raw_args: Option<Vec<String>>,
+}
+
+fn default_args() -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
+impl CallRequest {
+    /// Extract args as a HashMap for HTTP/MCP/OpenAPI tools.
+    /// If `args` is a JSON object, returns its entries.
+    /// If `args` is something else (array, string), returns an empty map.
+    fn args_as_map(&self) -> HashMap<String, Value> {
+        match &self.args {
+            Value::Object(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            _ => HashMap::new(),
+        }
+    }
+
+    /// Extract positional args for CLI tools.
+    /// Priority: explicit `raw_args` field > `args` array > `args` string > `args._positional` > empty.
+    fn args_as_positional(&self) -> Vec<String> {
+        // Backward compat: explicit raw_args wins
+        if let Some(ref raw) = self.raw_args {
+            return raw.clone();
+        }
+        match &self.args {
+            // ["pr", "list", "--repo", "X"]
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(|v| match v {
+                    Value::String(s) => Some(s.clone()),
+                    other => Some(other.to_string()),
+                })
+                .collect(),
+            // "pr list --repo X"
+            Value::String(s) => s.split_whitespace().map(String::from).collect(),
+            // {"_positional": ["pr", "list"]} or {"--key": "value"} converted to CLI flags
+            Value::Object(map) => {
+                if let Some(Value::Array(pos)) = map.get("_positional") {
+                    return pos
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::String(s) => Some(s.clone()),
+                            other => Some(other.to_string()),
+                        })
+                        .collect();
+                }
+                // Convert map entries to --key value pairs
+                let mut result = Vec::new();
+                for (k, v) in map {
+                    result.push(format!("--{k}"));
+                    match v {
+                        Value::String(s) => result.push(s.clone()),
+                        Value::Bool(true) => {} // flag, no value needed
+                        other => result.push(other.to_string()),
+                    }
+                }
+                result
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -236,10 +303,11 @@ async fn handle_call(
 
     let response = match provider.handler.as_str() {
         "mcp" => {
+            let args_map = call_req.args_as_map();
             match mcp_client::execute_with_gen(
                 provider,
                 &call_req.tool_name,
-                &call_req.args,
+                &args_map,
                 &state.keyring,
                 Some(&gen_ctx),
                 Some(&state.auth_cache),
@@ -263,10 +331,10 @@ async fn handle_call(
             }
         }
         "cli" => {
-            let raw = call_req.raw_args.as_deref().unwrap_or(&[]);
+            let positional = call_req.args_as_positional();
             match crate::core::cli_executor::execute_with_gen(
                 provider,
-                raw,
+                &positional,
                 &state.keyring,
                 Some(&gen_ctx),
                 Some(&state.auth_cache),
@@ -290,15 +358,14 @@ async fn handle_call(
             }
         }
         _ => {
+            let args_map = call_req.args_as_map();
             let raw_response = match match provider.handler.as_str() {
-                "xai" => {
-                    xai::execute_xai_tool(provider, tool, &call_req.args, &state.keyring).await
-                }
+                "xai" => xai::execute_xai_tool(provider, tool, &args_map, &state.keyring).await,
                 _ => {
                     http::execute_tool_with_gen(
                         provider,
                         tool,
-                        &call_req.args,
+                        &args_map,
                         &state.keyring,
                         Some(&gen_ctx),
                         Some(&state.auth_cache),
@@ -1120,7 +1187,7 @@ fn write_proxy_audit(
     let entry = crate::core::audit::AuditEntry {
         ts: chrono::Utc::now().to_rfc3339(),
         tool: call_req.tool_name.clone(),
-        args: crate::core::audit::sanitize_args(&serde_json::json!(call_req.args)),
+        args: crate::core::audit::sanitize_args(&call_req.args),
         status: if error.is_some() {
             crate::core::audit::AuditStatus::Error
         } else {

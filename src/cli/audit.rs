@@ -41,7 +41,11 @@ fn output_entries(cli: &Cli, entries: &[audit::AuditEntry]) {
         }
         _ => {
             for entry in entries {
-                let status_marker = if entry.status == audit::AuditStatus::Ok { "OK" } else { "ERR" };
+                let status_marker = if entry.status == audit::AuditStatus::Ok {
+                    "OK"
+                } else {
+                    "ERR"
+                };
                 let error_info = entry.error.as_deref().unwrap_or("");
                 println!(
                     "{} [{}] {} ({}ms) agent={} {}",

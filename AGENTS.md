@@ -84,12 +84,12 @@ Other commands:
 | `Keyring` | `core/keyring.rs` | AES-256-GCM encrypted key-value store. Session key read once from `/run/ati/.key` then unlinked. Memory mlock'd and zeroized on drop. |
 | `JwtConfig` | `core/jwt.rs` | JWT validation/issuance config: algorithm (ES256/HS256), keys, required issuer/audience, leeway. |
 | `TokenClaims` | `core/jwt.rs` | JWT claims: sub, aud, scope (space-delimited), exp, iat, jti, ati namespace. |
-| `ScopeConfig` | `core/scope.rs` | Per-tool allowlist with expiry timestamps. Supports wildcards (`tool:github__*`). Built from JWT claims. |
+| `ScopeConfig` | `core/scope.rs` | Per-tool allowlist with expiry timestamps. Supports wildcards (`tool:github:*`). Built from JWT claims. |
 | `ProxyState` | `proxy/server.rs` | Axum shared state: registry + skill_registry + keyring + jwt_config + verbose flag. |
 
 ### MCP Tool Naming
 
-MCP-discovered tools are namespaced as `<provider>__<tool_name>` (double underscore). When dispatching a call, the provider prefix is stripped before sending to the MCP server. Example: `ati run github__search_repositories` → MCP `tools/call` with name `search_repositories`.
+MCP-discovered tools are namespaced as `<provider>:<tool_name>` (colon separator). When dispatching a call, the provider prefix is stripped before sending to the MCP server. Example: `ati run github:search_repositories` → MCP `tools/call` with name `search_repositories`.
 
 ### OpenAPI Parameter Classification
 

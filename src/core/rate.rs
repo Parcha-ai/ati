@@ -7,7 +7,7 @@ use crate::core::scope::matches_wildcard;
 
 #[derive(Debug, Clone)]
 pub struct RateConfig {
-    /// Map from tool pattern (e.g. "tool:github__*") to rate limit
+    /// Map from tool pattern (e.g. "tool:github:*") to rate limit
     pub limits: HashMap<String, RateLimit>,
 }
 
@@ -57,7 +57,7 @@ pub fn parse_rate_spec(spec: &str) -> Result<RateLimit, RateError> {
 }
 
 /// Parse rate claims from JWT AtiNamespace.rate HashMap.
-/// Format: {"tool:github__*": "10/hour", "tool:*": "100/hour"}
+/// Format: {"tool:github:*": "10/hour", "tool:*": "100/hour"}
 pub fn parse_rate_config(rate_map: &HashMap<String, String>) -> Result<RateConfig, RateError> {
     let mut limits = HashMap::new();
     for (pattern, spec) in rate_map {
@@ -144,8 +144,8 @@ fn save_state(state: &RateState) -> Result<(), RateError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content =
-        serde_json::to_string(state).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let content = serde_json::to_string(state)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, content)?;
     std::fs::rename(&tmp_path, &path)?;
@@ -214,12 +214,12 @@ mod tests {
     #[test]
     fn test_parse_rate_config() {
         let mut map = HashMap::new();
-        map.insert("tool:github__*".to_string(), "10/hour".to_string());
+        map.insert("tool:github:*".to_string(), "10/hour".to_string());
         map.insert("tool:*".to_string(), "100/hour".to_string());
 
         let config = parse_rate_config(&map).unwrap();
         assert_eq!(config.limits.len(), 2);
-        assert_eq!(config.limits["tool:github__*"].count, 10);
+        assert_eq!(config.limits["tool:github:*"].count, 10);
         assert_eq!(config.limits["tool:*"].count, 100);
     }
 

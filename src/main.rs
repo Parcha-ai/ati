@@ -53,7 +53,7 @@ pub struct Cli {
 pub enum Commands {
     /// Execute a tool by name
     #[command(
-        after_help = "Examples:\n  ati run web_search --query \"rust async\"\n  ati run github__search_repositories --query \"ati\" -J\n  ati run get_stock_quote --symbol AAPL --output json"
+        after_help = "Examples:\n  ati run web_search --query \"rust async\"\n  ati run github:search_repositories --query \"ati\" -J\n  ati run get_stock_quote --symbol AAPL --output json"
     )]
     Run {
         /// Tool name (e.g. web_search)
@@ -501,7 +501,7 @@ pub enum TokenCommands {
         /// HS256 shared secret (hex string)
         #[arg(long)]
         secret: Option<String>,
-        /// Rate limits as pattern=spec (e.g. "tool:github__*=10/hour")
+        /// Rate limits as pattern=spec (e.g. "tool:github:*=10/hour")
         #[arg(long)]
         rate: Vec<String>,
     },
@@ -533,7 +533,7 @@ pub enum AuditCommands {
     },
     /// Search audit entries
     Search {
-        /// Filter by tool name (supports trailing wildcard, e.g. github__*)
+        /// Filter by tool name (supports trailing wildcard, e.g. github:*)
         #[arg(long)]
         tool: Option<String>,
         /// Show entries since duration ago (e.g. 1h, 30m, 7d)
@@ -569,9 +569,12 @@ async fn main() {
         Commands::Run { tool_name, args } => cli::call::execute(&cli, tool_name, args).await,
         Commands::Tool(subcmd) => cli::tools::execute(&cli, subcmd).await,
         Commands::Skill(subcmd) => cli::skills::execute(&cli, subcmd).await,
-        Commands::Assist { args, plan, save, local } => {
-            cli::help::execute_with_plan(&cli, args, *plan, save.as_deref(), *local).await
-        }
+        Commands::Assist {
+            args,
+            plan,
+            save,
+            local,
+        } => cli::help::execute_with_plan(&cli, args, *plan, save.as_deref(), *local).await,
         Commands::Plan(subcmd) => cli::plan::execute(&cli, subcmd).await,
         Commands::Provider(subcmd) => cli::provider::execute(&cli, subcmd).await,
         Commands::Auth(subcmd) => cli::auth::execute(&cli, subcmd).await,

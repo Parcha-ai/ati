@@ -27,7 +27,11 @@ async fn test_oauth2_rejects_http_token_url() {
         oauth2_token_url: Some(format!("{}/oauth/token", upstream.uri())),
         ..common::test_provider("oauth_test", &upstream.uri())
     };
-    let tool = common::test_tool("oauth_search", "/data", ati::core::manifest::HttpMethod::Get);
+    let tool = common::test_tool(
+        "oauth_search",
+        "/data",
+        ati::core::manifest::HttpMethod::Get,
+    );
     let keyring = common::test_keyring(&[("client_id", "id"), ("client_secret", "secret")]);
 
     let args = HashMap::new();

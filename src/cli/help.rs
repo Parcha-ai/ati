@@ -66,7 +66,11 @@ pub async fn execute_with_plan(
 /// - Otherwise -> loads local keyring, calls LLM directly
 ///
 /// If the first positional arg matches a tool or provider name, scopes to that tool/provider.
-pub async fn execute(cli: &Cli, args: &[String], local: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(
+    cli: &Cli,
+    args: &[String],
+    local: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Auto-detect: proxy mode if ATI_PROXY_URL is set
     if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
         if cli.verbose {
@@ -178,7 +182,11 @@ fn truncate_help_text(text: &str, max_chars: usize) -> String {
 }
 
 /// Local mode: load manifests + keyring, call LLM directly.
-async fn execute_local(cli: &Cli, args: &[String], local: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_local(
+    cli: &Cli,
+    args: &[String],
+    local: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = common::ati_dir();
 
     // Load manifests
@@ -460,8 +468,8 @@ async fn call_llm(
     local: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     // Check if local LLM is forced via --local flag or ATI_ASSIST_PROVIDER=local
-    let force_local = local
-        || std::env::var("ATI_ASSIST_PROVIDER").ok().as_deref() == Some("local");
+    let force_local =
+        local || std::env::var("ATI_ASSIST_PROVIDER").ok().as_deref() == Some("local");
     if force_local {
         return call_local_llm(system_prompt, query, cli.verbose).await;
     }
@@ -591,10 +599,9 @@ async fn call_local_llm(
     query: &str,
     verbose: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let host = std::env::var("OLLAMA_HOST")
-        .unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let model = std::env::var("ATI_OLLAMA_MODEL")
-        .unwrap_or_else(|_| "smollm3:3b".to_string());
+    let host =
+        std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let model = std::env::var("ATI_OLLAMA_MODEL").unwrap_or_else(|_| "smollm3:3b".to_string());
     let url = format!("{}/v1/chat/completions", host.trim_end_matches('/'));
 
     if verbose {
@@ -679,10 +686,10 @@ fn build_skills_for_tools(
     let mut skill_entries: Vec<(String, String)> = Vec::new(); // (name, content)
     let mut total_chars = 0;
 
-    // Collect provider names from tool names (tool name format: provider__tool)
+    // Collect provider names from tool names (tool name format: provider:tool)
     let mut provider_names = std::collections::HashSet::new();
     for tool_name in tool_names {
-        if let Some(idx) = tool_name.find("__") {
+        if let Some(idx) = tool_name.find(crate::core::manifest::TOOL_SEP) {
             provider_names.insert(&tool_name[..idx]);
         }
     }
@@ -751,9 +758,9 @@ fn build_skills_for_tools(
     // Phase 3: Keyword search — match tool names against skill keywords
     if total_chars < MAX_SKILL_CONTENT_CHARS {
         for tool_name in tool_names {
-            // Extract meaningful terms from tool name (split on __ and _)
+            // Extract meaningful terms from tool name (split on : and _)
             let terms: Vec<&str> = tool_name
-                .split("__")
+                .split(crate::core::manifest::TOOL_SEP)
                 .flat_map(|s| s.split('_'))
                 .filter(|s| s.len() > 2)
                 .collect();
@@ -990,8 +997,10 @@ async fn execute_plan_mode(
 
     // Load skills
     let skills_dir = ati_dir.join("skills");
-    let skill_registry = crate::core::skill::SkillRegistry::load(&skills_dir)
-        .unwrap_or_else(|_| crate::core::skill::SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap());
+    let skill_registry =
+        crate::core::skill::SkillRegistry::load(&skills_dir).unwrap_or_else(|_| {
+            crate::core::skill::SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap()
+        });
 
     // Build system prompt — similar to normal assist but with plan suffix
     let (system_prompt, _scoped_tools) = if let Some(ref tool_name) = scope_name {
@@ -1000,10 +1009,8 @@ async fn execute_plan_mode(
         build_scoped_context(tool_name, &registry, &skills_section, cli.verbose)?
     } else {
         let all_tools = registry.list_public_tools();
-        let scoped = crate::core::scope::filter_tools_by_scope(
-            all_tools,
-            &ScopeConfig::unrestricted(),
-        );
+        let scoped =
+            crate::core::scope::filter_tools_by_scope(all_tools, &ScopeConfig::unrestricted());
         let scoped = prefilter_tools_by_query(&scoped, &query, 50);
         let tools_context = build_tool_context(&scoped, false);
         let tool_names: Vec<&str> = scoped.iter().map(|(_, t)| t.name.as_str()).collect();
@@ -1024,8 +1031,9 @@ async fn execute_plan_mode(
     let content = call_llm(cli, &registry, &keyring, &plan_prompt, &query, local).await?;
 
     // Parse the LLM response as a plan
-    let plan = crate::cli::plan::parse_plan_response(&content, &query)
-        .map_err(|e| format!("Failed to parse plan from LLM response: {e}\n\nRaw response:\n{content}"))?;
+    let plan = crate::cli::plan::parse_plan_response(&content, &query).map_err(|e| {
+        format!("Failed to parse plan from LLM response: {e}\n\nRaw response:\n{content}")
+    })?;
 
     let json = serde_json::to_string_pretty(&plan)?;
 

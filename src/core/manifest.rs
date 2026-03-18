@@ -4,6 +4,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 
+/// Separator between provider name and tool name in compound tool identifiers.
+/// Example: `"finnhub:quote"`, `"github:search_repositories"`.
+pub const TOOL_SEP: char = ':';
+pub const TOOL_SEP_STR: &str = ":";
+
 #[derive(Error, Debug)]
 pub enum ManifestError {
     #[error("Failed to read manifest file {0}: {1}")]
@@ -682,9 +687,9 @@ impl ManifestRegistry {
             .collect()
     }
 
-    /// If `tool_name` has a `<provider>__<name>` prefix matching an MCP provider, return it.
+    /// If `tool_name` has a `<provider>:<name>` prefix matching an MCP provider, return it.
     pub fn find_mcp_provider_for_tool(&self, tool_name: &str) -> Option<&Provider> {
-        let prefix = tool_name.split("__").next()?;
+        let prefix = tool_name.split(TOOL_SEP).next()?;
         self.manifests
             .iter()
             .find(|m| m.provider.handler == "mcp" && m.provider.name == prefix)
@@ -724,7 +729,7 @@ impl ManifestRegistry {
     }
 
     /// Register dynamically discovered MCP tools for a provider.
-    /// Tools are prefixed with provider name: "github__read_file".
+    /// Tools are prefixed with provider name: `"github:read_file"`.
     pub fn register_mcp_tools(&mut self, provider_name: &str, mcp_tools: Vec<McpToolDef>) {
         // Find the manifest for this provider
         let mi = match self
@@ -737,7 +742,7 @@ impl ManifestRegistry {
         };
 
         for mcp_tool in mcp_tools {
-            let prefixed_name = format!("{}__{}", provider_name, mcp_tool.name);
+            let prefixed_name = format!("{}{}{}", provider_name, TOOL_SEP_STR, mcp_tool.name);
 
             let tool = Tool {
                 name: prefixed_name.clone(),

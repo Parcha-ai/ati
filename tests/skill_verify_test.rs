@@ -21,7 +21,9 @@ fn test_compute_content_hash_consistent() {
     // SHA-256 produces 64 hex characters
     assert_eq!(hash1.len(), 64);
     // All lowercase hex
-    assert!(hash1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(hash1
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 }
 
 #[test]
@@ -105,10 +107,7 @@ fn test_integrity_hash_mismatch_detected() {
     let original_md = "# Original content\n";
     let original_hash = skill::compute_content_hash(original_md);
 
-    let integrity = format!(
-        "[ati.integrity]\ncontent_hash = \"{}\"\n",
-        original_hash
-    );
+    let integrity = format!("[ati.integrity]\ncontent_hash = \"{}\"\n", original_hash);
 
     create_skill_with_integrity(
         tmp.path(),

@@ -91,7 +91,10 @@ fn issue_test_token(scope: &str) -> String {
         exp: now + 3600,
         jti: None,
         scope: scope.into(),
-        ati: Some(AtiNamespace { v: 1, rate: std::collections::HashMap::new() }),
+        ati: Some(AtiNamespace {
+            v: 1,
+            rate: std::collections::HashMap::new(),
+        }),
     };
     jwt::issue(&claims, &config).unwrap()
 }

@@ -23,10 +23,10 @@ orch = AtiOrchestrator(
 # Generate env vars to inject into a sandboxed agent
 env_vars = orch.provision_sandbox(
     agent_id=f"sandbox:{sandbox_id}",
-    tools=["finnhub_quote", "web_search", "github__*"],
+    tools=["finnhub_quote", "web_search", "github:*"],
     skills=["financial-analysis"],
     ttl_seconds=7200,
-    rate={"tool:github__*": "10/hour"},
+    rate={"tool:github:*": "10/hour"},
 )
 
 # env_vars = {
@@ -64,18 +64,18 @@ from ati import build_scope_string, check_scope, matches_wildcard
 
 # Build scope strings
 scope = build_scope_string(
-    tools=["web_search", "github__*"],
+    tools=["web_search", "github:*"],
     skills=["research-*"],
     extra=["help"],
 )
-# "tool:web_search tool:github__* skill:research-* help"
+# "tool:web_search tool:github:* skill:research-* help"
 
 # Check if a tool is allowed
-check_scope("tool:github__search_repos", ["tool:github__*"])  # True
+check_scope("tool:github:search_repos", ["tool:github:*"])  # True
 check_scope("tool:secret_api", ["tool:web_search"])            # False
 
 # Wildcard matching
-matches_wildcard("tool:github__search", "tool:github__*")  # True
+matches_wildcard("tool:github:search", "tool:github:*")  # True
 matches_wildcard("anything", "*")                           # True
 ```
 
@@ -93,11 +93,11 @@ Claims payload:
   "exp": 1700003600,
   "jti": "550e8400-e29b-41d4-a716-446655440000",
   "iss": "ati-orchestrator",
-  "scope": "tool:web_search tool:github__*",
+  "scope": "tool:web_search tool:github:*",
   "ati": {
     "v": 1,
     "rate": {
-      "tool:github__*": "10/hour"
+      "tool:github:*": "10/hour"
     }
   }
 }

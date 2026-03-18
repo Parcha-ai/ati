@@ -139,6 +139,9 @@ fn test_get_format_auto_text_for_empty_array() {
     // This is actually correct behavior per Rust's all() semantics on empty iterators
     match get_format(None, &value) {
         ResponseFormat::MarkdownTable => {}
-        other => panic!("Expected MarkdownTable for empty array (vacuous truth), got {:?}", other),
+        other => panic!(
+            "Expected MarkdownTable for empty array (vacuous truth), got {:?}",
+            other
+        ),
     }
 }

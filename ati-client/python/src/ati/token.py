@@ -121,12 +121,12 @@ def issue_token(
     Args:
         secret: Hex-encoded 32-byte HS256 secret (64 hex chars).
         sub: Subject — agent or sandbox identifier.
-        scope: Space-delimited scope string (e.g. ``"tool:web_search tool:github__*"``).
+        scope: Space-delimited scope string (e.g. ``"tool:web_search tool:github:*"``).
         ttl_seconds: Token lifetime in seconds (default 3600).
         aud: Audience claim (default ``"ati-proxy"``).
         iss: Issuer claim (default ``"ati-orchestrator"``).
         jti: Token ID (auto-generated UUID4 if None).
-        rate: Optional per-tool rate limits (e.g. ``{"tool:github__*": "10/hour"}``).
+        rate: Optional per-tool rate limits (e.g. ``{"tool:github:*": "10/hour"}``).
 
     Returns:
         Signed JWT string.

@@ -45,9 +45,16 @@ async fn test_auth_gen_timeout_through_execution() {
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
-    let err = execute_tool_with_gen(&provider, &tool, &HashMap::new(), &keyring, Some(&ctx), Some(&cache))
-        .await
-        .unwrap_err();
+    let err = execute_tool_with_gen(
+        &provider,
+        &tool,
+        &HashMap::new(),
+        &keyring,
+        Some(&ctx),
+        Some(&cache),
+    )
+    .await
+    .unwrap_err();
 
     let msg = format!("{err}");
     assert!(
@@ -82,9 +89,16 @@ async fn test_auth_gen_nonzero_exit_through_execution() {
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
-    let err = execute_tool_with_gen(&provider, &tool, &HashMap::new(), &keyring, Some(&ctx), Some(&cache))
-        .await
-        .unwrap_err();
+    let err = execute_tool_with_gen(
+        &provider,
+        &tool,
+        &HashMap::new(),
+        &keyring,
+        Some(&ctx),
+        Some(&cache),
+    )
+    .await
+    .unwrap_err();
 
     let msg = format!("{err}");
     assert!(
@@ -119,9 +133,16 @@ async fn test_auth_gen_invalid_json_output() {
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
-    let err = execute_tool_with_gen(&provider, &tool, &HashMap::new(), &keyring, Some(&ctx), Some(&cache))
-        .await
-        .unwrap_err();
+    let err = execute_tool_with_gen(
+        &provider,
+        &tool,
+        &HashMap::new(),
+        &keyring,
+        Some(&ctx),
+        Some(&cache),
+    )
+    .await
+    .unwrap_err();
 
     let msg = format!("{err}");
     assert!(
@@ -165,9 +186,16 @@ async fn test_auth_gen_missing_inject_path() {
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
-    let err = execute_tool_with_gen(&provider, &tool, &HashMap::new(), &keyring, Some(&ctx), Some(&cache))
-        .await
-        .unwrap_err();
+    let err = execute_tool_with_gen(
+        &provider,
+        &tool,
+        &HashMap::new(),
+        &keyring,
+        Some(&ctx),
+        Some(&cache),
+    )
+    .await
+    .unwrap_err();
 
     let msg = format!("{err}");
     assert!(
@@ -213,9 +241,16 @@ async fn test_auth_gen_script_type_through_execution() {
     // We can't easily check the exact header wiremock received, but we can
     // verify the call succeeds (200 from upstream means auth was injected and
     // the request reached the mock — wiremock doesn't reject on unknown headers)
-    let result = execute_tool_with_gen(&provider, &tool, &HashMap::new(), &keyring, Some(&ctx), Some(&cache))
-        .await
-        .expect("script generator should succeed");
+    let result = execute_tool_with_gen(
+        &provider,
+        &tool,
+        &HashMap::new(),
+        &keyring,
+        Some(&ctx),
+        Some(&cache),
+    )
+    .await
+    .expect("script generator should succeed");
 
     assert_eq!(result["ok"], true);
 }
@@ -246,9 +281,16 @@ async fn test_auth_gen_command_not_found() {
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
-    let err = execute_tool_with_gen(&provider, &tool, &HashMap::new(), &keyring, Some(&ctx), Some(&cache))
-        .await
-        .unwrap_err();
+    let err = execute_tool_with_gen(
+        &provider,
+        &tool,
+        &HashMap::new(),
+        &keyring,
+        Some(&ctx),
+        Some(&cache),
+    )
+    .await
+    .unwrap_err();
 
     let msg = format!("{err}");
     assert!(
@@ -283,9 +325,16 @@ async fn test_auth_gen_header_auth_type() {
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
-    let result = execute_tool_with_gen(&provider, &tool, &HashMap::new(), &keyring, Some(&ctx), Some(&cache))
-        .await
-        .expect("header auth generator should succeed");
+    let result = execute_tool_with_gen(
+        &provider,
+        &tool,
+        &HashMap::new(),
+        &keyring,
+        Some(&ctx),
+        Some(&cache),
+    )
+    .await
+    .expect("header auth generator should succeed");
 
     assert_eq!(result["auth"], "header");
 }

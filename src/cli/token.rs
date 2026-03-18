@@ -122,7 +122,11 @@ fn issue(
         if parts.len() == 2 {
             rate_map.insert(parts[0].to_string(), parts[1].to_string());
         } else {
-            return Err(format!("Invalid rate spec '{}': expected pattern=count/unit (e.g. tool:github__*=10/hour)", arg).into());
+            return Err(format!(
+                "Invalid rate spec '{}': expected pattern=count/unit (e.g. tool:github:*=10/hour)",
+                arg
+            )
+            .into());
         }
     }
 
@@ -136,7 +140,10 @@ fn issue(
         exp: now + ttl,
         jti: Some(uuid::Uuid::new_v4().to_string()),
         scope: scope.to_string(),
-        ati: Some(AtiNamespace { v: 1, rate: rate_map }),
+        ati: Some(AtiNamespace {
+            v: 1,
+            rate: rate_map,
+        }),
     };
 
     // Build config from explicit args or env

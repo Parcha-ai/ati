@@ -64,7 +64,7 @@ ati init
 ati provider import-openapi https://clinicaltrials.gov/api/v2/openapi.json
 
 # Try it
-ati run clinicaltrials__searchStudies --query.term "cancer" --pageSize 3
+ati run clinicaltrials:searchStudies --query.term "cancer" --pageSize 3
 ```
 
 ---
@@ -89,11 +89,11 @@ ati tool list --provider finnhub | head -5
 # ┌──────────────────────┬──────────┬────────────────────────────────┐
 # │ DESCRIPTION          ┆ PROVIDER ┆ TOOL                           │
 # ╞══════════════════════╪══════════╪════════════════════════════════╡
-# │ Symbol Lookup        ┆ finnhub  ┆ finnhub__symbol-search         │
-# │ Company Profile      ┆ finnhub  ┆ finnhub__company-profile2      │
-# │ Quote                ┆ finnhub  ┆ finnhub__quote                 │
-# │ Insider Transactions ┆ finnhub  ┆ finnhub__insider-transactions  │
-# │ Basic Financials     ┆ finnhub  ┆ finnhub__company-basic-...     │
+# │ Symbol Lookup        ┆ finnhub  ┆ finnhub:symbol-search         │
+# │ Company Profile      ┆ finnhub  ┆ finnhub:company-profile2      │
+# │ Quote                ┆ finnhub  ┆ finnhub:quote                 │
+# │ Insider Transactions ┆ finnhub  ┆ finnhub:insider-transactions  │
+# │ Basic Financials     ┆ finnhub  ┆ finnhub:company-basic-...     │
 # └──────────────────────┴──────────┴────────────────────────────────┘
 ```
 
@@ -107,13 +107,13 @@ ati assist finnhub "research Apple stock — price, insider activity, and sentim
 # Here are the exact commands to research Apple (AAPL) stock:
 #
 # 1. Current Price
-#   ati run finnhub__quote --symbol AAPL
+#   ati run finnhub:quote --symbol AAPL
 #
 # 2. Insider Transactions
-#   ati run finnhub__insider-transactions --symbol AAPL
+#   ati run finnhub:insider-transactions --symbol AAPL
 #
 # 3. News Sentiment
-#   ati run finnhub__news-sentiment --symbol AAPL
+#   ati run finnhub:news-sentiment --symbol AAPL
 ```
 
 `ati assist` answers like a knowledgeable colleague — which tools, what order, key params, gotchas — with commands you can run immediately.
@@ -121,7 +121,7 @@ ati assist finnhub "research Apple stock — price, insider activity, and sentim
 ### Run it
 
 ```bash
-ati run finnhub__quote --symbol AAPL
+ati run finnhub:quote --symbol AAPL
 # c: 262.52         ← current price
 # d: -1.23          ← change
 # dp: -0.4664       ← percent change
@@ -130,7 +130,7 @@ ati run finnhub__quote --symbol AAPL
 # o: 264.65         ← open
 # pc: 263.75        ← previous close
 
-ati run finnhub__insider-transactions --symbol AAPL
+ati run finnhub:insider-transactions --symbol AAPL
 # data: [{name: "COOK TIMOTHY D", transactionCode: "S",
 #   change: -59751, share: 3280295, transactionPrice: 257.57,
 #   filingDate: "2025-10-03"}, ...]
@@ -152,28 +152,28 @@ ati tool list --provider deepwiki
 # ┌─────────────────────────────────────────────────────┬──────────┬───────────────────────────────┐
 # │ DESCRIPTION                                         ┆ PROVIDER ┆ TOOL                          │
 # ╞═════════════════════════════════════════════════════╪══════════╪═══════════════════════════════╡
-# │ Get a list of documentation topics for a GitHub ... ┆ deepwiki ┆ deepwiki__read_wiki_structure │
-# │ View documentation about a GitHub repository.       ┆ deepwiki ┆ deepwiki__read_wiki_contents  │
-# │ Ask any question about a GitHub repository ...      ┆ deepwiki ┆ deepwiki__ask_question        │
+# │ Get a list of documentation topics for a GitHub ... ┆ deepwiki ┆ deepwiki:read_wiki_structure │
+# │ View documentation about a GitHub repository.       ┆ deepwiki ┆ deepwiki:read_wiki_contents  │
+# │ Ask any question about a GitHub repository ...      ┆ deepwiki ┆ deepwiki:ask_question        │
 # └─────────────────────────────────────────────────────┴──────────┴───────────────────────────────┘
 
 # Ask a question about any repo
-ati run deepwiki__ask_question \
+ati run deepwiki:ask_question \
   --repoName "anthropics/claude-code" \
   --question "How does tool dispatch work?"
 # Tool dispatch in Claude Code involves a dynamic system that handles both
 # built-in and external Model Context Protocol (MCP) tools.
 #
 # 1. **Tool Name Check**: The system first checks if the tool name starts
-#    with `mcp__`. If not, it's routed to the built-in tool pipeline.
+#    with `mcp:`. If not, it's routed to the built-in tool pipeline.
 # 2. **MCP Tool Resolution**: Server and tool names are extracted from the
-#    `mcp__<servername>__<toolname>` format, the server is connected, and
+#    `mcp:<servername>:<toolname>` format, the server is connected, and
 #    the tool is invoked using a `call_tool` RPC.
 # 3. **Output Handling**: Text output is returned; images are handled
 #    during streaming.
 ```
 
-MCP tools are namespaced as `<provider>__<tool_name>`. ATI handles JSON-RPC framing, session management, and auth injection.
+MCP tools are namespaced as `<provider>:<tool_name>`. ATI handles JSON-RPC framing, session management, and auth injection.
 
 ---
 
@@ -222,15 +222,15 @@ ati assist "do we have a tool to search for stock prices?"
 # Yes, we have several tools for stock prices:
 #
 # **For current/latest prices:**
-# - `financial_datasets__getStockPriceSnapshot` — latest price snapshot
-# - `finnhub__quote` — real-time quote data (US stocks)
+# - `financial_datasets:getStockPriceSnapshot` — latest price snapshot
+# - `finnhub:quote` — real-time quote data (US stocks)
 #
 # **For historical data:**
-# - `financial_datasets__getStockPrices` — OHLCV data with date ranges
+# - `financial_datasets:getStockPrices` — OHLCV data with date ranges
 #
-#   ati run financial_datasets__getStockPriceSnapshot --ticker AAPL
-#   ati run finnhub__quote --symbol AAPL
-#   ati run financial_datasets__getStockPrices --ticker AAPL \
+#   ati run financial_datasets:getStockPriceSnapshot --ticker AAPL
+#   ati run finnhub:quote --symbol AAPL
+#   ati run financial_datasets:getStockPrices --ticker AAPL \
 #     --start_date 2024-12-01 --end_date 2024-12-31 --interval day
 
 ati tool search "sanctions"
@@ -278,14 +278,14 @@ In proxy mode, the agent's sandbox has zero credentials. All calls route through
 ```bash
 # Orchestrator issues a scoped token
 ati token issue --sub agent-7 \
-  --scope "tool:clinicaltrials__* tool:finnhub__* help" --ttl 3600
+  --scope "tool:clinicaltrials:* tool:finnhub:* help" --ttl 3600
 
 # Agent's sandbox — only has the binary and a JWT
 export ATI_PROXY_URL=http://proxy:8090
 export ATI_SESSION_TOKEN=eyJhbG...
 
 # Same commands, routed through proxy, scoped to allowed tools
-ati run clinicaltrials__searchStudies --query.term "cancer"  # ✓ allowed
+ati run clinicaltrials:searchStudies --query.term "cancer"  # ✓ allowed
 ati run ca_person_sanctions_search --search_term "Name"      # ✗ denied
 ```
 
@@ -331,8 +331,8 @@ ati provider add-mcp github --transport stdio \
 
 # Store the key, then use the tools
 ati key set github_token ghp_your_token_here
-ati run github__search_repositories --query "rust mcp"
-ati run github__read_file --owner anthropics --repo claude-code --path README.md
+ati run github:search_repositories --query "rust mcp"
+ati run github:read_file --owner anthropics --repo claude-code --path README.md
 ```
 
 ### Skills — Install a skill, get tools automatically
@@ -355,10 +355,10 @@ ati tool list
 ┌─────────────────────────────────────────────────────────────────────────┬──────────┬─────────────┐
 │ DESCRIPTION                                                             ┆ PROVIDER ┆ TOOL        │
 ╞═════════════════════════════════════════════════════════════════════════╪══════════╪═════════════╡
-│ Submit a generation job to fal.ai queue. Returns request_id for polling. ┆ fal      ┆ fal__submit │
-│ Check status of a queued fal.ai job.                                     ┆ fal      ┆ fal__status │
-│ Get the result of a completed fal.ai job. Returns generated media URLs.  ┆ fal      ┆ fal__result │
-│ Cancel a queued fal.ai job.                                              ┆ fal      ┆ fal__cancel │
+│ Submit a generation job to fal.ai queue. Returns request_id for polling. ┆ fal      ┆ fal:submit │
+│ Check status of a queued fal.ai job.                                     ┆ fal      ┆ fal:status │
+│ Get the result of a completed fal.ai job. Returns generated media URLs.  ┆ fal      ┆ fal:result │
+│ Cancel a queued fal.ai job.                                              ┆ fal      ┆ fal:cancel │
 └─────────────────────────────────────────────────────────────────────────┴──────────┴─────────────┘
 
 # Set the key and cook
@@ -519,8 +519,8 @@ Fuzzy search across tool names, descriptions, providers, categories, tags, and h
 ### Inspect — Full Schema
 
 ```bash
-$ ati tool info clinicaltrials__searchStudies
-Tool:        clinicaltrials__searchStudies
+$ ati tool info clinicaltrials:searchStudies
+Tool:        clinicaltrials:searchStudies
 Provider:    clinicaltrials (ClinicalTrials.gov API)
 Handler:     openapi
 Endpoint:    GET https://clinicaltrials.gov/api/v2/studies
@@ -534,7 +534,7 @@ Input Schema:
   --pageSize (integer, default: 10): Results per page
 
 Usage:
-  ati run clinicaltrials__searchStudies --query.term "cancer" --pageSize 10
+  ati run clinicaltrials:searchStudies --query.term "cancer" --pageSize 10
 ```
 
 ### Assist — Like Asking a Colleague
@@ -563,7 +563,7 @@ $ ati assist gh "how do I create a pull request?"
 # target a specific branch, or `--draft` to open as a draft PR.
 
 # Scoped to a tool — uses the full schema for precise commands
-$ ati assist github__search_repositories "search private repos only"
+$ ati assist github:search_repositories "search private repos only"
 ```
 
 ---
@@ -648,7 +648,7 @@ Each agent session gets a JWT with identity, permissions, and an expiry. The pro
 | Scope | Grants |
 |-------|--------|
 | `tool:web_search` | One specific tool |
-| `tool:github__*` | Wildcard — all GitHub MCP tools |
+| `tool:github:*` | Wildcard — all GitHub MCP tools |
 | `help` | Access to `ati assist` |
 | `skill:compliance-screening` | A specific skill |
 | `*` | Everything (dev/testing only) |
@@ -661,7 +661,7 @@ ati token keygen HS256        # Symmetric (simpler)
 # Issue a scoped token
 ati token issue \
   --sub agent-7 \
-  --scope "tool:web_search tool:github__* help" \
+  --scope "tool:web_search tool:github:* help" \
   --ttl 3600
 
 # Inspect / validate
@@ -669,7 +669,7 @@ ati token inspect $ATI_SESSION_TOKEN
 ati token validate $ATI_SESSION_TOKEN
 ```
 
-A compliance agent gets `tool:ca_*` and `skill:compliance-screening`. A research agent gets `tool:arxiv_*` and `tool:deepwiki__*`. Neither can access the other's tools.
+A compliance agent gets `tool:ca_*` and `skill:compliance-screening`. A research agent gets `tool:arxiv_*` and `tool:deepwiki:*`. Neither can access the other's tools.
 
 ---
 
@@ -693,7 +693,7 @@ When an agent calls `ati assist`, skills are automatically loaded into the LLM's
 ati skill list                              # List all skills
 ati skill search "sanctions"                # Search by keyword
 ati skill show compliance-screening         # Read the methodology
-ati skill read --tool fal__submit           # Dump all skills for a tool (agent-optimized)
+ati skill read --tool fal:submit           # Dump all skills for a tool (agent-optimized)
 ati skill init my-skill --tools T1,T2       # Scaffold a new skill
 ati skill install ./my-skill/               # Install from local dir
 ati skill install https://github.com/org/repo#skill-name  # Install from git URL
@@ -711,14 +711,14 @@ This is a real workflow an agent ran using ATI — three fal.ai models chained t
 #### Step 1 — Generate an image with Flux
 
 ```bash
-ati run fal__submit \
+ati run fal:submit \
   --endpoint_id "fal-ai/flux/dev" \
   --prompt "Gen Z female tech streamer, colorful RGB lighting, confident smile" \
   --image_size "portrait_4_3"
 # request_id: 1d491d8e-5c22-417b-a62b-471aa7f380e3
 # status: IN_QUEUE
 
-ati run fal__result --endpoint_id "fal-ai/flux" \
+ati run fal:result --endpoint_id "fal-ai/flux" \
   --request_id "1d491d8e-5c22-417b-a62b-471aa7f380e3"
 # images: [{url: "https://v3b.fal.media/files/.../streamer.jpg"}]
 ```
@@ -726,13 +726,13 @@ ati run fal__result --endpoint_id "fal-ai/flux" \
 #### Step 2 — Generate speech with ElevenLabs (via fal)
 
 ```bash
-ati run fal__submit \
+ati run fal:submit \
   --endpoint_id "fal-ai/elevenlabs/tts/eleven-v3" \
   --text "Check out ATI — one binary, every tool your agent needs." \
   --voice_id "cjVigY5qzO86Huf0OWal"
 # request_id: f9b24972-9ea9-47bd-9e6c-1fc8f48c70c5
 
-ati run fal__result --endpoint_id "fal-ai/elevenlabs" \
+ati run fal:result --endpoint_id "fal-ai/elevenlabs" \
   --request_id "f9b24972-9ea9-47bd-9e6c-1fc8f48c70c5"
 # audio: {url: "https://v3b.fal.media/files/.../output.mp3"}
 ```
@@ -740,14 +740,14 @@ ati run fal__result --endpoint_id "fal-ai/elevenlabs" \
 #### Step 3 — Lip-sync with VEED Fabric
 
 ```bash
-ati run fal__submit \
+ati run fal:submit \
   --endpoint_id "veed/fabric-1.0" \
   --image_url "https://v3b.fal.media/files/.../streamer.jpg" \
   --audio_url "https://v3b.fal.media/files/.../output.mp3" \
   --resolution "720p"
 # request_id: 1c7bdab9-3572-45fe-829d-c5c87071e7d9
 
-ati run fal__result --endpoint_id "veed/fabric-1.0" \
+ati run fal:result --endpoint_id "veed/fabric-1.0" \
   --request_id "1c7bdab9-3572-45fe-829d-c5c87071e7d9"
 # video: {url: "https://v3b.fal.media/files/.../lipsync.mp4"}
 ```
@@ -882,10 +882,10 @@ orch = AtiOrchestrator(
 # One call — returns env vars to inject into the sandbox
 env_vars = orch.provision_sandbox(
     agent_id=f"sandbox:{sandbox_id}",
-    tools=["finnhub_quote", "web_search", "github__*"],
+    tools=["finnhub_quote", "web_search", "github:*"],
     skills=["financial-analysis"],
     ttl_seconds=7200,
-    rate={"tool:github__*": "10/hour"},
+    rate={"tool:github:*": "10/hour"},
 )
 # env_vars = {"ATI_PROXY_URL": "...", "ATI_SESSION_TOKEN": "eyJ..."}
 ```

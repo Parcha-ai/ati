@@ -559,11 +559,17 @@ method = "POST"
 "#;
     let manifest: ati::core::manifest::Manifest = toml::from_str(toml_str).unwrap();
     let gen = manifest.provider.auth_generator.as_ref().unwrap();
-    assert!(matches!(gen.gen_type, ati::core::manifest::AuthGenType::Command));
+    assert!(matches!(
+        gen.gen_type,
+        ati::core::manifest::AuthGenType::Command
+    ));
     assert_eq!(gen.command.as_deref(), Some("python3"));
     assert_eq!(gen.args.len(), 2);
     assert_eq!(gen.cache_ttl_secs, 300);
-    assert!(matches!(gen.output_format, ati::core::manifest::AuthOutputFormat::Text));
+    assert!(matches!(
+        gen.output_format,
+        ati::core::manifest::AuthOutputFormat::Text
+    ));
     assert_eq!(gen.timeout_secs, 10);
     assert_eq!(gen.env.get("BRAIN_SECRET").unwrap(), "${brain_cli_secret}");
 }
@@ -598,7 +604,10 @@ endpoint = "/data"
 "#;
     let manifest: ati::core::manifest::Manifest = toml::from_str(toml_str).unwrap();
     let gen = manifest.provider.auth_generator.as_ref().unwrap();
-    assert!(matches!(gen.gen_type, ati::core::manifest::AuthGenType::Script));
+    assert!(matches!(
+        gen.gen_type,
+        ati::core::manifest::AuthGenType::Script
+    ));
     assert_eq!(gen.interpreter.as_deref(), Some("python3"));
     assert!(gen.script.as_ref().unwrap().contains("hmac"));
     assert_eq!(gen.cache_ttl_secs, 60);
@@ -632,7 +641,10 @@ endpoint = "/resource"
 "#;
     let manifest: ati::core::manifest::Manifest = toml::from_str(toml_str).unwrap();
     let gen = manifest.provider.auth_generator.as_ref().unwrap();
-    assert!(matches!(gen.output_format, ati::core::manifest::AuthOutputFormat::Json));
+    assert!(matches!(
+        gen.output_format,
+        ati::core::manifest::AuthOutputFormat::Json
+    ));
     assert_eq!(gen.inject.len(), 3);
 
     let access_key_target = gen.inject.get("Credentials.AccessKeyId").unwrap();
@@ -685,7 +697,10 @@ endpoint = "/test"
     let manifest: ati::core::manifest::Manifest = toml::from_str(toml_str).unwrap();
     let gen = manifest.provider.auth_generator.as_ref().unwrap();
     assert_eq!(gen.cache_ttl_secs, 0);
-    assert!(matches!(gen.output_format, ati::core::manifest::AuthOutputFormat::Text));
+    assert!(matches!(
+        gen.output_format,
+        ati::core::manifest::AuthOutputFormat::Text
+    ));
     assert_eq!(gen.timeout_secs, 30); // default
     assert!(gen.env.is_empty());
     assert!(gen.inject.is_empty());

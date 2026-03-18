@@ -157,7 +157,7 @@ fn mock_provider(base_url: &str) -> Provider {
 
 fn mock_tool(endpoint: &str, method: HttpMethod, input_schema: Value) -> Tool {
     Tool {
-        name: "test__op".into(),
+        name: "test:op".into(),
         description: String::new(),
         endpoint: endpoint.into(),
         method,

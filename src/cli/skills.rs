@@ -72,7 +72,17 @@ pub async fn execute(cli: &Cli, subcmd: &SkillCommands) -> Result<(), Box<dyn st
             name,
             all,
             local,
-        } => install_skill(cli, source, from_git.as_deref(), name.as_deref(), *all, *local).await,
+        } => {
+            install_skill(
+                cli,
+                source,
+                from_git.as_deref(),
+                name.as_deref(),
+                *all,
+                *local,
+            )
+            .await
+        }
         SkillCommands::Read {
             name,
             tool,
@@ -692,9 +702,15 @@ async fn install_from_git_with_sha(
     };
 
     let result = install_from_dir_with_integrity(
-        &source, dest_base, name_override, all, local,
-        Some(git_url), pinned_sha,
-    ).await;
+        &source,
+        dest_base,
+        name_override,
+        all,
+        local,
+        Some(git_url),
+        pinned_sha,
+    )
+    .await;
     let _ = std::fs::remove_dir_all(&tmp_dir);
     result
 }
@@ -732,7 +748,15 @@ async fn install_skill(
 
     // Auto-detect git URLs
     if is_git_url(source_base) {
-        return install_from_git_with_sha(source_base, pinned_sha, &dest_base, name_override, all, local).await;
+        return install_from_git_with_sha(
+            source_base,
+            pinned_sha,
+            &dest_base,
+            name_override,
+            all,
+            local,
+        )
+        .await;
     }
 
     // Local path
@@ -1163,7 +1187,9 @@ async fn diff_skill(source: &str) -> Result<(), Box<dyn std::error::Error>> {
     clone_args.push(clone_url);
     clone_args.push(tmp_dir.to_str().unwrap());
 
-    let status = std::process::Command::new("git").args(&clone_args).status()?;
+    let status = std::process::Command::new("git")
+        .args(&clone_args)
+        .status()?;
     if !status.success() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(format!("Failed to clone '{clone_url}'").into());
@@ -1367,9 +1393,7 @@ async fn generate_manifest_from_skill(
             }
             Err(e) => {
                 eprintln!("Error: Local manifest generation failed: {e}");
-                eprintln!(
-                    "  Is ollama running? Check with: curl http://localhost:11434/v1/models"
-                );
+                eprintln!("  Is ollama running? Check with: curl http://localhost:11434/v1/models");
                 // --local means NO fallback to network — only try bundled provider.toml
             }
         }
@@ -1385,13 +1409,8 @@ async fn generate_manifest_from_skill(
 
         if let Some(key) = api_key {
             println!("Generating manifest for '{provider_name}' from SKILL.md...");
-            match call_cerebras_for_manifest(
-                &key,
-                &provider_name,
-                &skill_md,
-                &skill_toml_content,
-            )
-            .await
+            match call_cerebras_for_manifest(&key, &provider_name, &skill_md, &skill_toml_content)
+                .await
             {
                 Ok(manifest_toml) => {
                     if try_write_manifest(&dest, &manifest_toml, &provider_name) {
@@ -1490,7 +1509,7 @@ auth_type = "<bearer|header|query|basic|none>"
 category = "<category>"
 
 [[tools]]
-name = "<provider>__<tool_name>"
+name = "<provider>:<tool_name>"
 description = "<what this tool does>"
 endpoint = "/<path>"
 method = "<GET|POST|PUT|DELETE>"
@@ -1507,7 +1526,7 @@ description = "Description"
 ```
 
 Rules:
-- Tool names MUST be prefixed with the provider name and double underscore: `<provider>__<tool_name>`
+- Tool names MUST be prefixed with the provider name and colon separator: `<provider>:<tool_name>`
 - URL path parameters like `/{id}` MUST have `"x-ati-param-location" = "path"` on the property
 - Extract ALL tools/endpoints mentioned in the documentation
 - For auth, infer from any API key references, Authorization headers, or token mentions
@@ -1624,10 +1643,9 @@ fn call_ollama_for_manifest(
     provider_name: &str,
     skill_toml: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let host = std::env::var("OLLAMA_HOST")
-        .unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let model =
-        std::env::var("ATI_OLLAMA_MODEL").unwrap_or_else(|_| "llama3.1".to_string());
+    let host =
+        std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let model = std::env::var("ATI_OLLAMA_MODEL").unwrap_or_else(|_| "llama3.1".to_string());
     let url = format!("{}/v1/chat/completions", host.trim_end_matches('/'));
 
     let user_content = format!(
@@ -1647,9 +1665,11 @@ fn call_ollama_for_manifest(
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
-    let response = client.post(&url).json(&request_body).send().map_err(|e| {
-        format!("Cannot connect to ollama at {host}: {e}")
-    })?;
+    let response = client
+        .post(&url)
+        .json(&request_body)
+        .send()
+        .map_err(|e| format!("Cannot connect to ollama at {host}: {e}"))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -1860,10 +1880,7 @@ mod tests {
             "https://github.com/org/repo#skill@abc1234def5678901234567890abcdef12345678",
         );
         assert_eq!(base, "https://github.com/org/repo#skill");
-        assert_eq!(
-            sha,
-            Some("abc1234def5678901234567890abcdef12345678")
-        );
+        assert_eq!(sha, Some("abc1234def5678901234567890abcdef12345678"));
     }
 
     #[test]

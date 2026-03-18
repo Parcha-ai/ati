@@ -484,7 +484,9 @@ async fn test_assist_local_mode_no_keyring_fails() {
 
     assert!(!output.status.success(), "Should fail without keyring/LLM");
     assert!(
-        stderr.contains("keyring") || stderr.contains("No keyring") || stderr.contains("No LLM available"),
+        stderr.contains("keyring")
+            || stderr.contains("No keyring")
+            || stderr.contains("No LLM available"),
         "Error should mention missing keyring or no LLM. stderr: {stderr}"
     );
 }

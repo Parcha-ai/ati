@@ -279,7 +279,7 @@ async fn execute_local(
     let (provider, tool) = registry.get_tool(tool_name).ok_or_else(|| {
         // After MCP discovery, the registry has real tool names.
         // If exact match fails, check for prefix matches and suggest.
-        let prefix = tool_name.split("__").next().unwrap_or("");
+        let prefix = tool_name.split(crate::core::manifest::TOOL_SEP).next().unwrap_or("");
         let suggestions: Vec<String> = registry
             .list_public_tools()
             .iter()
@@ -327,50 +327,49 @@ async fn execute_local(
 
     // Execute — dispatch based on handler type, with timing for audit
     let start = std::time::Instant::now();
-    let exec_result: Result<String, Box<dyn std::error::Error>> =
-        match provider.handler.as_str() {
-            "mcp" => {
-                match mcp_client::execute_with_gen(
-                    provider,
-                    tool_name,
-                    &args,
-                    &keyring,
-                    Some(&gen_ctx),
-                    Some(&auth_cache),
-                )
-                .await
-                {
-                    Ok(value) => Ok(output::format_output(&value, &cli.output)),
-                    Err(e) => Err(e.into()),
-                }
+    let exec_result: Result<String, Box<dyn std::error::Error>> = match provider.handler.as_str() {
+        "mcp" => {
+            match mcp_client::execute_with_gen(
+                provider,
+                tool_name,
+                &args,
+                &keyring,
+                Some(&gen_ctx),
+                Some(&auth_cache),
+            )
+            .await
+            {
+                Ok(value) => Ok(output::format_output(&value, &cli.output)),
+                Err(e) => Err(e.into()),
             }
-            "cli" => {
-                match crate::core::cli_executor::execute_with_gen(
-                    provider,
-                    raw_args,
-                    &keyring,
-                    Some(&gen_ctx),
-                    Some(&auth_cache),
-                )
-                .await
-                {
-                    Ok(value) => Ok(output::format_output(&value, &cli.output)),
-                    Err(e) => Err(e.into()),
-                }
+        }
+        "cli" => {
+            match crate::core::cli_executor::execute_with_gen(
+                provider,
+                raw_args,
+                &keyring,
+                Some(&gen_ctx),
+                Some(&auth_cache),
+            )
+            .await
+            {
+                Ok(value) => Ok(output::format_output(&value, &cli.output)),
+                Err(e) => Err(e.into()),
             }
-            _ => {
-                generic::execute_with_gen(
-                    provider,
-                    tool,
-                    &args,
-                    &keyring,
-                    &cli.output,
-                    Some(&gen_ctx),
-                    Some(&auth_cache),
-                )
-                .await
-            }
-        };
+        }
+        _ => {
+            generic::execute_with_gen(
+                provider,
+                tool,
+                &args,
+                &keyring,
+                &cli.output,
+                Some(&gen_ctx),
+                Some(&auth_cache),
+            )
+            .await
+        }
+    };
     let duration = start.elapsed();
 
     // Build and write audit entry

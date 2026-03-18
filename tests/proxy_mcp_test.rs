@@ -123,10 +123,7 @@ async fn test_mcp_tools_list() {
     assert!(tools.len() >= 2, "Should have at least 2 tools");
 
     // Each tool should have name, description, inputSchema
-    let tool_names: Vec<&str> = tools
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(tool_names.contains(&"mcp_search"));
     assert!(tool_names.contains(&"mcp_create"));
 }
@@ -168,7 +165,10 @@ async fn test_mcp_tools_call_success() {
     let content = json["result"]["content"].as_array().unwrap();
     assert_eq!(content[0]["type"], "text");
     let text = content[0]["text"].as_str().unwrap();
-    assert!(text.contains("Found"), "Result should contain upstream data");
+    assert!(
+        text.contains("Found"),
+        "Result should contain upstream data"
+    );
 }
 
 /// tools/call with POST tool sends body correctly.

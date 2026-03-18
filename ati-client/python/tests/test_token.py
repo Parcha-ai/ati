@@ -22,7 +22,7 @@ class TestIssueToken:
         token = issue_token(
             secret=TEST_SECRET,
             sub="agent-7",
-            scope="tool:web_search tool:github__*",
+            scope="tool:web_search tool:github:*",
         )
         assert isinstance(token, str)
         assert token.count(".") == 2  # header.payload.signature

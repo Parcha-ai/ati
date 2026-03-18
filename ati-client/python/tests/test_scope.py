@@ -22,17 +22,17 @@ class TestMatchesWildcard:
         assert matches_wildcard("tool:web_search", "tool:web_search")
 
     def test_no_match(self):
-        assert not matches_wildcard("tool:web_search", "tool:github__search")
+        assert not matches_wildcard("tool:web_search", "tool:github:search")
 
     def test_global_wildcard(self):
         assert matches_wildcard("tool:anything", "*")
 
     def test_prefix_wildcard(self):
-        assert matches_wildcard("tool:github__search_repos", "tool:github__*")
-        assert matches_wildcard("tool:github__create_issue", "tool:github__*")
+        assert matches_wildcard("tool:github:search_repos", "tool:github:*")
+        assert matches_wildcard("tool:github:create_issue", "tool:github:*")
 
     def test_prefix_wildcard_no_match(self):
-        assert not matches_wildcard("tool:linear__list", "tool:github__*")
+        assert not matches_wildcard("tool:linear:list", "tool:github:*")
 
     def test_wildcard_not_at_end(self):
         # Only trailing * is supported
@@ -48,8 +48,8 @@ class TestMatchesWildcard:
 
 class TestBuildScopeString:
     def test_tools_only(self):
-        result = build_scope_string(tools=["web_search", "github__*"])
-        assert result == "tool:web_search tool:github__*"
+        result = build_scope_string(tools=["web_search", "github:*"])
+        assert result == "tool:web_search tool:github:*"
 
     def test_skills_only(self):
         result = build_scope_string(skills=["research-*"])
@@ -79,7 +79,7 @@ class TestCheckScope:
         assert check_scope("tool:web_search", ["tool:web_search", "tool:other"])
 
     def test_wildcard_grant(self):
-        assert check_scope("tool:github__search", ["tool:github__*"])
+        assert check_scope("tool:github:search", ["tool:github:*"])
 
     def test_global_grant(self):
         assert check_scope("tool:anything", ["*"])

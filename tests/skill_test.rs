@@ -759,7 +759,7 @@ fn test_install_skill_with_bundled_provider() {
 name = "fal-generate"
 version = "1.0.0"
 description = "Generate images with fal.ai"
-tools = ["fal__text_to_image"]
+tools = ["fal:text_to_image"]
 providers = ["fal"]
 "#,
     )

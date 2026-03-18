@@ -26,9 +26,7 @@ async fn test_auth_generator_bearer_token_injected() {
     Mock::given(method("GET"))
         .and(path("/data"))
         .and(header("authorization", "Bearer generated-token-42"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"status": "authenticated"})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "authenticated"})))
         .mount(&upstream)
         .await;
 
@@ -60,9 +58,7 @@ async fn test_auth_generator_variable_expansion() {
     Mock::given(method("GET"))
         .and(path("/agent"))
         .and(header("authorization", "Bearer agent-42"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"agent": "verified"})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"agent": "verified"})))
         .mount(&upstream)
         .await;
 
@@ -111,9 +107,7 @@ async fn test_auth_generator_json_output_with_inject() {
         .and(path("/secure"))
         .and(header("authorization", "Bearer session-tok"))
         .and(header("X-Access-Key", "AKIA123"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"injected": true})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"injected": true})))
         .mount(&upstream)
         .await;
 
@@ -136,9 +130,7 @@ async fn test_auth_generator_json_output_with_inject() {
     let gen = AuthGenerator {
         gen_type: AuthGenType::Command,
         command: Some("echo".into()),
-        args: vec![
-            r#"{"token":"session-tok","creds":{"key":"AKIA123"}}"#.into(),
-        ],
+        args: vec![r#"{"token":"session-tok","creds":{"key":"AKIA123"}}"#.into()],
         interpreter: None,
         script: None,
         cache_ttl_secs: 0,
@@ -175,9 +167,7 @@ async fn test_auth_generator_caching() {
     // Accept any bearer token but echo it back so we can compare
     Mock::given(method("GET"))
         .and(path("/cached"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"ok": true})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
         .expect(2) // exactly 2 requests
         .mount(&upstream)
         .await;
@@ -211,16 +201,14 @@ async fn test_auth_generator_caching() {
     let args = HashMap::new();
 
     // First call — generator runs, result cached
-    let _r1 =
-        execute_tool_with_gen(&provider, &tool, &args, &keyring, Some(&ctx), Some(&cache))
-            .await
-            .expect("first call should succeed");
+    let _r1 = execute_tool_with_gen(&provider, &tool, &args, &keyring, Some(&ctx), Some(&cache))
+        .await
+        .expect("first call should succeed");
 
     // Second call — should use cached value
-    let _r2 =
-        execute_tool_with_gen(&provider, &tool, &args, &keyring, Some(&ctx), Some(&cache))
-            .await
-            .expect("second call should succeed");
+    let _r2 = execute_tool_with_gen(&provider, &tool, &args, &keyring, Some(&ctx), Some(&cache))
+        .await
+        .expect("second call should succeed");
 
     // Verify the cache has a value for this provider+sub
     let cached = cache.get("cache_test", "cache-agent");
@@ -239,9 +227,7 @@ async fn test_auth_generator_from_manifest_toml() {
     Mock::given(method("GET"))
         .and(path("/info"))
         .and(header("authorization", "Bearer manifest-token-99"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"source": "manifest"})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"source": "manifest"})))
         .mount(&upstream)
         .await;
 
@@ -290,10 +276,9 @@ type = "object"
     let ctx = GenContext::default();
     let args = HashMap::new();
 
-    let result =
-        execute_tool_with_gen(provider, tool, &args, &keyring, Some(&ctx), Some(&cache))
-            .await
-            .expect("manifest round-trip should succeed");
+    let result = execute_tool_with_gen(provider, tool, &args, &keyring, Some(&ctx), Some(&cache))
+        .await
+        .expect("manifest round-trip should succeed");
 
     assert_eq!(result["source"], "manifest");
 }

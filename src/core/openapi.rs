@@ -2,7 +2,7 @@
 ///
 /// Supports both JSON and YAML specs (local files or URLs).
 /// Each operation in the spec becomes an ATI tool with:
-///   - Name: `{provider}__{operationId}` (or auto-generated from method + path)
+///   - Name: `{provider}:{operationId}` (or auto-generated from method + path)
 ///   - Description from operation summary/description
 ///   - Input schema with `x-ati-param-location` metadata for path/query/header/body routing
 ///   - HTTP method from the spec
@@ -218,7 +218,12 @@ pub fn to_ati_tool(
     provider_name: &str,
     overrides: &HashMap<String, OpenApiToolOverride>,
 ) -> Tool {
-    let prefixed_name = format!("{}__{}", provider_name, def.operation_id);
+    let prefixed_name = format!(
+        "{}{}{}",
+        provider_name,
+        crate::core::manifest::TOOL_SEP_STR,
+        def.operation_id
+    );
     let override_cfg = overrides.get(&def.operation_id);
 
     let description = override_cfg
@@ -1013,7 +1018,7 @@ mod tests {
         let overrides = HashMap::new();
         let tool = to_ati_tool(tools[0].clone(), "petstore", &overrides);
 
-        assert_eq!(tool.name, "petstore__getPetById");
+        assert_eq!(tool.name, "petstore:getPetById");
         assert!(tool.description.contains("Find pet by ID"));
         assert_eq!(tool.endpoint, "/pet/{petId}");
         assert!(tool.input_schema.is_some());

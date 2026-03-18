@@ -26,9 +26,8 @@ pub enum ProxyError {
 #[derive(Debug, Serialize)]
 pub struct ProxyCallRequest {
     pub tool_name: String,
-    pub args: HashMap<String, Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_args: Option<Vec<String>>,
+    /// Tool arguments — JSON object for HTTP/MCP tools, or JSON array for CLI tools.
+    pub args: Value,
 }
 
 /// Response payload from the proxy server.
@@ -76,6 +75,9 @@ fn build_proxy_request(
 ///
 /// POST {proxy_url}/call with JSON body: { tool_name, args }
 /// Scopes are carried inside the JWT — not in the request body.
+///
+/// `args` carries key-value pairs for HTTP/MCP tools.
+/// `raw_args`, if provided, is sent as an array in the `args` field for CLI tools.
 pub async fn call_tool(
     proxy_url: &str,
     tool_name: &str,
@@ -88,10 +90,18 @@ pub async fn call_tool(
 
     let url = format!("{}/call", proxy_url.trim_end_matches('/'));
 
+    // If raw_args are provided (CLI tool), send them as a JSON array in `args`.
+    // Otherwise send the key-value map.
+    let args_value = match raw_args {
+        Some(raw) if !raw.is_empty() => {
+            Value::Array(raw.iter().map(|s| Value::String(s.clone())).collect())
+        }
+        _ => serde_json::to_value(args).unwrap_or(Value::Object(serde_json::Map::new())),
+    };
+
     let payload = ProxyCallRequest {
         tool_name: tool_name.to_string(),
-        args: args.clone(),
-        raw_args: raw_args.map(|r| r.to_vec()),
+        args: args_value,
     };
 
     let response = build_proxy_request(&client, reqwest::Method::POST, &url)

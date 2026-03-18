@@ -107,8 +107,14 @@ async fn test_xai_complex_response_extraction() {
         .unwrap();
 
     // Two text blocks joined
-    assert!(result["text"].as_str().unwrap().contains("Rust is a systems language."));
-    assert!(result["text"].as_str().unwrap().contains("It emphasizes safety."));
+    assert!(result["text"]
+        .as_str()
+        .unwrap()
+        .contains("Rust is a systems language."));
+    assert!(result["text"]
+        .as_str()
+        .unwrap()
+        .contains("It emphasizes safety."));
 
     // Citations collected
     let citations = result["citations"].as_array().unwrap();

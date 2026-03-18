@@ -16,7 +16,10 @@ use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
 use ati::proxy::server::{build_router, ProxyState};
 
-fn build_app_with_skills(skills_dir: &std::path::Path, manifests_dir: &std::path::Path) -> axum::Router {
+fn build_app_with_skills(
+    skills_dir: &std::path::Path,
+    manifests_dir: &std::path::Path,
+) -> axum::Router {
     let registry = ManifestRegistry::load(manifests_dir).expect("load manifests");
     let skill_registry = SkillRegistry::load(skills_dir).unwrap();
     let state = Arc::new(ProxyState {
@@ -171,7 +174,10 @@ auth_type = "none"
 
     let json = common::body_json(resp.into_body()).await;
     assert_eq!(json["name"], "detail_skill");
-    assert!(json["content"].as_str().unwrap().contains("Test skill content"));
+    assert!(json["content"]
+        .as_str()
+        .unwrap()
+        .contains("Test skill content"));
 }
 
 /// GET /skills/:name?meta=true returns full metadata.
@@ -210,7 +216,10 @@ auth_type = "none"
     assert_eq!(json["name"], "meta_skill");
     assert_eq!(json["version"], "1.0.0");
     assert_eq!(json["author"], "test");
-    assert!(json["tools"].as_array().unwrap().contains(&json!("test_tool")));
+    assert!(json["tools"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("test_tool")));
 }
 
 /// GET /skills/:name for nonexistent skill returns 404.
