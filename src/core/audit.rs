@@ -49,8 +49,7 @@ pub fn append(entry: &AuditEntry) -> Result<(), std::io::Error> {
         .create(true)
         .append(true)
         .open(&path)?;
-    let line = serde_json::to_string(entry)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
     writeln!(file, "{}", line)?;
     Ok(())
 }
@@ -65,7 +64,7 @@ pub fn tail(n: usize) -> Result<Vec<AuditEntry>, Box<dyn std::error::Error>> {
     let reader = std::io::BufReader::new(file);
     let entries: Vec<AuditEntry> = reader
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(|l| l.ok())
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(&l).ok())
         .collect();
@@ -89,7 +88,7 @@ pub fn search(
     let reader = std::io::BufReader::new(file);
     let entries: Vec<AuditEntry> = reader
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(|l| l.ok())
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(&l).ok())
         .filter(|e: &AuditEntry| {

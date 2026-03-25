@@ -611,7 +611,7 @@ fn parse_git_url_fragment(url: &str) -> (&str, Option<&str>) {
 /// Clone a git repo and install skill(s) from it.
 async fn install_from_git(
     git_url: &str,
-    dest_base: &PathBuf,
+    dest_base: &std::path::Path,
     name_override: Option<&str>,
     all: bool,
     local: bool,
@@ -654,7 +654,7 @@ async fn install_from_git(
 async fn install_from_git_with_sha(
     git_url: &str,
     pinned_sha: Option<&str>,
-    dest_base: &PathBuf,
+    dest_base: &std::path::Path,
     name_override: Option<&str>,
     all: bool,
     local: bool,
@@ -772,8 +772,8 @@ async fn install_skill(
 }
 
 async fn install_from_dir(
-    source: &PathBuf,
-    dest_base: &PathBuf,
+    source: &std::path::Path,
+    dest_base: &std::path::Path,
     name_override: Option<&str>,
     all: bool,
     local: bool,
@@ -782,8 +782,8 @@ async fn install_from_dir(
 }
 
 async fn install_from_dir_with_integrity(
-    source: &PathBuf,
-    dest_base: &PathBuf,
+    source: &std::path::Path,
+    dest_base: &std::path::Path,
     name_override: Option<&str>,
     all: bool,
     local: bool,

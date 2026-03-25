@@ -86,9 +86,9 @@ impl CallRequest {
             // ["pr", "list", "--repo", "X"]
             Value::Array(arr) => arr
                 .iter()
-                .filter_map(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    other => Some(other.to_string()),
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
                 })
                 .collect(),
             // "pr list --repo X"
@@ -98,9 +98,9 @@ impl CallRequest {
                 if let Some(Value::Array(pos)) = map.get("_positional") {
                     return pos
                         .iter()
-                        .filter_map(|v| match v {
-                            Value::String(s) => Some(s.clone()),
-                            other => Some(other.to_string()),
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
                         })
                         .collect();
                 }

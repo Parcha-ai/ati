@@ -1,3 +1,5 @@
+#![allow(dead_code, clippy::too_many_arguments, clippy::type_complexity)]
+
 use clap::{Parser, Subcommand, ValueEnum};
 use std::process;
 

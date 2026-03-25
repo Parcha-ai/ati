@@ -61,7 +61,7 @@ fn create_skill_with_integrity(
 
     let mut toml_content = String::from(skill_toml);
     if !integrity_section.is_empty() {
-        toml_content.push_str("\n");
+        toml_content.push('\n');
         toml_content.push_str(integrity_section);
     }
     fs::write(dir.join("skill.toml"), toml_content).unwrap();

@@ -113,7 +113,7 @@ fn create_test_keyring(dir: &std::path::Path) -> (std::path::PathBuf, Keyring, s
 
     // Write the session key as base64 to a .key file (for sealed_file::read_and_delete_key)
     let key_file_path = dir.join(".key");
-    let key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &session_key);
+    let key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, session_key);
     std::fs::write(&key_file_path, &key_b64).expect("write .key file");
 
     let keyring = Keyring::load_with_key(&keyring_path, &session_key).expect("load test keyring");

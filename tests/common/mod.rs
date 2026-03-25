@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared test helpers for ATI integration tests.
 //!
 //! Provides reusable builders that eliminate 30+ lines of Provider/Tool boilerplate.

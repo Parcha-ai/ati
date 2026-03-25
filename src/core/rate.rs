@@ -144,8 +144,7 @@ fn save_state(state: &RateState) -> Result<(), RateError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = serde_json::to_string(state)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let content = serde_json::to_string(state).map_err(std::io::Error::other)?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, content)?;
     std::fs::rename(&tmp_path, &path)?;

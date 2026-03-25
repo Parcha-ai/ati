@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 /// Integration tests for the ATI skill management system.
 ///
 /// Tests cover: SkillRegistry loading, tool/provider/category indexes,
@@ -715,7 +716,7 @@ description = "Test"
 
 #[test]
 fn test_build_skill_context_for_llm() {
-    let skills = vec![SkillMeta {
+    let skills = [SkillMeta {
         name: "sanctions".to_string(),
         version: "1.0.0".to_string(),
         description: "Screen against sanctions".to_string(),

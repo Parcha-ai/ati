@@ -376,7 +376,7 @@ pub(crate) fn score_tool_match(
     let content_terms: Vec<&str> = query_terms
         .iter()
         .filter(|t| t.len() >= 2 && !STOP_WORDS.contains(&t.to_lowercase().as_str()))
-        .map(|t| *t)
+        .copied()
         .collect();
 
     if content_terms.is_empty() {
@@ -425,7 +425,7 @@ pub(crate) fn score_tool_match(
     }
 
     // Require at least half of content terms to match
-    let min_required = (content_terms.len() + 1) / 2;
+    let min_required = content_terms.len().div_ceil(2);
     if matched_terms < min_required {
         return 0.0;
     }
