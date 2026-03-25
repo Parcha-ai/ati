@@ -6,6 +6,7 @@ pub mod error;
 pub mod http;
 pub mod jwt;
 pub mod keyring;
+pub mod logging;
 pub mod manifest;
 pub mod mcp_client;
 pub mod openapi;

@@ -82,7 +82,7 @@ async fn test_verbose_shows_proxy_mode() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Mode: proxy"),
+        stderr.contains("mode: proxy"),
         "Verbose output should show proxy mode. stderr: {stderr}"
     );
 }

@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 fn ati_cmd() -> Command {
     let mut cmd = Command::cargo_bin("ati").unwrap();
-    cmd.env("RUST_LOG", "");
+    cmd.env_remove("RUST_LOG");
     cmd
 }
 
@@ -275,8 +275,8 @@ fn test_load_openapi_text_output() {
         ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("Loaded petstore"))
-        .stderr(predicates::str::contains("2 tools"))
+        .stderr(predicates::str::contains("loaded OpenAPI provider"))
+        .stderr(predicates::str::contains("petstore"))
         .stderr(predicates::str::contains("ready"));
 }
 
@@ -496,7 +496,7 @@ fn test_unload_removes_cache() {
         .args(["provider", "unload", "petstore"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("Unloaded"));
+        .stderr(predicates::str::contains("unloaded cached provider"));
 
     assert!(!cache_path.exists());
 }

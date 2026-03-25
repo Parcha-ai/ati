@@ -306,5 +306,5 @@ fn test_verify_skill_no_hash_stored() {
     // Should succeed (warning, not error) when no hash is stored
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("No integrity hash stored"));
+    assert!(stderr.contains("no integrity hash stored"));
 }

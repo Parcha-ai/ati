@@ -409,15 +409,15 @@ async fn test_assist_local_mode_verbose() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        stderr.contains("Mode: local"),
+        stderr.contains("mode: local"),
         "Verbose output should show local mode. stderr: {stderr}"
     );
     assert!(
-        stderr.contains("System prompt length"),
+        stderr.contains("prompt_len"),
         "Verbose output should show prompt length. stderr: {stderr}"
     );
     assert!(
-        stderr.contains("Tools in context"),
+        stderr.contains("tools_in_context"),
         "Verbose output should show tool count. stderr: {stderr}"
     );
 }

@@ -253,11 +253,11 @@ fn add_mcp(
     }
 
     std::fs::write(&manifest_path, &toml_content)?;
-    eprintln!("Saved manifest to {}", manifest_path.display());
+    tracing::info!(path = %manifest_path.display(), "saved manifest");
 
     // Hint about auth key
     if let Some(key_name) = auth_key {
-        eprintln!("Remember to add your API key: ati key set {key_name} <your-key>");
+        tracing::info!(key = %key_name, "remember to add your API key: ati key set {key_name} <your-key>");
     }
 
     Ok(())
@@ -337,14 +337,14 @@ fn add_cli(
     }
 
     std::fs::write(&manifest_path, &toml_content)?;
-    eprintln!("Saved CLI manifest to {}", manifest_path.display());
+    tracing::info!(path = %manifest_path.display(), "saved CLI manifest");
 
     // Hint about keyring references in env vars
     for v in manifest.provider.cli_env.values() {
         if let Some(key_ref) = v.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
-            eprintln!("Remember to add your key: ati key set {key_ref} <value>");
+            tracing::info!(key = %key_ref, "remember to add your key: ati key set {key_ref} <value>");
         } else if let Some(key_ref) = v.strip_prefix("@{").and_then(|s| s.strip_suffix('}')) {
-            eprintln!("Remember to add your credential: ati key set {key_ref} <content>");
+            tracing::info!(key = %key_ref, "remember to add your credential: ati key set {key_ref} <content>");
         }
     }
 
@@ -523,22 +523,18 @@ fn import_openapi(
 
     let spec_json = serde_json::to_string_pretty(&spec)?;
     std::fs::write(&spec_dest, &spec_json)?;
-    eprintln!("Saved spec to {}", spec_dest.display());
+    tracing::info!(path = %spec_dest.display(), "saved spec");
 
     // Save manifest
     let manifests_dir = ati_dir.join("manifests");
     std::fs::create_dir_all(&manifests_dir)?;
     let manifest_dest = manifests_dir.join(format!("{name}.toml"));
     std::fs::write(&manifest_dest, &toml_content)?;
-    eprintln!("Saved manifest to {}", manifest_dest.display());
+    tracing::info!(path = %manifest_dest.display(), "saved manifest");
 
-    eprintln!(
-        "\nImported {} operations from \"{}\"",
-        tools.len(),
-        spec.info.title
-    );
+    tracing::info!(operations = tools.len(), title = %spec.info.title, "imported OpenAPI operations");
     if auth_type != "none" {
-        eprintln!("Remember to add your API key: ati key set {key_name} <your-key>");
+        tracing::info!(key = %key_name, "remember to add your API key: ati key set {key_name} <your-key>");
     }
 
     Ok(())
@@ -825,7 +821,7 @@ fn remove_provider(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     std::fs::remove_file(&manifest_path)?;
-    eprintln!("Removed {}", manifest_path.display());
+    tracing::info!(path = %manifest_path.display(), "removed provider manifest");
 
     Ok(())
 }
@@ -961,7 +957,7 @@ fn install_provider_skills(_cli: &Cli, name: &str) -> Result<(), Box<dyn std::er
                 installed += 1;
             }
             Err(e) => {
-                eprintln!("  Failed: {e}");
+                tracing::error!(error = %e, "skill installation failed");
                 failed += 1;
             }
         }
@@ -1075,7 +1071,7 @@ async fn load_openapi_provider(
 
     // Check keyring for existing key
     let ati_dir = common::ati_dir();
-    let keyring = load_keyring(&ati_dir, cli.verbose);
+    let keyring = load_keyring(&ati_dir);
     let key_resolved = auth_type == "none" || keyring.contains(key_name);
 
     // Write cache
@@ -1175,13 +1171,15 @@ async fn load_openapi_provider(
         }
         OutputFormat::Table | OutputFormat::Text => {
             let ttl_label = format_ttl(ttl);
-            eprintln!(
-                "Loaded {} ({} tools, cached {}) — status: {}",
-                name, tools_count, ttl_label, status
+            tracing::info!(
+                provider = %name,
+                tools = tools_count,
+                cached = %ttl_label,
+                status = %status,
+                "loaded OpenAPI provider"
             );
             if !key_resolved {
-                eprintln!("  Auth: {} (key: {})", auth_description, key_name);
-                eprintln!("  Run: ati key set {} <your-api-key>", key_name);
+                tracing::info!(auth = %auth_description, key = %key_name, "auth key not set — run: ati key set {key_name} <your-api-key>");
             }
         }
     }
@@ -1238,7 +1236,7 @@ async fn load_mcp_provider(
     let mut missing_keys = Vec::new();
 
     let ati_dir = common::ati_dir();
-    let keyring = load_keyring(&ati_dir, cli.verbose);
+    let keyring = load_keyring(&ati_dir);
 
     for entry in env {
         let (k, v) = entry
@@ -1368,27 +1366,31 @@ async fn load_mcp_provider(
             let ttl_label = format_ttl(ttl);
             match &probe_result {
                 Ok(tool_names) => {
-                    eprintln!(
-                        "Loaded {} (mcp/{}, {} tools, cached {}) — status: {}",
-                        name,
-                        transport,
-                        tool_names.len(),
-                        ttl_label,
-                        status
+                    tracing::info!(
+                        provider = %name,
+                        transport = %transport,
+                        tools = tool_names.len(),
+                        cached = %ttl_label,
+                        status = %status,
+                        "loaded MCP provider"
                     );
                     if !tool_names.is_empty() {
-                        eprintln!("  Tools: {}", tool_names.join(", "));
+                        tracing::info!(tools = %tool_names.join(", "), "discovered tools");
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Loaded {} (mcp/{}, probe failed: {}, cached {}) — status: {}",
-                        name, transport, e, ttl_label, status
+                    tracing::warn!(
+                        provider = %name,
+                        transport = %transport,
+                        error = %e,
+                        cached = %ttl_label,
+                        status = %status,
+                        "loaded MCP provider (probe failed)"
                     );
                 }
             }
             for cmd in &setup_commands {
-                eprintln!("  Run: {cmd}");
+                tracing::info!(command = %cmd, "setup required");
             }
         }
     }
@@ -1426,7 +1428,7 @@ fn unload_provider(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     std::fs::remove_file(&cache_path)?;
-    eprintln!("Unloaded cached provider '{name}'");
+    tracing::info!(provider = %name, "unloaded cached provider");
     Ok(())
 }
 
@@ -1477,7 +1479,7 @@ fn read_spec_content(spec_ref: &str) -> Result<String, Box<dyn std::error::Error
             .map_err(|e| format!("SSRF protection: {e}"))?;
 
         if spec_ref.starts_with("http://") {
-            eprintln!("Warning: downloading spec over insecure HTTP — consider using HTTPS");
+            tracing::warn!("downloading spec over insecure HTTP — consider using HTTPS");
         }
 
         let client = reqwest::blocking::Client::builder()

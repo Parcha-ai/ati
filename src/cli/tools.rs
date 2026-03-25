@@ -22,7 +22,7 @@ fn load_scopes_from_env() -> ScopeConfig {
 pub(crate) async fn discover_mcp_tools(
     registry: &mut ManifestRegistry,
     keyring: &Keyring,
-    verbose: bool,
+    _verbose: bool,
 ) {
     let mcp_providers: Vec<_> = registry
         .list_mcp_providers()
@@ -35,12 +35,11 @@ pub(crate) async fn discover_mcp_tools(
             Ok(client) => {
                 match client.list_tools().await {
                     Ok(tools) => {
-                        if verbose {
-                            eprintln!(
-                                "Discovered {} tools from MCP provider '{name}'",
-                                tools.len()
-                            );
-                        }
+                        tracing::debug!(
+                            count = tools.len(),
+                            provider = %name,
+                            "discovered MCP tools"
+                        );
                         let tools = tools
                             .into_iter()
                             .map(|t| crate::core::manifest::McpToolDef {
@@ -52,19 +51,21 @@ pub(crate) async fn discover_mcp_tools(
                         registry.register_mcp_tools(name, tools);
                     }
                     Err(e) => {
-                        if verbose {
-                            eprintln!(
-                                "Warning: failed to list tools from MCP provider '{name}': {e}"
-                            );
-                        }
+                        tracing::warn!(
+                            provider = %name,
+                            error = %e,
+                            "failed to list tools from MCP provider"
+                        );
                     }
                 }
                 client.disconnect().await;
             }
             Err(e) => {
-                if verbose {
-                    eprintln!("Warning: failed to connect to MCP provider '{name}': {e}");
-                }
+                tracing::warn!(
+                    provider = %name,
+                    error = %e,
+                    "failed to connect to MCP provider"
+                );
             }
         }
     }
@@ -77,7 +78,7 @@ pub async fn execute(cli: &Cli, subcmd: &ToolCommands) -> Result<(), Box<dyn std
     let mut registry = ManifestRegistry::load(&manifests_dir)?;
 
     // Load keyring for MCP discovery (cascade: keyring.enc → credentials → empty)
-    let keyring = super::call::load_keyring(&ati_dir, cli.verbose);
+    let keyring = super::call::load_keyring(&ati_dir);
 
     // Discover MCP tools so they appear in list/search/info
     discover_mcp_tools(&mut registry, &keyring, cli.verbose).await;
@@ -109,7 +110,7 @@ fn list_tools(
     }
 
     if tools.is_empty() {
-        eprintln!("No tools available. Check your scopes or manifests.");
+        tracing::warn!("no tools available — check your scopes or manifests");
         return Ok(());
     }
 
@@ -265,7 +266,7 @@ fn search_tools(
     scored.truncate(20);
 
     if scored.is_empty() {
-        eprintln!("No tools match '{query}'. Try a different search term.");
+        tracing::warn!("no tools match '{query}' — try a different search term");
         return Ok(());
     }
 

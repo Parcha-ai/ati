@@ -42,9 +42,7 @@ async fn execute_plan(
     let plan: Plan = serde_json::from_str(&content)
         .map_err(|e| format!("Invalid plan JSON in '{file}': {e}"))?;
 
-    eprintln!("Executing plan: {}", plan.query);
-    eprintln!("Steps: {}", plan.steps.len());
-    eprintln!();
+    tracing::info!(query = %plan.query, steps = plan.steps.len(), "executing plan");
 
     // Load manifests for tool validation
     let ati_dir = super::common::ati_dir();
@@ -66,11 +64,11 @@ async fn execute_plan(
     let is_tty = std::io::stdin().is_terminal();
 
     for (i, step) in plan.steps.iter().enumerate() {
-        eprintln!(
-            "--- Step {}/{}: {} ---",
-            i + 1,
-            plan.steps.len(),
-            step.description
+        tracing::info!(
+            step = i + 1,
+            total = plan.steps.len(),
+            description = %step.description,
+            "executing step"
         );
 
         // Build CLI args from step
@@ -84,13 +82,13 @@ async fn execute_plan(
         }
 
         if confirm_each && is_tty {
-            eprintln!("  ati run {} {}", step.tool, raw_args.join(" "));
+            tracing::info!("  ati run {} {}", step.tool, raw_args.join(" "));
             eprint!("  Execute? [Y/n] ");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
             let input = input.trim().to_lowercase();
             if input == "n" || input == "no" {
-                eprintln!("  Skipped.");
+                tracing::info!("  Skipped.");
                 continue;
             }
         }
@@ -98,10 +96,10 @@ async fn execute_plan(
         // Execute the step
         match super::call::execute(cli, &step.tool, &raw_args).await {
             Ok(()) => {
-                eprintln!("  [OK]");
+                tracing::info!("  [OK]");
             }
             Err(e) => {
-                eprintln!("  [ERROR] {e}");
+                tracing::error!("  [ERROR] {e}");
                 if confirm_each && is_tty {
                     eprint!("  Continue with remaining steps? [Y/n] ");
                     let mut input = String::new();
@@ -113,10 +111,9 @@ async fn execute_plan(
                 }
             }
         }
-        eprintln!();
     }
 
-    eprintln!("Plan execution complete ({} steps).", plan.steps.len());
+    tracing::info!(steps = plan.steps.len(), "plan execution complete");
     Ok(())
 }
 

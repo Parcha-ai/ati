@@ -95,7 +95,7 @@ pub fn validate_url_not_private(url: &str) -> Result<(), HttpError> {
 
     if is_private {
         if warn_only {
-            eprintln!("Warning: SSRF protection — URL targets private address: {url}");
+            tracing::warn!(url, "SSRF protection — URL targets private address");
             return Ok(());
         }
         return Err(HttpError::SsrfBlocked(url.to_string()));

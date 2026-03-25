@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 fn ati_cmd() -> Command {
     let mut cmd = Command::cargo_bin("ati").unwrap();
-    cmd.env("RUST_LOG", "");
+    cmd.env_remove("RUST_LOG");
     cmd
 }
 
@@ -15,10 +15,11 @@ fn test_init_creates_directory_structure() {
 
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
+        .env("RUST_LOG", "info")
         .args(["init"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("Initialized"))
+        .stderr(predicates::str::contains("initialized ATI directory"))
         .stderr(predicates::str::contains("manifests/"))
         .stderr(predicates::str::contains("specs/"))
         .stderr(predicates::str::contains("skills/"))

@@ -18,6 +18,10 @@ path = "src/lib.rs"
 name = "ati"
 path = "src/main.rs"
 
+[features]
+default = []
+sentry = ["dep:sentry", "dep:sentry-tracing"]
+
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -32,7 +36,12 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], def
 axum = { version = "0.8", features = ["json"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Optional Sentry integration (off by default, enable with --features sentry)
+# Includes errors, traces, AND Sentry Logs (structured log forwarding).
+sentry = { version = "0.47", features = ["tracing", "logs"], default-features = false, optional = true }
+sentry-tracing = { version = "0.47", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

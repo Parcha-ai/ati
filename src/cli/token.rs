@@ -74,14 +74,14 @@ fn keygen(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
             let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&spki_der);
             let public_pem = format_pem("PUBLIC KEY", &pub_b64);
 
-            eprintln!("Generated ES256 key pair.\n");
-            eprintln!("=== Private Key (keep secret — for token issuance only) ===");
+            tracing::info!("Generated ES256 key pair");
+            tracing::info!("=== Private Key (keep secret — for token issuance only) ===");
             println!("{private_pem}");
-            eprintln!("\n=== Public Key (distribute — for token validation) ===");
-            eprintln!("{public_pem}");
+            tracing::info!("=== Public Key (distribute — for token validation) ===");
+            tracing::info!("{}", public_pem);
 
-            eprintln!("\nSave the private key to a file and set ATI_JWT_PRIVATE_KEY=<path>");
-            eprintln!("Save the public key to a file and set ATI_JWT_PUBLIC_KEY=<path>");
+            tracing::info!("Save the private key to a file and set ATI_JWT_PRIVATE_KEY=<path>");
+            tracing::info!("Save the public key to a file and set ATI_JWT_PUBLIC_KEY=<path>");
         }
         "HS256" => {
             // Generate a random 256-bit secret
@@ -92,9 +92,9 @@ fn keygen(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("Random generation failed: {e}"))?;
 
             let hex = hex::encode(secret);
-            eprintln!("Generated HS256 shared secret.\n");
+            tracing::info!("Generated HS256 shared secret");
             println!("{hex}");
-            eprintln!("\nSet ATI_JWT_SECRET={hex}");
+            tracing::info!("Set ATI_JWT_SECRET={hex}");
         }
         _ => {
             return Err(format!("Unsupported algorithm: {algorithm}. Use ES256 or HS256.").into());
@@ -170,8 +170,8 @@ fn issue(
     println!("{token}");
 
     if atty_stderr() {
-        eprintln!("\nToken issued for sub={sub} scope=\"{scope}\" ttl={ttl}s");
-        eprintln!("Set: export ATI_SESSION_TOKEN={token}");
+        tracing::info!(sub, scope, ttl, "token issued");
+        tracing::info!("Set: export ATI_SESSION_TOKEN={token}");
     }
 
     Ok(())
@@ -218,14 +218,16 @@ fn validate(
 
     match jwt::validate(token, &config) {
         Ok(claims) => {
-            eprintln!(
-                "VALID — sub={} scope=\"{}\" exp={}",
-                claims.sub, claims.scope, claims.exp
+            tracing::info!(
+                sub = %claims.sub,
+                scope = %claims.scope,
+                exp = claims.exp,
+                "VALID"
             );
             Ok(())
         }
         Err(e) => {
-            eprintln!("INVALID — {e}");
+            tracing::error!("INVALID — {e}");
             std::process::exit(1);
         }
     }

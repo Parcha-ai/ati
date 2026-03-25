@@ -11,7 +11,7 @@ pub fn execute(cli: &Cli, subcmd: &AuditCommands) -> Result<(), Box<dyn std::err
 fn tail(cli: &Cli, n: usize) -> Result<(), Box<dyn std::error::Error>> {
     let entries = audit::tail(n)?;
     if entries.is_empty() {
-        eprintln!("No audit entries found.");
+        tracing::info!("no audit entries found");
         return Ok(());
     }
     output_entries(cli, &entries);
@@ -25,10 +25,10 @@ fn search(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entries = audit::search(tool, since)?;
     if entries.is_empty() {
-        eprintln!("No matching audit entries found.");
+        tracing::info!("no matching audit entries found");
         return Ok(());
     }
-    eprintln!("Found {} entries", entries.len());
+    tracing::info!(count = entries.len(), "found audit entries");
     output_entries(cli, &entries);
     Ok(())
 }

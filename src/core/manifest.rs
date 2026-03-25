@@ -517,9 +517,10 @@ impl ManifestRegistry {
                             manifest.tools = tools;
                         }
                         Err(e) => {
-                            eprintln!(
-                                "Warning: failed to load OpenAPI spec for provider '{}': {e}",
-                                manifest.provider.name
+                            tracing::warn!(
+                                provider = %manifest.provider.name,
+                                error = %e,
+                                "failed to load OpenAPI spec for provider"
                             );
                             // Graceful degradation — continue without tools
                         }

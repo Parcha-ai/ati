@@ -93,7 +93,7 @@ fn show_status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("Verified: {verified_str}");
 
             if scopes.is_expired() {
-                eprintln!("\nWarning: Your session has expired. Tool calls will be denied.");
+                tracing::warn!("your session has expired â tool calls will be denied");
             }
         }
     }

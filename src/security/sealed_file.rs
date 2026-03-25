@@ -56,7 +56,7 @@ pub fn read_and_delete_key_from(path: &Path) -> Result<[u8; 32], SealedFileError
     // Step 2: Unlink the file BEFORE reading — closes the TOCTOU window.
     // After unlink, the file is invisible to other processes but our fd is still valid.
     if let Err(e) = std::fs::remove_file(path) {
-        eprintln!("Warning: could not delete key file {}: {e}", path.display());
+        tracing::warn!(path = %path.display(), error = %e, "could not delete key file");
     }
 
     // Step 3: Read contents from the fd (file data persists until last fd is closed)

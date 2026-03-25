@@ -49,7 +49,7 @@ impl Keyring {
 
         // mlock the decrypted bytes (best-effort)
         if let Err(warning) = memory::mlock(decrypted.as_ptr(), decrypted.len()) {
-            eprintln!("Warning: {warning}");
+            tracing::warn!("{warning}");
         }
         let _ = memory::madvise_dontdump(decrypted.as_ptr(), decrypted.len());
 
@@ -72,7 +72,7 @@ impl Keyring {
         let decrypted = decrypt_keyring(session_key, &encrypted)?;
 
         if let Err(warning) = memory::mlock(decrypted.as_ptr(), decrypted.len()) {
-            eprintln!("Warning: {warning}");
+            tracing::warn!("{warning}");
         }
         let _ = memory::madvise_dontdump(decrypted.as_ptr(), decrypted.len());
 
