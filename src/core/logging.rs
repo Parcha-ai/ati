@@ -37,6 +37,7 @@ pub fn init(mode: LogMode, verbose: bool) -> Option<SentryGuard> {
         _ => EnvFilter::new("info"),
     };
 
+    // Init Sentry first (before subscriber) so sentry-tracing layer can be wired in.
     let sentry_guard = init_sentry();
 
     // Build the layered subscriber.
@@ -72,6 +73,15 @@ pub fn init(mode: LogMode, verbose: bool) -> Option<SentryGuard> {
         }
     }
 
+    // Warn after subscriber is initialized so the message actually appears.
+    #[cfg(not(feature = "sentry"))]
+    if std::env::var("SENTRY_DSN").is_ok() || std::env::var("GREP_SENTRY_DSN").is_ok() {
+        tracing::warn!(
+            "SENTRY_DSN is set but this binary was compiled without the sentry feature — ignoring. \
+             Build with: cargo build --features sentry"
+        );
+    }
+
     sentry_guard
 }
 
@@ -86,6 +96,15 @@ fn init_sentry() -> Option<SentryGuard> {
 
         let environment =
             std::env::var("ENVIRONMENT_TIER").unwrap_or_else(|_| "development".into());
+
+        // Only send to Sentry in production/staging/demo — skip in development
+        match environment.as_str() {
+            "production" | "staging" | "demo" => {}
+            _ => {
+                tracing::debug!(environment = %environment, "sentry disabled for this environment");
+                return None;
+            }
+        }
 
         let service = std::env::var("SERVICE_NAME").unwrap_or_else(|_| "ati-proxy".into());
 
