@@ -746,7 +746,6 @@ auth_type = "none"
         registry,
         skill_registry,
         keyring,
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: ati::core::auth_generator::AuthCache::new(),

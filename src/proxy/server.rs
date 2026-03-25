@@ -36,7 +36,6 @@ pub struct ProxyState {
     pub registry: ManifestRegistry,
     pub skill_registry: SkillRegistry,
     pub keyring: Keyring,
-    pub verbose: bool,
     /// JWT validation config (None = auth disabled / dev mode).
     pub jwt_config: Option<JwtConfig>,
     /// Pre-computed JWKS JSON for the /.well-known/jwks.json endpoint.
@@ -998,7 +997,7 @@ pub async fn run(
     port: u16,
     bind_addr: Option<String>,
     ati_dir: PathBuf,
-    verbose: bool,
+    _verbose: bool,
     env_keys: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load manifests
@@ -1110,7 +1109,6 @@ pub async fn run(
         registry,
         skill_registry,
         keyring,
-        verbose,
         jwt_config,
         jwks_json,
         auth_cache: AuthCache::new(),

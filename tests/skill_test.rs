@@ -40,7 +40,6 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
         registry: manifest_registry,
         skill_registry,
         keyring: Keyring::empty(),
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),

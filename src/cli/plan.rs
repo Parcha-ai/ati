@@ -82,13 +82,13 @@ async fn execute_plan(
         }
 
         if confirm_each && is_tty {
-            tracing::info!("  ati run {} {}", step.tool, raw_args.join(" "));
+            eprintln!("  ati run {} {}", step.tool, raw_args.join(" "));
             eprint!("  Execute? [Y/n] ");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
             let input = input.trim().to_lowercase();
             if input == "n" || input == "no" {
-                tracing::info!("  Skipped.");
+                eprintln!("  Skipped.");
                 continue;
             }
         }
@@ -96,10 +96,10 @@ async fn execute_plan(
         // Execute the step
         match super::call::execute(cli, &step.tool, &raw_args).await {
             Ok(()) => {
-                tracing::info!("  [OK]");
+                eprintln!("  [OK]");
             }
             Err(e) => {
-                tracing::error!("  [ERROR] {e}");
+                eprintln!("  [ERROR] {e}");
                 if confirm_each && is_tty {
                     eprint!("  Continue with remaining steps? [Y/n] ");
                     let mut input = String::new();
