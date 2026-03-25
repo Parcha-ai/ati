@@ -113,7 +113,7 @@ fn create_test_keyring(dir: &std::path::Path) -> (std::path::PathBuf, Keyring, s
 
     // Write the session key as base64 to a .key file (for sealed_file::read_and_delete_key)
     let key_file_path = dir.join(".key");
-    let key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &session_key);
+    let key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, session_key);
     std::fs::write(&key_file_path, &key_b64).expect("write .key file");
 
     let keyring = Keyring::load_with_key(&keyring_path, &session_key).expect("load test keyring");
@@ -157,7 +157,6 @@ async fn test_proxy_help_returns_llm_recommendations() {
         registry,
         skill_registry,
         keyring,
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -218,7 +217,6 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
         registry,
         skill_registry,
         keyring,
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -256,7 +254,6 @@ async fn test_proxy_help_missing_llm_key_returns_503() {
         registry,
         skill_registry,
         keyring: Keyring::empty(),
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -305,7 +302,6 @@ async fn test_proxy_help_llm_error_returns_502() {
         registry,
         skill_registry,
         keyring,
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -409,15 +405,15 @@ async fn test_assist_local_mode_verbose() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        stderr.contains("Mode: local"),
+        stderr.contains("mode: local"),
         "Verbose output should show local mode. stderr: {stderr}"
     );
     assert!(
-        stderr.contains("System prompt length"),
+        stderr.contains("prompt_len"),
         "Verbose output should show prompt length. stderr: {stderr}"
     );
     assert!(
-        stderr.contains("Tools in context"),
+        stderr.contains("tools_in_context"),
         "Verbose output should show tool count. stderr: {stderr}"
     );
 }
@@ -610,7 +606,6 @@ async fn test_proxy_help_excludes_internal_tools() {
         registry,
         skill_registry,
         keyring,
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),

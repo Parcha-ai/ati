@@ -53,7 +53,7 @@ fn set_key(name: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut keys = load_credentials(&path)?;
     keys.insert(name.to_string(), value.to_string());
     save_credentials(&path, &keys)?;
-    eprintln!("Saved {name}");
+    tracing::info!(name, "saved key");
     Ok(())
 }
 
@@ -81,7 +81,7 @@ fn remove_key(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     save_credentials(&path, &keys)?;
-    eprintln!("Removed {name}");
+    tracing::info!(name, "removed key");
     Ok(())
 }
 

@@ -33,16 +33,15 @@ fn init_directory(
         std::fs::write(&config_path, default_config())?;
     }
 
-    eprintln!("Initialized {}/", ati_dir.display());
-    eprintln!("  manifests/");
-    eprintln!("  specs/");
-    eprintln!("  skills/");
-    eprintln!("  config.toml");
+    tracing::info!(dir = %ati_dir.display(), "initialized ATI directory");
+    tracing::info!("  manifests/");
+    tracing::info!("  specs/");
+    tracing::info!("  skills/");
+    tracing::info!("  config.toml");
 
-    eprintln!();
-    eprintln!("Next steps:");
-    eprintln!("  ati key set <name> <value>            Add an API key");
-    eprintln!("  ati provider import-openapi <url>     Import an API spec");
+    tracing::info!("Next steps:");
+    tracing::info!("  ati key set <name> <value>            Add an API key");
+    tracing::info!("  ati provider import-openapi <url>     Import an API spec");
 
     Ok(())
 }
@@ -124,8 +123,8 @@ fn generate_es256_config(ati_dir: &Path) -> Result<String, Box<dyn std::error::E
     let pub_path = ati_dir.join("jwt-public.pem");
     std::fs::write(&pub_path, &public_pem)?;
 
-    eprintln!("  jwt-private.pem  (keep secret)");
-    eprintln!("  jwt-public.pem   (distribute for validation)");
+    tracing::info!("  jwt-private.pem  (keep secret)");
+    tracing::info!("  jwt-public.pem   (distribute for validation)");
 
     Ok(format!(
         r#"# ATI configuration — proxy mode (ES256)

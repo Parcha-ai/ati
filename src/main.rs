@@ -1,3 +1,5 @@
+#![allow(dead_code, clippy::too_many_arguments, clippy::type_complexity)]
+
 use clap::{Parser, Subcommand, ValueEnum};
 use std::process;
 
@@ -565,6 +567,13 @@ async fn main() {
 
     cli::common::ensure_ati_dir();
 
+    // Initialize structured logging (and optionally Sentry when compiled with --features sentry).
+    let log_mode = match &cli.command {
+        Commands::Proxy { .. } => core::logging::LogMode::Proxy,
+        _ => core::logging::LogMode::Cli,
+    };
+    let _sentry_guard = core::logging::init(log_mode, cli.verbose);
+
     let result = match &cli.command {
         Commands::Run { tool_name, args } => cli::call::execute(&cli, tool_name, args).await,
         Commands::Tool(subcmd) => cli::tools::execute(&cli, subcmd).await,
@@ -604,11 +613,11 @@ async fn main() {
             let error_json = core::error::format_structured_error(e.as_ref(), cli.verbose);
             eprintln!("{error_json}");
         } else {
-            eprintln!("Error: {e}");
+            tracing::error!("{e}");
             if cli.verbose {
                 let mut source = std::error::Error::source(e.as_ref());
                 while let Some(cause) = source {
-                    eprintln!("  caused by: {cause}");
+                    tracing::debug!("  caused by: {cause}");
                     source = std::error::Error::source(cause);
                 }
             }

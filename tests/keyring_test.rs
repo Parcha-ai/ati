@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use tempfile::TempDir;
 
 // We test via the binary's lib-like API by importing the crate
@@ -93,7 +92,7 @@ fn test_keyring_file_roundtrip() {
 
     // Write session key as base64
     let key_path = dir.path().join(".key");
-    let key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &session_key);
+    let key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, session_key);
     std::fs::write(&key_path, &key_b64).unwrap();
 
     // Verify key file exists
@@ -143,7 +142,6 @@ use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     AeadCore, Aes256Gcm, Nonce,
 };
-use base64;
 use rand::RngCore;
 
 const NONCE_SIZE: usize = 12;

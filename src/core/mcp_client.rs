@@ -359,7 +359,7 @@ impl McpClient {
 
             // Safety: cap total tools to prevent memory exhaustion
             if all_tools.len() > MAX_TOOLS {
-                eprintln!("[mcp] Warning: tool count exceeds {MAX_TOOLS}, truncating");
+                tracing::warn!(max = MAX_TOOLS, "MCP tool count exceeds limit, truncating");
                 all_tools.truncate(MAX_TOOLS);
                 break;
             }
@@ -696,7 +696,7 @@ async fn parse_sse_response(
                 SseParseResult::OurResponse(result) => return result,
                 SseParseResult::NotOurMessage => {}
                 SseParseResult::ParseError(e) => {
-                    eprintln!("[mcp] Warning: failed to parse SSE data: {e}");
+                    tracing::warn!(error = %e, "failed to parse SSE data");
                 }
             }
             current_data.clear();

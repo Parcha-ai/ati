@@ -49,7 +49,7 @@ impl Keyring {
 
         // mlock the decrypted bytes (best-effort)
         if let Err(warning) = memory::mlock(decrypted.as_ptr(), decrypted.len()) {
-            eprintln!("Warning: {warning}");
+            tracing::warn!("{warning}");
         }
         let _ = memory::madvise_dontdump(decrypted.as_ptr(), decrypted.len());
 
@@ -72,7 +72,7 @@ impl Keyring {
         let decrypted = decrypt_keyring(session_key, &encrypted)?;
 
         if let Err(warning) = memory::mlock(decrypted.as_ptr(), decrypted.len()) {
-            eprintln!("Warning: {warning}");
+            tracing::warn!("{warning}");
         }
         let _ = memory::madvise_dontdump(decrypted.as_ptr(), decrypted.len());
 
@@ -122,8 +122,7 @@ impl Keyring {
     pub fn load_local(keyring_path: &Path, ati_dir: &Path) -> Result<Self, KeyringError> {
         let persistent_key_path = ati_dir.join(".keyring-key");
 
-        let contents =
-            std::fs::read_to_string(&persistent_key_path).map_err(|e| KeyringError::Io(e))?;
+        let contents = std::fs::read_to_string(&persistent_key_path).map_err(KeyringError::Io)?;
 
         let decoded =
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, contents.trim())

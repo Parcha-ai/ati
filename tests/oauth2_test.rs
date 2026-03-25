@@ -10,10 +10,8 @@ mod common;
 use ati::core::http::execute_tool_with_gen;
 use ati::core::keyring::Keyring;
 use ati::core::manifest::AuthType;
-use serde_json::json;
 use std::collections::HashMap;
-use wiremock::matchers::{header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::MockServer;
 
 /// OAuth2 with HTTP token URL is rejected (InsecureTokenUrl).
 #[tokio::test]

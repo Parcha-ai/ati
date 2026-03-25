@@ -36,7 +36,6 @@ pub struct ProxyState {
     pub registry: ManifestRegistry,
     pub skill_registry: SkillRegistry,
     pub keyring: Keyring,
-    pub verbose: bool,
     /// JWT validation config (None = auth disabled / dev mode).
     pub jwt_config: Option<JwtConfig>,
     /// Pre-computed JWKS JSON for the /.well-known/jwks.json endpoint.
@@ -87,9 +86,9 @@ impl CallRequest {
             // ["pr", "list", "--repo", "X"]
             Value::Array(arr) => arr
                 .iter()
-                .filter_map(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    other => Some(other.to_string()),
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
                 })
                 .collect(),
             // "pr list --repo X"
@@ -99,9 +98,9 @@ impl CallRequest {
                 if let Some(Value::Array(pos)) = map.get("_positional") {
                     return pos
                         .iter()
-                        .filter_map(|v| match v {
-                            Value::String(s) => Some(s.clone()),
-                            other => Some(other.to_string()),
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
                         })
                         .collect();
                 }
@@ -216,12 +215,11 @@ async fn handle_call(
         }
     };
 
-    if state.verbose {
-        eprintln!(
-            "[proxy] /call tool={} args={:?}",
-            call_req.tool_name, call_req.args
-        );
-    }
+    tracing::debug!(
+        tool = %call_req.tool_name,
+        args = ?call_req.args,
+        "POST /call"
+    );
 
     // Look up tool in registry
     let (provider, tool) = match state.registry.get_tool(&call_req.tool_name) {
@@ -424,9 +422,7 @@ async fn handle_help(
     State(state): State<Arc<ProxyState>>,
     Json(req): Json<HelpRequest>,
 ) -> impl IntoResponse {
-    if state.verbose {
-        eprintln!("[proxy] /help query={} tool={:?}", req.query, req.tool);
-    }
+    tracing::debug!(query = %req.query, tool = ?req.tool, "POST /help");
 
     let (llm_provider, llm_tool) = match state.registry.get_tool("_chat_completion") {
         Some(pt) => pt,
@@ -476,12 +472,7 @@ async fn handle_help(
             Some(prompt) => prompt,
             None => {
                 // Fall back to unscoped if tool/provider not found
-                if state.verbose {
-                    eprintln!(
-                        "[proxy] /help scope '{}' not found, falling back to unscoped",
-                        tool_name
-                    );
-                }
+                tracing::debug!(scope = %tool_name, "scope not found, falling back to unscoped");
                 let all_tools = state.registry.list_public_tools();
                 let tools_context = build_tool_context(&all_tools);
                 HELP_SYSTEM_PROMPT
@@ -612,9 +603,7 @@ async fn handle_mcp(
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
 
-    if state.verbose {
-        eprintln!("[proxy] /mcp method={method}");
-    }
+    tracing::debug!(%method, "POST /mcp");
 
     match method {
         "initialize" => {
@@ -674,12 +663,7 @@ async fn handle_mcp(
                 }
             };
 
-            if state.verbose {
-                eprintln!(
-                    "[proxy] /mcp tools/call name={tool_name} provider={}",
-                    provider.name
-                );
-            }
+            tracing::debug!(%tool_name, provider = %provider.name, "MCP tools/call");
 
             let mcp_gen_ctx = GenContext {
                 jwt_sub: "dev".into(),
@@ -800,12 +784,13 @@ async fn handle_skills_list(
     State(state): State<Arc<ProxyState>>,
     axum::extract::Query(query): axum::extract::Query<SkillsQuery>,
 ) -> impl IntoResponse {
-    if state.verbose {
-        eprintln!(
-            "[proxy] GET /skills category={:?} provider={:?} tool={:?} search={:?}",
-            query.category, query.provider, query.tool, query.search
-        );
-    }
+    tracing::debug!(
+        category = ?query.category,
+        provider = ?query.provider,
+        tool = ?query.tool,
+        search = ?query.search,
+        "GET /skills"
+    );
 
     let skills: Vec<&skill::SkillMeta> = if let Some(search_query) = &query.search {
         state.skill_registry.search(search_query)
@@ -842,12 +827,7 @@ async fn handle_skill_detail(
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<SkillDetailQuery>,
 ) -> impl IntoResponse {
-    if state.verbose {
-        eprintln!(
-            "[proxy] GET /skills/{name} meta={:?} refs={:?}",
-            query.meta, query.refs
-        );
-    }
+    tracing::debug!(%name, meta = ?query.meta, refs = ?query.refs, "GET /skills/:name");
 
     let skill_meta = match state.skill_registry.get_skill(&name) {
         Some(s) => s,
@@ -912,9 +892,7 @@ async fn handle_skills_resolve(
     State(state): State<Arc<ProxyState>>,
     Json(req): Json<SkillResolveRequest>,
 ) -> impl IntoResponse {
-    if state.verbose {
-        eprintln!("[proxy] POST /skills/resolve scopes={:?}", req.scopes);
-    }
+    tracing::debug!(scopes = ?req.scopes, "POST /skills/resolve");
 
     let scopes = ScopeConfig {
         scopes: req.scopes,
@@ -981,19 +959,12 @@ async fn auth_middleware(
     // Validate JWT
     match jwt::validate(token, jwt_config) {
         Ok(claims) => {
-            if state.verbose {
-                eprintln!(
-                    "[proxy] JWT validated: sub={} scopes={}",
-                    claims.sub, claims.scope
-                );
-            }
+            tracing::debug!(sub = %claims.sub, scopes = %claims.scope, "JWT validated");
             req.extensions_mut().insert(claims);
             Ok(next.run(req).await)
         }
         Err(e) => {
-            if state.verbose {
-                eprintln!("[proxy] JWT validation failed: {e}");
-            }
+            tracing::debug!(error = %e, "JWT validation failed");
             Err(StatusCode::UNAUTHORIZED)
         }
     }
@@ -1026,7 +997,7 @@ pub async fn run(
     port: u16,
     bind_addr: Option<String>,
     ati_dir: PathBuf,
-    verbose: bool,
+    _verbose: bool,
     env_keys: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load manifests
@@ -1042,12 +1013,12 @@ pub async fn run(
         // --env-keys: scan ATI_KEY_* environment variables
         let kr = Keyring::from_env();
         let key_names = kr.key_names();
-        eprintln!(
-            "  Loaded {} API keys from ATI_KEY_* env vars:",
-            key_names.len()
+        tracing::info!(
+            count = key_names.len(),
+            "loaded API keys from ATI_KEY_* env vars"
         );
         for name in &key_names {
-            eprintln!("    - {name}");
+            tracing::debug!(key = %name, "env key loaded");
         }
         keyring_source = "env-vars (ATI_KEY_*)";
         kr
@@ -1062,7 +1033,7 @@ pub async fn run(
                 keyring_source = "keyring.enc (persistent key)";
                 kr
             } else {
-                eprintln!("Warning: keyring.enc exists but could not be decrypted");
+                tracing::warn!("keyring.enc exists but could not be decrypted");
                 keyring_source = "empty (decryption failed)";
                 Keyring::empty()
             }
@@ -1075,16 +1046,14 @@ pub async fn run(
                         kr
                     }
                     Err(e) => {
-                        eprintln!("Warning: Failed to load credentials: {e}");
+                        tracing::warn!(error = %e, "failed to load credentials");
                         keyring_source = "empty (credentials error)";
                         Keyring::empty()
                     }
                 }
             } else {
-                eprintln!(
-                    "Warning: No keyring.enc or credentials found — running without API keys"
-                );
-                eprintln!("Tools requiring authentication will fail.");
+                tracing::warn!("no keyring.enc or credentials found — running without API keys");
+                tracing::warn!("tools requiring authentication will fail");
                 keyring_source = "empty (no auth)";
                 Keyring::empty()
             }
@@ -1108,9 +1077,7 @@ pub async fn run(
     // Load skill registry
     let skills_dir = ati_dir.join("skills");
     let skill_registry = SkillRegistry::load(&skills_dir).unwrap_or_else(|e| {
-        if verbose {
-            eprintln!("Warning: failed to load skills: {e}");
-        }
+        tracing::warn!(error = %e, "failed to load skills");
         SkillRegistry::load(std::path::Path::new("/nonexistent-fallback")).unwrap()
     });
     let skill_count = skill_registry.skill_count();
@@ -1119,7 +1086,7 @@ pub async fn run(
     let jwt_config = match jwt::config_from_env() {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("Warning: JWT config error: {e}");
+            tracing::warn!(error = %e, "JWT config error");
             None
         }
     };
@@ -1142,7 +1109,6 @@ pub async fn run(
         registry,
         skill_registry,
         keyring,
-        verbose,
         jwt_config,
         jwks_json,
         auth_cache: AuthCache::new(),
@@ -1156,19 +1122,24 @@ pub async fn run(
         SocketAddr::from(([127, 0, 0, 1], port))
     };
 
-    eprintln!("ATI proxy server v{}", env!("CARGO_PKG_VERSION"));
-    eprintln!("  Listening on http://{addr}");
-    eprintln!("  Auth: {auth_status}");
-    eprintln!("  ATI dir: {}", ati_dir.display());
-    eprintln!("  Tools: {tool_count}, Providers: {provider_count} ({mcp_count} MCP, {openapi_count} OpenAPI)");
-    eprintln!("  Skills: {skill_count}");
-    eprintln!("  Keyring: {keyring_source}");
-    eprintln!("  Endpoints: /call, /help, /mcp, /skills, /skills/:name, /skills/resolve, /health, /.well-known/jwks.json");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        %addr,
+        auth = auth_status,
+        ati_dir = %ati_dir.display(),
+        tools = tool_count,
+        providers = provider_count,
+        mcp = mcp_count,
+        openapi = openapi_count,
+        skills = skill_count,
+        keyring = keyring_source,
+        "ATI proxy server starting"
+    );
     for (name, transport) in &mcp_providers {
-        eprintln!("  MCP: {name} ({transport})");
+        tracing::info!(provider = %name, transport = %transport, "MCP provider");
     }
     for name in &openapi_providers {
-        eprintln!("  OpenAPI: {name}");
+        tracing::info!(provider = %name, "OpenAPI provider");
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

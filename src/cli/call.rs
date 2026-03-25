@@ -94,25 +94,23 @@ fn normalize_arg_keys(
 }
 
 /// Load scopes from ATI_SESSION_TOKEN JWT, or return unrestricted if not set.
-fn load_scopes_from_env(verbose: bool) -> ScopeConfig {
+fn load_scopes_from_env() -> ScopeConfig {
     match std::env::var("ATI_SESSION_TOKEN") {
         Ok(token) if !token.is_empty() => {
             // Try to load JWT config for full verification
             match jwt::config_from_env() {
                 Ok(Some(config)) => match jwt::validate(&token, &config) {
                     Ok(claims) => {
-                        if verbose {
-                            eprintln!("JWT validated: sub={} scopes={}", claims.sub, claims.scope);
-                        }
+                        tracing::debug!(sub = %claims.sub, scopes = %claims.scope, "JWT validated");
                         ScopeConfig::from_jwt(&claims)
                     }
                     Err(e) => {
-                        eprintln!("Warning: JWT validation failed: {e}");
-                        eprintln!("Falling back to inspect-only mode (scopes extracted but signature not verified)");
+                        tracing::warn!(error = %e, "JWT validation failed");
+                        tracing::warn!("falling back to inspect-only mode (scopes extracted but signature not verified)");
                         match jwt::inspect(&token) {
                             Ok(claims) => ScopeConfig::from_jwt(&claims),
                             Err(e2) => {
-                                eprintln!("Error: Cannot decode JWT: {e2}");
+                                tracing::error!(error = %e2, "cannot decode JWT");
                                 ScopeConfig::unrestricted()
                             }
                         }
@@ -120,29 +118,25 @@ fn load_scopes_from_env(verbose: bool) -> ScopeConfig {
                 },
                 Ok(None) => {
                     // No JWT config — inspect without verification
-                    if verbose {
-                        eprintln!(
-                            "No JWT public key configured — inspecting token without verification"
-                        );
-                    }
+                    tracing::debug!(
+                        "no JWT public key configured — inspecting token without verification"
+                    );
                     match jwt::inspect(&token) {
                         Ok(claims) => ScopeConfig::from_jwt(&claims),
                         Err(e) => {
-                            eprintln!("Error: Cannot decode JWT: {e}");
+                            tracing::error!(error = %e, "cannot decode JWT");
                             ScopeConfig::unrestricted()
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: JWT config error: {e}");
+                    tracing::warn!(error = %e, "JWT config error");
                     ScopeConfig::unrestricted()
                 }
             }
         }
         _ => {
-            if verbose {
-                eprintln!("No ATI_SESSION_TOKEN — running in unrestricted mode");
-            }
+            tracing::debug!("no ATI_SESSION_TOKEN — running in unrestricted mode");
             ScopeConfig::unrestricted()
         }
     }
@@ -175,35 +169,27 @@ pub async fn execute_with_registry(
 
     // Auto-detect: proxy mode if ATI_PROXY_URL is set
     if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
-        if cli.verbose {
-            eprintln!("Mode: proxy (ATI_PROXY_URL={proxy_url})");
-        }
+        tracing::debug!(proxy_url = %proxy_url, "mode: proxy");
         return execute_via_proxy(cli, tool_name, &args, raw_args, &proxy_url).await;
     }
 
     // Local mode: keyring + direct HTTP
-    if cli.verbose {
-        eprintln!("Mode: local (no ATI_PROXY_URL)");
-    }
+    tracing::debug!("mode: local (no ATI_PROXY_URL)");
     execute_local(cli, tool_name, &args, raw_args, registry).await
 }
 
 /// Load keyring using cascade: keyring.enc (sealed) → keyring.enc (persistent) → credentials → empty.
-pub(crate) fn load_keyring(ati_dir: &Path, verbose: bool) -> Keyring {
+pub(crate) fn load_keyring(ati_dir: &Path) -> Keyring {
     // 1. Try encrypted keyring.enc (sealed one-shot key from /run/ati/.key)
     let keyring_path = ati_dir.join("keyring.enc");
     if keyring_path.exists() {
         if let Ok(kr) = Keyring::load(&keyring_path) {
-            if verbose {
-                eprintln!("Keyring: keyring.enc (sealed key)");
-            }
+            tracing::debug!("keyring: keyring.enc (sealed key)");
             return kr;
         }
         // 2. Try persistent key alongside ATI dir
         if let Ok(kr) = Keyring::load_local(&keyring_path, ati_dir) {
-            if verbose {
-                eprintln!("Keyring: keyring.enc (persistent key)");
-            }
+            tracing::debug!("keyring: keyring.enc (persistent key)");
             return kr;
         }
     }
@@ -212,16 +198,12 @@ pub(crate) fn load_keyring(ati_dir: &Path, verbose: bool) -> Keyring {
     let creds_path = ati_dir.join("credentials");
     if creds_path.exists() {
         if let Ok(kr) = Keyring::load_credentials(&creds_path) {
-            if verbose {
-                eprintln!("Keyring: credentials (plaintext)");
-            }
+            tracing::debug!("keyring: credentials (plaintext)");
             return kr;
         }
     }
 
-    if verbose {
-        eprintln!("No keys found. Run `ati key set <name> <value>`.");
-    }
+    tracing::debug!("no keys found — run `ati key set <name> <value>`");
     Keyring::empty()
 }
 
@@ -235,11 +217,7 @@ async fn execute_local(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = common::ati_dir();
 
-    if cli.verbose {
-        eprintln!("Tool: {tool_name}");
-        eprintln!("Args: {args:?}");
-        eprintln!("ATI dir: {}", ati_dir.display());
-    }
+    tracing::debug!(tool = %tool_name, ?args, ati_dir = %ati_dir.display(), "execute local");
 
     // Load manifests (or reuse pre-loaded registry)
     let manifests_dir = ati_dir.join("manifests");
@@ -249,17 +227,12 @@ async fn execute_local(
     };
 
     // Load keyring using cascade
-    let keyring = load_keyring(&ati_dir, cli.verbose);
+    let keyring = load_keyring(&ati_dir);
 
     // Look up tool — if not found, try MCP discovery
     if registry.get_tool(tool_name).is_none() {
         if let Some(mcp_provider) = registry.find_mcp_provider_for_tool(tool_name) {
-            if cli.verbose {
-                eprintln!(
-                    "Tool not in static index, discovering from MCP provider '{}'...",
-                    mcp_provider.name
-                );
-            }
+            tracing::debug!(provider = %mcp_provider.name, "tool not in static index, discovering from MCP provider");
             let provider_name = mcp_provider.name.clone();
             let client = mcp_client::McpClient::connect(mcp_provider, &keyring).await?;
             let mcp_tools = client.list_tools().await?;
@@ -296,16 +269,19 @@ async fn execute_local(
         }
     })?;
 
-    if cli.verbose {
-        eprintln!("Provider: {} ({})", provider.name, provider.base_url);
-        eprintln!("Endpoint: {} {}", tool.method, tool.endpoint);
-    }
+    tracing::debug!(
+        provider = %provider.name,
+        base_url = %provider.base_url,
+        method = %tool.method,
+        endpoint = %tool.endpoint,
+        "dispatching tool call"
+    );
 
     // Normalize arg keys to match schema property names (case-insensitive, underscore/hyphen)
     let args = normalize_arg_keys(args, tool);
 
     // Load scopes from JWT
-    let scopes = load_scopes_from_env(cli.verbose);
+    let scopes = load_scopes_from_env();
 
     if let Some(scope) = &tool.scope {
         scopes.check_access(tool_name, scope)?;
@@ -388,9 +364,7 @@ async fn execute_local(
         exit_code: None,
     };
     if let Err(e) = crate::core::audit::append(&audit_entry) {
-        if cli.verbose {
-            eprintln!("Warning: failed to write audit log: {e}");
-        }
+        tracing::warn!(error = %e, "failed to write audit log");
     }
 
     let result = exec_result?;
@@ -406,13 +380,9 @@ async fn execute_via_proxy(
     raw_args: &[String],
     proxy_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if cli.verbose {
-        eprintln!("Tool: {tool_name}");
-        eprintln!("Args: {args:?}");
-        eprintln!("Proxy: {proxy_url}");
-    }
+    tracing::debug!(tool = %tool_name, ?args, proxy_url = %proxy_url, "execute via proxy");
 
-    let scopes = load_scopes_from_env(cli.verbose);
+    let scopes = load_scopes_from_env();
     let start = std::time::Instant::now();
     let exec_result = proxy_client::call_tool(proxy_url, tool_name, args, Some(raw_args)).await;
     let duration = start.elapsed();
@@ -432,9 +402,7 @@ async fn execute_via_proxy(
         exit_code: None,
     };
     if let Err(e) = crate::core::audit::append(&audit_entry) {
-        if cli.verbose {
-            eprintln!("Warning: failed to write audit log: {e}");
-        }
+        tracing::warn!(error = %e, "failed to write audit log");
     }
 
     let result = exec_result?;

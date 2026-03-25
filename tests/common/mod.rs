@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared test helpers for ATI integration tests.
 //!
 //! Provides reusable builders that eliminate 30+ lines of Provider/Tool boilerplate.
@@ -245,7 +246,6 @@ pub fn build_test_app(registry: ManifestRegistry) -> axum::Router {
         registry,
         skill_registry,
         keyring: Keyring::empty(),
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -260,7 +260,6 @@ pub fn build_test_app_with_jwt(registry: ManifestRegistry) -> axum::Router {
         registry,
         skill_registry,
         keyring: Keyring::empty(),
-        verbose: false,
         jwt_config: Some(test_jwt_config()),
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -279,7 +278,6 @@ pub fn build_test_app_full(
         registry,
         skill_registry,
         keyring,
-        verbose: false,
         jwt_config: if jwt { Some(test_jwt_config()) } else { None },
         jwks_json: None,
         auth_cache: AuthCache::new(),

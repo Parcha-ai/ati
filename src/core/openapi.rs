@@ -286,8 +286,7 @@ fn auto_generate_operation_id(method: &str, path: &str) -> String {
     let slug = path
         .trim_matches('/')
         .replace('/', "_")
-        .replace('{', "")
-        .replace('}', "");
+        .replace(['{', '}'], "");
     format!("{}_{}", method, slug)
 }
 
@@ -330,6 +329,7 @@ fn parameter_location(param: &Parameter) -> &'static str {
 }
 
 /// Resolve a $ref to a Parameter component.
+#[allow(dead_code)]
 fn resolve_parameter_ref<'a>(reference: &str, spec: &'a OpenAPI) -> Option<&'a ParameterData> {
     let name = reference.strip_prefix("#/components/parameters/")?;
     let param = spec.components.as_ref()?.parameters.get(name)?;
@@ -695,6 +695,7 @@ fn resolve_schema_to_json_depth(
 }
 
 /// Resolve a schema $ref string like "#/components/schemas/Pet" to JSON.
+#[allow(dead_code)]
 fn resolve_schema_ref_to_json(reference: &str, spec: &OpenAPI) -> Value {
     resolve_schema_ref_to_json_depth(reference, spec, 0)
 }

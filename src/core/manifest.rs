@@ -21,19 +21,15 @@ pub enum ManifestError {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AuthType {
     Bearer,
     Header,
     Query,
     Basic,
+    #[default]
     None,
     Oauth2,
-}
-
-impl Default for AuthType {
-    fn default() -> Self {
-        AuthType::None
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,8 +235,10 @@ pub struct InjectTarget {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
+#[derive(Default)]
 pub enum HttpMethod {
     #[serde(alias = "get", alias = "Get")]
+    #[default]
     Get,
     #[serde(alias = "post", alias = "Post")]
     Post,
@@ -248,12 +246,6 @@ pub enum HttpMethod {
     Put,
     #[serde(alias = "delete", alias = "Delete")]
     Delete,
-}
-
-impl Default for HttpMethod {
-    fn default() -> Self {
-        HttpMethod::Get
-    }
 }
 
 impl std::fmt::Display for HttpMethod {
@@ -517,9 +509,10 @@ impl ManifestRegistry {
                             manifest.tools = tools;
                         }
                         Err(e) => {
-                            eprintln!(
-                                "Warning: failed to load OpenAPI spec for provider '{}': {e}",
-                                manifest.provider.name
+                            tracing::warn!(
+                                provider = %manifest.provider.name,
+                                error = %e,
+                                "failed to load OpenAPI spec for provider"
                             );
                             // Graceful degradation — continue without tools
                         }

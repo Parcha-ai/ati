@@ -1,4 +1,5 @@
 //! ATI library — exposes core modules for integration tests and embedding.
+#![allow(dead_code)]
 
 pub mod core;
 pub mod proxy;

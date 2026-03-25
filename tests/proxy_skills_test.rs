@@ -26,7 +26,6 @@ fn build_app_with_skills(
         registry,
         skill_registry,
         keyring: Keyring::empty(),
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),

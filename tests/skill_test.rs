@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 /// Integration tests for the ATI skill management system.
 ///
 /// Tests cover: SkillRegistry loading, tool/provider/category indexes,
@@ -40,7 +41,6 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
         registry: manifest_registry,
         skill_registry,
         keyring: Keyring::empty(),
-        verbose: false,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -716,7 +716,7 @@ description = "Test"
 
 #[test]
 fn test_build_skill_context_for_llm() {
-    let skills = vec![SkillMeta {
+    let skills = [SkillMeta {
         name: "sanctions".to_string(),
         version: "1.0.0".to_string(),
         description: "Screen against sanctions".to_string(),

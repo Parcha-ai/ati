@@ -1,7 +1,7 @@
-/// Secure memory helpers: mlock, madvise, zeroize.
-///
-/// These prevent secrets from being swapped to disk or included in core dumps.
-/// All functions are best-effort on non-Linux platforms.
+//! Secure memory helpers: mlock, madvise, zeroize.
+//!
+//! These prevent secrets from being swapped to disk or included in core dumps.
+//! All functions are best-effort on non-Linux platforms.
 
 /// Lock a memory region to prevent it from being swapped to disk.
 /// Returns Ok(()) on success, Err with a warning message on failure.
@@ -31,9 +31,7 @@ pub fn madvise_dontdump(ptr: *const u8, len: usize) -> Result<(), String> {
     if ret == 0 {
         Ok(())
     } else {
-        Err(format!(
-            "madvise(DONTDUMP) failed: secrets may appear in core dumps"
-        ))
+        Err("madvise(DONTDUMP) failed: secrets may appear in core dumps".to_string())
     }
 }
 

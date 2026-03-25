@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 fn ati_cmd() -> Command {
     let mut cmd = Command::cargo_bin("ati").unwrap();
-    cmd.env("RUST_LOG", "");
+    cmd.env_remove("RUST_LOG");
     cmd
 }
 
@@ -15,10 +15,11 @@ fn test_keys_set_creates_credentials_file() {
 
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
+        .env("RUST_LOG", "info")
         .args(["key", "set", "my_api_key", "sk-test-12345"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("Saved my_api_key"));
+        .stderr(predicates::str::contains("saved key"));
 
     let creds_path = ati_dir.join("credentials");
     assert!(creds_path.is_file());
@@ -93,10 +94,11 @@ fn test_keys_remove() {
     // Remove one
     ati_cmd()
         .env("ATI_DIR", ati_dir.to_str().unwrap())
+        .env("RUST_LOG", "info")
         .args(["key", "remove", "key_a"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("Removed key_a"));
+        .stderr(predicates::str::contains("removed key"));
 
     // Verify removal
     let content: serde_json::Value =

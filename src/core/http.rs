@@ -95,7 +95,7 @@ pub fn validate_url_not_private(url: &str) -> Result<(), HttpError> {
 
     if is_private {
         if warn_only {
-            eprintln!("Warning: SSRF protection — URL targets private address: {url}");
+            tracing::warn!(url, "SSRF protection — URL targets private address");
             return Ok(());
         }
         return Err(HttpError::SsrfBlocked(url.to_string()));
@@ -252,7 +252,7 @@ fn classify_params(tool: &Tool, args: &HashMap<String, Value>) -> Option<Classif
                         Some("pipes") => CollectionFormat::Pipes,
                         _ => CollectionFormat::Multi, // default for arrays
                     };
-                    let values: Vec<String> = arr.iter().map(|v| value_to_string(v)).collect();
+                    let values: Vec<String> = arr.iter().map(value_to_string).collect();
                     classified.query_arrays.insert(key.clone(), (values, cf));
                 } else {
                     classified.query.insert(key.clone(), value_to_string(value));
@@ -501,7 +501,7 @@ pub async fn execute_tool_with_gen(
 
     // Parse response
     let text = response.text().await?;
-    let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text));
+    let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
 
     Ok(value)
 }

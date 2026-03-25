@@ -502,7 +502,7 @@ fn read_skill(
         }
         let content = registry.read_content(skill_name)?;
         if content.is_empty() {
-            eprintln!("(No SKILL.md content for '{skill_name}')");
+            tracing::warn!(skill = %skill_name, "no SKILL.md content");
         } else {
             print!("{content}");
             // Ensure trailing newline
@@ -517,7 +517,9 @@ fn read_skill(
                 println!("\n--- Reference: {ref_name} ---\n");
                 match registry.read_reference(skill_name, ref_name) {
                     Ok(ref_content) => print!("{ref_content}"),
-                    Err(e) => eprintln!("(Error reading reference '{ref_name}': {e})"),
+                    Err(e) => {
+                        tracing::error!(reference = %ref_name, error = %e, "failed to read reference")
+                    }
                 }
             }
         }
@@ -609,7 +611,7 @@ fn parse_git_url_fragment(url: &str) -> (&str, Option<&str>) {
 /// Clone a git repo and install skill(s) from it.
 async fn install_from_git(
     git_url: &str,
-    dest_base: &PathBuf,
+    dest_base: &std::path::Path,
     name_override: Option<&str>,
     all: bool,
     local: bool,
@@ -652,7 +654,7 @@ async fn install_from_git(
 async fn install_from_git_with_sha(
     git_url: &str,
     pinned_sha: Option<&str>,
-    dest_base: &PathBuf,
+    dest_base: &std::path::Path,
     name_override: Option<&str>,
     all: bool,
     local: bool,
@@ -770,8 +772,8 @@ async fn install_skill(
 }
 
 async fn install_from_dir(
-    source: &PathBuf,
-    dest_base: &PathBuf,
+    source: &std::path::Path,
+    dest_base: &std::path::Path,
     name_override: Option<&str>,
     all: bool,
     local: bool,
@@ -780,8 +782,8 @@ async fn install_from_dir(
 }
 
 async fn install_from_dir_with_integrity(
-    source: &PathBuf,
-    dest_base: &PathBuf,
+    source: &std::path::Path,
+    dest_base: &std::path::Path,
     name_override: Option<&str>,
     all: bool,
     local: bool,
@@ -888,11 +890,10 @@ fn init_skill(
 
     // Warn if name doesn't conform to Anthropic spec
     if !skill::is_anthropic_valid_name(name) {
-        eprintln!(
-            "Warning: name '{}' does not conform to Anthropic Agent Skills spec",
-            name
+        tracing::warn!(
+            name = %name,
+            "name does not conform to Anthropic Agent Skills spec (1-64 chars, lowercase + digits + hyphens, no consecutive hyphens)"
         );
-        eprintln!("  (1-64 chars, lowercase + digits + hyphens, no consecutive hyphens)");
     }
 
     Ok(())
@@ -1138,15 +1139,19 @@ fn verify_skill(name: &str) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(ref stored) => {
-            eprintln!("WARNING — '{}' content has changed!", name);
-            eprintln!("  Stored:  {stored}");
-            eprintln!("  Current: {current_hash}");
+            tracing::warn!(
+                skill = %name,
+                stored_hash = %stored,
+                current_hash = %current_hash,
+                "skill content has changed — integrity check failed"
+            );
             Err(format!("Integrity check failed for '{}'", name).into())
         }
         None => {
-            eprintln!(
-                "No integrity hash stored for '{}'. Current SHA-256: {}",
-                name, current_hash
+            tracing::info!(
+                skill = %name,
+                current_hash = %current_hash,
+                "no integrity hash stored"
             );
             Ok(())
         }
@@ -1392,8 +1397,7 @@ async fn generate_manifest_from_skill(
                 }
             }
             Err(e) => {
-                eprintln!("Error: Local manifest generation failed: {e}");
-                eprintln!("  Is ollama running? Check with: curl http://localhost:11434/v1/models");
+                tracing::error!(error = %e, "local manifest generation failed — is ollama running? check with: curl http://localhost:11434/v1/models");
                 // --local means NO fallback to network — only try bundled provider.toml
             }
         }
@@ -1418,7 +1422,7 @@ async fn generate_manifest_from_skill(
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: LLM manifest generation failed: {e}");
+                    tracing::warn!(error = %e, "LLM manifest generation failed");
                 }
             }
         }
@@ -1442,12 +1446,12 @@ fn try_write_manifest(dest: &std::path::Path, manifest_toml: &str, provider_name
                 true
             }
             Err(e) => {
-                eprintln!("Warning: Failed to write generated manifest: {e}");
+                tracing::warn!(error = %e, "failed to write generated manifest");
                 false
             }
         }
     } else {
-        eprintln!("Warning: LLM output didn't look like a valid manifest, trying fallback.");
+        tracing::warn!("LLM output didn't look like a valid manifest, trying fallback");
         false
     }
 }
@@ -1770,7 +1774,7 @@ fn copy_dir_recursive(
 
         // Skip symlinks to prevent following links outside the source directory
         if file_type.is_symlink() {
-            eprintln!("Warning: skipping symlink '{}'", src_path.display());
+            tracing::warn!(path = %src_path.display(), "skipping symlink");
             continue;
         }
 

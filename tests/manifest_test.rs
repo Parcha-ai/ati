@@ -1,4 +1,4 @@
-use std::io::Write;
+#![allow(dead_code)]
 use tempfile::TempDir;
 
 #[test]
@@ -340,18 +340,14 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 enum AuthType {
     Bearer,
     Header,
     Query,
     Basic,
+    #[default]
     None,
-}
-
-impl Default for AuthType {
-    fn default() -> Self {
-        AuthType::None
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -375,8 +371,10 @@ struct Provider {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
+#[derive(Default)]
 enum HttpMethod {
     #[serde(alias = "get", alias = "Get")]
+    #[default]
     Get,
     #[serde(alias = "post", alias = "Post")]
     Post,
@@ -384,12 +382,6 @@ enum HttpMethod {
     Put,
     #[serde(alias = "delete", alias = "Delete")]
     Delete,
-}
-
-impl Default for HttpMethod {
-    fn default() -> Self {
-        HttpMethod::Get
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

@@ -73,26 +73,20 @@ pub async fn execute(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Auto-detect: proxy mode if ATI_PROXY_URL is set
     if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
-        if cli.verbose {
-            eprintln!("Mode: proxy (ATI_PROXY_URL={proxy_url})");
-        }
+        tracing::debug!(proxy_url = %proxy_url, "mode: proxy");
         // In proxy mode, we need to load registry to resolve scope (if any)
         let ati_dir = common::ati_dir();
         let manifests_dir = ati_dir.join("manifests");
         let registry =
             ManifestRegistry::load(&manifests_dir).unwrap_or_else(|_| ManifestRegistry::empty());
         let (scope_name, query) = resolve_assist_scope(args, &registry);
-        if cli.verbose {
-            if let Some(ref s) = scope_name {
-                eprintln!("Scoped to: {s}");
-            }
+        if let Some(ref s) = scope_name {
+            tracing::debug!(scope = %s, "scoped assist");
         }
         return execute_via_proxy(cli, &query, scope_name.as_deref(), &proxy_url).await;
     }
 
-    if cli.verbose {
-        eprintln!("Mode: local (no ATI_PROXY_URL)");
-    }
+    tracing::debug!("mode: local (no ATI_PROXY_URL)");
     execute_local(cli, args, local).await
 }
 
@@ -194,16 +188,14 @@ async fn execute_local(
     let mut registry = ManifestRegistry::load(&manifests_dir)?;
 
     // Discover MCP tools so assist sees them
-    let keyring = crate::cli::call::load_keyring(&ati_dir, cli.verbose);
+    let keyring = crate::cli::call::load_keyring(&ati_dir);
     crate::cli::tools::discover_mcp_tools(&mut registry, &keyring, cli.verbose).await;
 
     // Resolve scope
     let (scope_name, query) = resolve_assist_scope(args, &registry);
 
-    if cli.verbose {
-        if let Some(ref s) = scope_name {
-            eprintln!("Scoped to: {s}");
-        }
+    if let Some(ref s) = scope_name {
+        tracing::debug!(scope = %s, "scoped assist");
     }
 
     // Load scopes from JWT
@@ -252,10 +244,11 @@ async fn execute_local(
         (prompt, scoped)
     };
 
-    if cli.verbose {
-        eprintln!("System prompt length: {} chars", system_prompt.len());
-        eprintln!("Tools in context: {}", scoped_tools.len());
-    }
+    tracing::debug!(
+        prompt_len = system_prompt.len(),
+        tools_in_context = scoped_tools.len(),
+        "assist context built"
+    );
 
     // Call LLM and print result
     let content = call_llm(cli, &registry, &keyring, &system_prompt, &query, local).await?;
@@ -323,7 +316,7 @@ fn build_scoped_context<'a>(
 }
 
 /// Build detailed context for a single tool (used in scoped mode).
-fn build_scoped_tool_details(provider: &Provider, tool: &Tool, verbose: bool) -> String {
+fn build_scoped_tool_details(provider: &Provider, tool: &Tool, _verbose: bool) -> String {
     let mut details = String::new();
 
     // Basic info
@@ -361,20 +354,16 @@ fn build_scoped_tool_details(provider: &Provider, tool: &Tool, verbose: bool) ->
 
         // Capture live --help output
         if let Some(help_text) = capture_cli_help(provider) {
-            if verbose {
-                eprintln!(
-                    "Captured CLI help for '{}' ({} chars)",
-                    tool.name,
-                    help_text.len()
-                );
-            }
+            tracing::debug!(
+                tool = %tool.name,
+                chars = help_text.len(),
+                "captured CLI help"
+            );
             details.push_str("\n**CLI Help Output** (from `--help`):\n```\n");
             details.push_str(&help_text);
             details.push_str("\n```\n");
         } else {
-            if verbose {
-                eprintln!("Could not capture CLI help for '{}'", tool.name);
-            }
+            tracing::debug!(tool = %tool.name, "could not capture CLI help");
             details.push_str(&format!(
                 "\n*CLI help not available. Run `{} --help` manually for usage details.*\n",
                 cmd
@@ -512,9 +501,7 @@ async fn call_llm(
             llm_tool.endpoint
         );
 
-        if cli.verbose {
-            eprintln!("LLM: Cerebras ({})", llm_provider.base_url);
-        }
+        tracing::debug!(base_url = %llm_provider.base_url, "LLM: Cerebras");
 
         let response = client
             .post(&url)
@@ -540,9 +527,7 @@ async fn call_llm(
         let model = std::env::var("ATI_ASSIST_MODEL")
             .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
 
-        if cli.verbose {
-            eprintln!("LLM: Anthropic Messages API (ANTHROPIC_API_KEY), model={model}");
-        }
+        tracing::debug!(%model, "LLM: Anthropic Messages API");
 
         let request_body = serde_json::json!({
             "model": model,
@@ -578,9 +563,7 @@ async fn call_llm(
         Ok(content.to_string())
     } else {
         // Auto-fallback to local LLM (ollama, llama.cpp, etc.)
-        if cli.verbose {
-            eprintln!("LLM: no cloud keys found, falling back to local LLM");
-        }
+        tracing::debug!("LLM: no cloud keys found, falling back to local LLM");
         call_local_llm(system_prompt, query, cli.verbose).await.map_err(|e| {
             format!(
                 "No LLM available. Options:\n\
@@ -597,16 +580,14 @@ async fn call_llm(
 async fn call_local_llm(
     system_prompt: &str,
     query: &str,
-    verbose: bool,
+    _verbose: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let host =
         std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
     let model = std::env::var("ATI_OLLAMA_MODEL").unwrap_or_else(|_| "smollm3:3b".to_string());
     let url = format!("{}/v1/chat/completions", host.trim_end_matches('/'));
 
-    if verbose {
-        eprintln!("LLM: local ({host}, model={model})");
-    }
+    tracing::debug!(%host, %model, "LLM: local");
 
     let body = serde_json::json!({
         "model": model,
@@ -644,13 +625,7 @@ async fn execute_via_proxy(
     tool: Option<&str>,
     proxy_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if cli.verbose {
-        eprintln!("Query: {query}");
-        if let Some(t) = tool {
-            eprintln!("Scope: {t}");
-        }
-        eprintln!("Proxy: {proxy_url}");
-    }
+    tracing::debug!(%query, scope = ?tool, %proxy_url, "assist via proxy");
 
     let content = proxy_client::call_help(proxy_url, query, tool).await?;
 
@@ -722,17 +697,13 @@ fn build_skills_for_tools(
     sorted_providers.sort();
 
     if total_chars < MAX_SKILL_CONTENT_CHARS {
-        if verbose && !sorted_providers.is_empty() {
-            eprintln!("Skill search Phase 2: providers {:?}", sorted_providers);
+        if !sorted_providers.is_empty() {
+            tracing::debug!(providers = ?sorted_providers, "skill search phase 2: by provider");
         }
         for provider_name in &sorted_providers {
             let provider_skills = skill_registry.skills_for_provider(provider_name);
-            if verbose && !provider_skills.is_empty() {
-                eprintln!(
-                    "  Provider '{}' has {} skills",
-                    provider_name,
-                    provider_skills.len()
-                );
+            if !provider_skills.is_empty() {
+                tracing::debug!(provider = %provider_name, count = provider_skills.len(), "provider skills found");
             }
             for skill_meta in provider_skills {
                 if !seen_skills.insert(skill_meta.name.clone()) {
@@ -804,7 +775,7 @@ fn add_skill_content(
     skill_meta: &crate::core::skill::SkillMeta,
     skill_entries: &mut Vec<(String, String)>,
     total_chars: &mut usize,
-    verbose: bool,
+    _verbose: bool,
 ) {
     match skill_registry.read_content(&skill_meta.name) {
         Ok(content) if !content.is_empty() => {
@@ -817,13 +788,7 @@ fn add_skill_content(
 
             *total_chars += truncated.len();
             skill_entries.push((skill_meta.name.clone(), truncated));
-            if verbose {
-                eprintln!(
-                    "Loaded skill '{}' ({} chars)",
-                    skill_meta.name,
-                    content.len()
-                );
-            }
+            tracing::debug!(skill = %skill_meta.name, chars = content.len(), "loaded skill content");
         }
         _ => {
             let meta_line = format!(
@@ -990,7 +955,7 @@ async fn execute_plan_mode(
     let ati_dir = common::ati_dir();
     let manifests_dir = ati_dir.join("manifests");
     let mut registry = ManifestRegistry::load(&manifests_dir)?;
-    let keyring = crate::cli::call::load_keyring(&ati_dir, cli.verbose);
+    let keyring = crate::cli::call::load_keyring(&ati_dir);
     crate::cli::tools::discover_mcp_tools(&mut registry, &keyring, cli.verbose).await;
 
     let (scope_name, query) = resolve_assist_scope(args, &registry);
@@ -1040,7 +1005,7 @@ async fn execute_plan_mode(
     // Save to file if requested
     if let Some(path) = save {
         std::fs::write(path, &json)?;
-        eprintln!("Plan saved to {path}");
+        tracing::info!(path = %path, "plan saved");
     }
 
     // Output the plan

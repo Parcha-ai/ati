@@ -1,10 +1,10 @@
-/// Structured error codes and JSON error formatting for agent-first UX.
-///
-/// Error code taxonomy (dot-separated):
-/// - `input.missing_arg`, `input.invalid_value`
-/// - `auth.expired`, `auth.scope_denied`, `auth.missing_key`
-/// - `provider.timeout`, `provider.upstream_error`, `provider.not_found`
-/// - `tool.not_found`, `tool.execution_failed`
+//! Structured error codes and JSON error formatting for agent-first UX.
+//!
+//! Error code taxonomy (dot-separated):
+//! - `input.missing_arg`, `input.invalid_value`
+//! - `auth.expired`, `auth.scope_denied`, `auth.missing_key`
+//! - `provider.timeout`, `provider.upstream_error`, `provider.not_found`
+//! - `tool.not_found`, `tool.execution_failed`
 
 /// Classify an error into a dot-separated error code by inspecting its message.
 pub fn classify_error(err: &dyn std::error::Error) -> &'static str {
