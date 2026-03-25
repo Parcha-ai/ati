@@ -14,18 +14,44 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.target }}${{ matrix.suffix }}
     strategy:
       matrix:
         include:
+          # Default builds (no Sentry)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            features: ""
+            suffix: ""
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
+            features: ""
+            suffix: ""
           - target: x86_64-apple-darwin
             os: macos-latest
+            features: ""
+            suffix: ""
           - target: aarch64-apple-darwin
             os: macos-latest
+            features: ""
+            suffix: ""
+          # Sentry builds
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            features: "sentry"
+            suffix: "-sentry"
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            features: "sentry"
+            suffix: "-sentry"
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: "sentry"
+            suffix: "-sentry"
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: "sentry"
+            suffix: "-sentry"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -48,14 +74,14 @@ jobs:
 
       - name: Build (native)
         if: matrix.target != 'aarch64-unknown-linux-musl'
-        run: cargo auditable build --release --target ${{ matrix.target }}
+        run: cargo auditable build --release --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) }}
 
       - name: Build (cross-compile)
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) }}
 
       - name: Generate checksum
-        run: shasum -a 256 target/${{ matrix.target }}/release/ati > ati-${{ matrix.target }}.sha256
+        run: shasum -a 256 target/${{ matrix.target }}/release/ati > ati-${{ matrix.target }}${{ matrix.suffix }}.sha256
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
@@ -65,10 +91,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: ati-${{ matrix.target }}
+          name: ati-${{ matrix.target }}${{ matrix.suffix }}
           path: |
             target/${{ matrix.target }}/release/ati
-            ati-${{ matrix.target }}.sha256
+            ati-${{ matrix.target }}${{ matrix.suffix }}.sha256
 
   release:
     name: Publish GitHub Release
@@ -84,9 +110,11 @@ jobs:
         run: |
           mkdir -p release
           for dir in artifacts/ati-*/; do
-            target=$(basename "$dir" | sed 's/^ati-//')
-            cp "$dir/target/$target/release/ati" "release/ati-$target"
-            cp "$dir/ati-$target.sha256" "release/"
+            artifact_name=$(basename "$dir" | sed 's/^ati-//')
+            # Strip -sentry suffix to get the cargo target triple
+            target=$(echo "$artifact_name" | sed 's/-sentry$//')
+            cp "$dir/target/$target/release/ati" "release/ati-$artifact_name"
+            cp "$dir"/ati-*.sha256 "release/" 2>/dev/null || true
           done
 
       - name: Create GitHub Release
