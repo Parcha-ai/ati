@@ -298,9 +298,8 @@ async fn handle_call(
 
         // Scope check: try both colon format (tool:finnhub:quote) and legacy
         // underscore format (tool:finnhub_quote) for backward compatibility.
-        let underscore_scope = if tool_scope.starts_with("tool:") {
+        let underscore_scope = if let Some(after_prefix) = tool_scope.strip_prefix("tool:") {
             // "tool:finnhub:quote" → "tool:finnhub_quote"
-            let after_prefix = &tool_scope["tool:".len()..];
             format!("tool:{}", after_prefix.replacen(':', "_", 1))
         } else {
             String::new()
