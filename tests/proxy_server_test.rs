@@ -63,6 +63,20 @@ required = ["title"]
 [tools.input_schema.properties.title]
 type = "string"
 description = "Title to create"
+
+[[tools]]
+name = "test_api:get_data"
+description = "A tool with colon-separated provider:name format"
+endpoint = "/data"
+method = "GET"
+scope = "tool:test_api:get_data"
+
+[tools.input_schema]
+type = "object"
+
+[tools.input_schema.properties.id]
+type = "string"
+description = "Data ID"
 "#
     );
 
@@ -164,7 +178,7 @@ async fn test_health_endpoint() {
 
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["tools"], 2); // test_search + test_create
+    assert_eq!(json["tools"], 3); // test_search + test_create + test_api:get_data
     assert_eq!(json["providers"], 1);
     assert!(json["version"].as_str().is_some());
 }
@@ -1129,4 +1143,92 @@ async fn test_tool_info_not_found() {
 
     let resp = app.oneshot(req).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// --- Underscore → colon tool name resolution tests (issue #24) ---
+
+/// POST /call with underscore tool name resolves to colon format.
+/// Note: 502 is acceptable — it means the tool was FOUND (not 404) but upstream failed.
+#[tokio::test]
+async fn test_call_underscore_tool_name_resolves() {
+    let app = build_test_app("http://unused.test");
+
+    // "test_api_get_data" should resolve to "test_api:get_data" (not 404)
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"tool_name": "test_api_get_data", "args": {}}).to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_ne!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "underscore tool name should resolve (not 404)"
+    );
+}
+
+/// POST /call with colon tool name still works.
+#[tokio::test]
+async fn test_call_colon_tool_name_works() {
+    let app = build_test_app("http://unused.test");
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"tool_name": "test_api:get_data", "args": {}}).to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_ne!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "colon tool name should be found (not 404)"
+    );
+}
+
+/// Scope check accepts underscore format in JWT when tool uses colon format.
+#[tokio::test]
+async fn test_call_underscore_scope_matches_colon_tool() {
+    let app = build_test_app_with_jwt("http://unused.test");
+
+    // JWT scope uses underscore: tool:test_api_get_data
+    // Tool's scope uses colon: tool:test_api:get_data
+    let claims = TokenClaims {
+        sub: "test-agent".into(),
+        aud: "ati-proxy".into(),
+        scope: "tool:test_api_get_data".into(),
+        exp: jwt::now_secs() + 3600,
+        iat: jwt::now_secs(),
+        iss: None,
+        jti: None,
+        ati: None,
+    };
+    let token = jwt::issue(&claims, &test_jwt_config()).unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+            serde_json::json!({"tool_name": "test_api:get_data", "args": {}}).to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    // Should NOT be 403 (scope denied) — underscore scope should match colon tool
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "underscore scope should match colon-format tool (not 403)"
+    );
+    // Should also NOT be 404
+    assert_ne!(resp.status(), StatusCode::NOT_FOUND);
 }
