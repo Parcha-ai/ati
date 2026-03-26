@@ -1051,3 +1051,82 @@ description = "Data"
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["proxy_inject"], "verified");
 }
+
+// --- Tool endpoint tests ---
+
+/// GET /tools returns all tools.
+#[tokio::test]
+async fn test_tools_list_returns_tools() {
+    let app = build_test_app("http://unused.test");
+
+    let req = Request::builder()
+        .uri("/tools")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    let tools = json.as_array().expect("should be array");
+    assert!(!tools.is_empty(), "should have at least one tool");
+
+    // Each tool should have name, description, provider
+    let first = &tools[0];
+    assert!(first.get("name").is_some());
+    assert!(first.get("description").is_some());
+    assert!(first.get("provider").is_some());
+}
+
+/// GET /tools?provider=X filters by provider.
+#[tokio::test]
+async fn test_tools_list_filter_by_provider() {
+    let app = build_test_app("http://unused.test");
+
+    let req = Request::builder()
+        .uri("/tools?provider=test_api")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    let tools = json.as_array().expect("should be array");
+    for tool in tools {
+        assert_eq!(tool["provider"], "test_api");
+    }
+}
+
+/// GET /tools/:name returns tool info.
+#[tokio::test]
+async fn test_tool_info_returns_metadata() {
+    let app = build_test_app("http://unused.test");
+
+    let req = Request::builder()
+        .uri("/tools/test_search")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["name"], "test_search");
+    assert_eq!(json["provider"], "test_provider");
+    assert!(json.get("input_schema").is_some());
+}
+
+/// GET /tools/:name returns 404 for unknown tool.
+#[tokio::test]
+async fn test_tool_info_not_found() {
+    let app = build_test_app("http://unused.test");
+
+    let req = Request::builder()
+        .uri("/tools/nonexistent_tool_xyz")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

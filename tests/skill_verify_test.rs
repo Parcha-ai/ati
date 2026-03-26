@@ -308,3 +308,44 @@ fn test_verify_skill_no_hash_stored() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no integrity hash stored"));
 }
+
+/// Validate the ati-tools-reference skill has correct CLI commands.
+/// This test catches the issue from #19 where the skill had wrong commands.
+#[test]
+fn test_ati_tools_reference_has_correct_commands() {
+    let skill_path = Path::new("skills/ati-tools-reference/SKILL.md");
+    if !skill_path.exists() {
+        // Skip in environments where the skills directory isn't present
+        return;
+    }
+
+    let content = fs::read_to_string(skill_path).expect("read SKILL.md");
+
+    // Correct commands should be present
+    assert!(
+        content.contains("ati tool list"),
+        "SKILL.md should contain 'ati tool list'"
+    );
+    assert!(
+        content.contains("ati tool info"),
+        "SKILL.md should contain 'ati tool info'"
+    );
+    assert!(
+        content.contains("ati run"),
+        "SKILL.md should contain 'ati run'"
+    );
+
+    // Wrong commands should NOT be present
+    assert!(
+        !content.contains("ati tools list"),
+        "SKILL.md should NOT contain 'ati tools list' (plural)"
+    );
+    assert!(
+        !content.contains("ati tools info"),
+        "SKILL.md should NOT contain 'ati tools info' (plural)"
+    );
+    assert!(
+        !content.contains("ati call"),
+        "SKILL.md should NOT contain 'ati call' (use 'ati run')"
+    );
+}

@@ -187,6 +187,16 @@ pub struct SkillBundleBatchRequest {
     pub names: Vec<String>,
 }
 
+// --- Tool endpoint types ---
+
+#[derive(Debug, Deserialize)]
+pub struct ToolsQuery {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub search: Option<String>,
+}
+
 // --- Handlers ---
 
 async fn handle_call(
@@ -785,6 +795,86 @@ fn jsonrpc_error(id: Option<Value>, code: i64, message: &str) -> (StatusCode, Js
 }
 
 // ---------------------------------------------------------------------------
+// Tool endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /tools — list available tools with optional filters.
+async fn handle_tools_list(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Query(query): axum::extract::Query<ToolsQuery>,
+) -> impl IntoResponse {
+    tracing::debug!(
+        provider = ?query.provider,
+        search = ?query.search,
+        "GET /tools"
+    );
+
+    let all_tools = state.registry.list_public_tools();
+
+    let tools: Vec<Value> = all_tools
+        .iter()
+        .filter(|(provider, tool)| {
+            if let Some(ref p) = query.provider {
+                if provider.name != *p {
+                    return false;
+                }
+            }
+            if let Some(ref q) = query.search {
+                let q = q.to_lowercase();
+                let name_match = tool.name.to_lowercase().contains(&q);
+                let desc_match = tool.description.to_lowercase().contains(&q);
+                let tag_match = tool.tags.iter().any(|t| t.to_lowercase().contains(&q));
+                if !name_match && !desc_match && !tag_match {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|(provider, tool)| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "provider": provider.name,
+                "method": format!("{:?}", tool.method),
+                "tags": tool.tags,
+                "input_schema": tool.input_schema,
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(Value::Array(tools)))
+}
+
+/// GET /tools/:name — get detailed info about a specific tool.
+async fn handle_tool_info(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    tracing::debug!(tool = %name, "GET /tools/:name");
+
+    match state.registry.get_tool(&name) {
+        Some((provider, tool)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "provider": provider.name,
+                "method": format!("{:?}", tool.method),
+                "endpoint": tool.endpoint,
+                "tags": tool.tags,
+                "hint": tool.hint,
+                "input_schema": tool.input_schema,
+                "scope": tool.scope,
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Tool '{name}' not found")})),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Skill endpoints
 // ---------------------------------------------------------------------------
 
@@ -1091,6 +1181,8 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/call", post(handle_call))
         .route("/help", post(handle_help))
         .route("/mcp", post(handle_mcp))
+        .route("/tools", get(handle_tools_list))
+        .route("/tools/{name}", get(handle_tool_info))
         .route("/skills", get(handle_skills_list))
         .route("/skills/resolve", post(handle_skills_resolve))
         .route("/skills/bundle", post(handle_skills_bundle_batch))
