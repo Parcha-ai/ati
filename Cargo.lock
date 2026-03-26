@@ -48,6 +48,7 @@ dependencies = [
  "chrono",
  "clap",
  "comfy-table",
+ "futures",
  "glob",
  "hex",
  "hmac",

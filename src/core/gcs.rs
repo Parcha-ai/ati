@@ -311,57 +311,91 @@ pub struct GcsSkillSource {
 }
 
 impl GcsSkillSource {
-    /// Load all skills from a GCS bucket.
+    /// Load all skills from a GCS bucket concurrently.
     ///
     /// Enumerates top-level "directories" as skill names, then fetches
-    /// all files in each skill directory. Parses SKILL.md + skill.toml
-    /// for metadata using the same logic as local skill loading.
+    /// all files in each skill directory with bounded concurrency.
     pub async fn load(client: &GcsClient) -> Result<Self, GcsError> {
+        use futures::stream::{self, StreamExt};
+
         let skill_names = client.list_skill_names().await?;
+        tracing::debug!(count = skill_names.len(), "discovered skills in GCS bucket");
+
+        // Load all skills concurrently (up to 50 at a time)
+        let results: Vec<_> = stream::iter(skill_names)
+            .map(|name| async move { Self::load_one_skill(client, &name).await })
+            .buffer_unordered(50)
+            .collect()
+            .await;
+
         let mut skills = Vec::new();
         let mut files: HashMap<(String, String), Vec<u8>> = HashMap::new();
 
-        for name in &skill_names {
-            // List all files in this skill
-            let objects = client.list_objects(name).await?;
-
-            // Fetch all files
-            for rel_path in &objects {
-                let full_path = format!("{}/{}", name, rel_path);
-                match client.get_object(&full_path).await {
-                    Ok(data) => {
-                        files.insert((name.clone(), rel_path.clone()), data);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            skill = %name,
-                            path = %rel_path,
-                            error = %e,
-                            "failed to fetch skill file from GCS"
-                        );
-                    }
+        for result in results {
+            match result {
+                Ok((meta, skill_files)) => {
+                    skills.push(meta);
+                    files.extend(skill_files);
                 }
-            }
-
-            // Parse metadata from cached files
-            let skill_md = files
-                .get(&(name.clone(), "SKILL.md".to_string()))
-                .and_then(|b| std::str::from_utf8(b).ok())
-                .unwrap_or("");
-
-            let skill_toml = files
-                .get(&(name.clone(), "skill.toml".to_string()))
-                .and_then(|b| std::str::from_utf8(b).ok());
-
-            match skill::parse_skill_metadata(name, skill_md, skill_toml) {
-                Ok(meta) => skills.push(meta),
-                Err(e) => {
-                    tracing::warn!(skill = %name, error = %e, "failed to parse GCS skill metadata");
+                Err((name, e)) => {
+                    tracing::warn!(skill = %name, error = %e, "failed to load GCS skill");
                 }
             }
         }
 
         Ok(GcsSkillSource { skills, files })
+    }
+
+    /// Load a single skill: list its files, fetch them concurrently, parse metadata.
+    async fn load_one_skill(
+        client: &GcsClient,
+        name: &str,
+    ) -> Result<(SkillMeta, Vec<((String, String), Vec<u8>)>), (String, String)> {
+        use futures::stream::{self, StreamExt};
+
+        let objects = client
+            .list_objects(name)
+            .await
+            .map_err(|e| (name.to_string(), e.to_string()))?;
+
+        // Fetch all files in this skill concurrently
+        let file_results: Vec<_> = stream::iter(objects)
+            .map(|rel_path| {
+                let full_path = format!("{}/{}", name, rel_path);
+                let name = name.to_string();
+                async move {
+                    match client.get_object(&full_path).await {
+                        Ok(data) => Some(((name, rel_path), data)),
+                        Err(e) => {
+                            tracing::warn!(path = %full_path, error = %e, "failed to fetch file");
+                            None
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(20)
+            .collect()
+            .await;
+
+        let file_entries: Vec<((String, String), Vec<u8>)> =
+            file_results.into_iter().flatten().collect();
+
+        // Parse metadata
+        let skill_md = file_entries
+            .iter()
+            .find(|((_, p), _)| p == "SKILL.md")
+            .and_then(|(_, data)| std::str::from_utf8(data).ok())
+            .unwrap_or("");
+
+        let skill_toml = file_entries
+            .iter()
+            .find(|((_, p), _)| p == "skill.toml")
+            .and_then(|(_, data)| std::str::from_utf8(data).ok());
+
+        let meta = skill::parse_skill_metadata(name, skill_md, skill_toml)
+            .map_err(|e| (name.to_string(), e.to_string()))?;
+
+        Ok((meta, file_entries))
     }
 
     /// Number of skills loaded.
