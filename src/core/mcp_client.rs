@@ -119,6 +119,15 @@ struct StdioTransport {
     reader: BufReader<std::process::ChildStdout>,
 }
 
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        // Best-effort cleanup: kill the subprocess if it wasn't explicitly disconnected.
+        // Prevents orphan zombie processes when a future is cancelled (e.g., on timeout).
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Streamable HTTP transport: POST to MCP endpoint.
 struct HttpTransport {
     client: reqwest::Client,
