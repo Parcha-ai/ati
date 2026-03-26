@@ -177,6 +177,9 @@ pub struct SkillDetailQuery {
 #[derive(Debug, Deserialize)]
 pub struct SkillResolveRequest {
     pub scopes: Vec<String>,
+    /// When true, include SKILL.md content in each resolved skill.
+    #[serde(default)]
+    pub include_content: bool,
 }
 
 // --- Handlers ---
@@ -888,12 +891,57 @@ async fn handle_skill_detail(
     (StatusCode::OK, Json(response))
 }
 
+/// GET /skills/:name/bundle — return all files in a skill directory.
+/// Response: `{"name": "...", "files": {"SKILL.md": "...", "scripts/generate.sh": "...", ...}}`
+/// Binary files are base64-encoded; text files are returned as-is.
+async fn handle_skill_bundle(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    tracing::debug!(skill = %name, "GET /skills/:name/bundle");
+
+    let files = match state.skill_registry.bundle_files(&name) {
+        Ok(f) => f,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Skill '{name}' not found")})),
+            );
+        }
+    };
+
+    // Convert bytes to strings (UTF-8 text) or base64 for binary files
+    let mut file_map = serde_json::Map::new();
+    for (path, data) in &files {
+        match std::str::from_utf8(data) {
+            Ok(text) => {
+                file_map.insert(path.clone(), Value::String(text.to_string()));
+            }
+            Err(_) => {
+                // Binary file — base64 encode
+                use base64::Engine;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                file_map.insert(path.clone(), serde_json::json!({"base64": encoded}));
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": name,
+            "files": file_map,
+        })),
+    )
+}
+
 async fn handle_skills_resolve(
     State(state): State<Arc<ProxyState>>,
     Json(req): Json<SkillResolveRequest>,
 ) -> impl IntoResponse {
-    tracing::debug!(scopes = ?req.scopes, "POST /skills/resolve");
+    tracing::debug!(scopes = ?req.scopes, include_content = req.include_content, "POST /skills/resolve");
 
+    let include_content = req.include_content;
     let scopes = ScopeConfig {
         scopes: req.scopes,
         sub: String::new(),
@@ -906,14 +954,20 @@ async fn handle_skills_resolve(
     let json: Vec<Value> = resolved
         .iter()
         .map(|s| {
-            serde_json::json!({
+            let mut entry = serde_json::json!({
                 "name": s.name,
                 "version": s.version,
                 "description": s.description,
                 "tools": s.tools,
                 "providers": s.providers,
                 "categories": s.categories,
-            })
+            });
+            if include_content {
+                if let Ok(content) = state.skill_registry.read_content(&s.name) {
+                    entry["content"] = Value::String(content);
+                }
+            }
+            entry
         })
         .collect();
 
@@ -981,6 +1035,7 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/skills", get(handle_skills_list))
         .route("/skills/resolve", post(handle_skills_resolve))
         .route("/skills/{name}", get(handle_skill_detail))
+        .route("/skills/{name}/bundle", get(handle_skill_bundle))
         .route("/health", get(handle_health))
         .route("/.well-known/jwks.json", get(handle_jwks))
         .layer(middleware::from_fn_with_state(
@@ -1074,12 +1129,54 @@ pub async fn run(
         .collect();
     let openapi_count = openapi_providers.len();
 
-    // Load skill registry
+    // Load skill registry (local + optional GCS)
     let skills_dir = ati_dir.join("skills");
-    let skill_registry = SkillRegistry::load(&skills_dir).unwrap_or_else(|e| {
+    let mut skill_registry = SkillRegistry::load(&skills_dir).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "failed to load skills");
         SkillRegistry::load(std::path::Path::new("/nonexistent-fallback")).unwrap()
     });
+
+    // Load GCS skills if ATI_SKILL_REGISTRY is set
+    if let Ok(registry_url) = std::env::var("ATI_SKILL_REGISTRY") {
+        if let Some(bucket) = registry_url.strip_prefix("gcs://") {
+            let cred_key = "gcp_credentials";
+            if let Some(cred_json) = keyring.get(cred_key) {
+                match crate::core::gcs::GcsClient::new(bucket.to_string(), cred_json) {
+                    Ok(client) => {
+                        let rt = tokio::runtime::Handle::current();
+                        match rt.block_on(crate::core::gcs::GcsSkillSource::load(&client)) {
+                            Ok(gcs_source) => {
+                                let gcs_count = gcs_source.skill_count();
+                                skill_registry.merge(gcs_source);
+                                tracing::info!(
+                                    bucket = %bucket,
+                                    skills = gcs_count,
+                                    "loaded skills from GCS registry"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, bucket = %bucket, "failed to load GCS skills");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to init GCS client");
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    key = %cred_key,
+                    "ATI_SKILL_REGISTRY set but GCS credentials not found in keyring"
+                );
+            }
+        } else {
+            tracing::warn!(
+                url = %registry_url,
+                "unsupported skill registry scheme (only gcs:// is supported)"
+            );
+        }
+    }
+
     let skill_count = skill_registry.skill_count();
 
     // Load JWT config from environment

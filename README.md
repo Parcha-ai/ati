@@ -700,6 +700,71 @@ ati skill install https://github.com/org/repo#skill-name  # Install from git URL
 ati skill resolve                           # See what resolves for current scopes
 ```
 
+### GCS Skill Registry
+
+Store skills in a Google Cloud Storage bucket for centralized management. The proxy loads them at startup and serves them to agents — agents don't need GCS credentials.
+
+**Setup:**
+
+1. Create a GCS bucket and upload skills (each skill is a directory):
+   ```
+   gs://my-skills-bucket/
+   ├── compliance-screening/
+   │   ├── SKILL.md
+   │   └── skill.toml
+   ├── fal-generate/
+   │   ├── SKILL.md
+   │   ├── skill.toml
+   │   ├── provider.toml
+   │   └── scripts/
+   │       ├── generate.sh
+   │       └── get-schema.sh
+   └── ...
+   ```
+
+2. Add GCP service account credentials to the ATI keyring:
+   ```bash
+   ati key set gcp_credentials < /path/to/service-account.json
+   ```
+
+3. Start the proxy with the registry env var:
+   ```bash
+   ATI_SKILL_REGISTRY=gcs://my-skills-bucket ati proxy --port 8090
+   ```
+
+The proxy loads all skills from GCS concurrently (~3s for 300 skills), merges them with local `~/.ati/skills/` (local wins on name collision), and serves them via the standard `/skills` endpoints.
+
+**Python SDK — downloading skills for agent sandboxes:**
+
+```python
+from ati import AtiOrchestrator
+
+orch = AtiOrchestrator(proxy_url="http://proxy:8090", secret=secret)
+
+# Provision a sandbox with skill content
+env = orch.provision_sandbox(
+    agent_id="agent-1",
+    tools=["ca_person_sanctions_search"],
+    skills=["compliance-screening"],
+    fetch_skill_content=True,
+)
+# env["skills"] = {"compliance-screening": "# Compliance Screening\n..."}
+
+# Or download full skill directories (SKILL.md + scripts, references, etc.)
+orch.download_skills(
+    ["fal-generate", "compliance-screening"],
+    dest_dir=".claude/skills",
+    token=env["ATI_SESSION_TOKEN"],
+)
+# Creates .claude/skills/fal-generate/SKILL.md, scripts/generate.sh, etc.
+```
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /skills` | List all skills (local + GCS) |
+| `GET /skills/:name/bundle` | Download full skill directory as JSON |
+| `POST /skills/resolve` | Resolve skills for given scopes (with optional content) |
+
 ### End-to-End Example: Image → Voice → Lip-Sync Video
 
 This is a real workflow an agent ran using ATI — three fal.ai models chained together, guided by skills. The agent generated an image, synthesized speech, and produced a lip-synced talking head video.
