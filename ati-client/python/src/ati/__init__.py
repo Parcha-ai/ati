@@ -274,6 +274,12 @@ class AtiOrchestrator:
                     with open(file_path, "w") as f:
                         f.write(content)
             result[name] = skill_dir
+
+        missing = data.get("missing", [])
+        if missing:
+            import warnings
+            warnings.warn(f"Skills not found on server: {missing}", stacklevel=2)
+
         return result
 
     def validate_token(

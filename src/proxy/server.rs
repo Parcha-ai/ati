@@ -942,19 +942,33 @@ async fn handle_skill_bundle(
 
 /// POST /skills/bundle — return all files for multiple skills in one response.
 /// Request: `{"names": ["fal-generate", "compliance-screening"]}`
-/// Response: `{"skills": {"fal-generate": {"files": {...}}, "compliance-screening": {"files": {...}}}}`
+/// Response: `{"skills": {...}, "missing": [...]}`
 async fn handle_skills_bundle_batch(
     State(state): State<Arc<ProxyState>>,
     Json(req): Json<SkillBundleBatchRequest>,
 ) -> impl IntoResponse {
+    const MAX_BATCH: usize = 50;
+    if req.names.len() > MAX_BATCH {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("batch size {} exceeds limit of {MAX_BATCH}", req.names.len())}),
+            ),
+        );
+    }
+
     tracing::debug!(names = ?req.names, "POST /skills/bundle");
 
     let mut result = serde_json::Map::new();
+    let mut missing: Vec<String> = Vec::new();
 
     for name in &req.names {
         let files = match state.skill_registry.bundle_files(name) {
             Ok(f) => f,
-            Err(_) => continue, // skip missing skills
+            Err(_) => {
+                missing.push(name.clone());
+                continue;
+            }
         };
 
         let mut file_map = serde_json::Map::new();
@@ -976,7 +990,7 @@ async fn handle_skills_bundle_batch(
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "skills": result })),
+        Json(serde_json::json!({ "skills": result, "missing": missing })),
     )
 }
 
