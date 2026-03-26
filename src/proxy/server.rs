@@ -241,28 +241,33 @@ async fn handle_call(
 
     // Look up tool in registry.
     // If not found, try converting underscore format (finnhub_quote) to colon (finnhub:quote).
-    let tool_name_normalized;
     let (provider, tool) = match state.registry.get_tool(&call_req.tool_name) {
         Some(pt) => pt,
         None => {
-            // Try underscore → colon conversion: "finnhub_quote" → "finnhub:quote"
-            // Only convert the FIRST underscore (provider separator)
-            tool_name_normalized = if let Some(idx) = call_req.tool_name.find('_') {
-                let (provider_part, rest) = call_req.tool_name.split_at(idx);
-                format!("{}:{}", provider_part, &rest[1..])
-            } else {
-                String::new()
-            };
-
-            if !tool_name_normalized.is_empty() {
-                if let Some(pt) = state.registry.get_tool(&tool_name_normalized) {
+            // Try underscore → colon conversion at each underscore position.
+            // "finnhub_quote" → try "finnhub:quote"
+            // "test_api_get_data" → try "test:api_get_data", "test_api:get_data"
+            let mut resolved = None;
+            for (idx, _) in call_req.tool_name.match_indices('_') {
+                let candidate = format!(
+                    "{}:{}",
+                    &call_req.tool_name[..idx],
+                    &call_req.tool_name[idx + 1..]
+                );
+                if let Some(pt) = state.registry.get_tool(&candidate) {
                     tracing::debug!(
                         original = %call_req.tool_name,
-                        resolved = %tool_name_normalized,
+                        resolved = %candidate,
                         "resolved underscore tool name to colon format"
                     );
-                    pt
-                } else {
+                    resolved = Some(pt);
+                    break;
+                }
+            }
+
+            match resolved {
+                Some(pt) => pt,
+                None => {
                     return (
                         StatusCode::NOT_FOUND,
                         Json(CallResponse {
@@ -271,14 +276,6 @@ async fn handle_call(
                         }),
                     );
                 }
-            } else {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(CallResponse {
-                        result: Value::Null,
-                        error: Some(format!("Unknown tool: '{}'", call_req.tool_name)),
-                    }),
-                );
             }
         }
     };
