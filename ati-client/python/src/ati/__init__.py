@@ -227,7 +227,10 @@ class AtiOrchestrator:
         *,
         token: str | None = None,
     ) -> dict[str, str]:
-        """Download multiple skill directories from the proxy.
+        """Download multiple skill directories from the proxy in one request.
+
+        Uses ``POST /skills/bundle`` to fetch all skills in a single
+        HTTP call, then writes each skill's directory tree to disk.
 
         Args:
             names: List of skill names.
@@ -237,12 +240,46 @@ class AtiOrchestrator:
         Returns:
             Dict mapping skill name to the created directory path.
         """
+        import base64
+        import json
+        import os
+        import urllib.request
+
+        url = f"{self.proxy_url}/skills/bundle"
+        body = json.dumps({"names": names}).encode()
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+
         result = {}
-        for name in names:
-            try:
-                result[name] = self.download_skill(name, dest_dir, token=token)
-            except Exception as e:
-                result[name] = f"ERROR: {e}"
+        for name, skill_data in data.get("skills", {}).items():
+            skill_dir = os.path.realpath(os.path.join(dest_dir, name))
+            for rel_path, content in skill_data.get("files", {}).items():
+                if ".." in rel_path or rel_path.startswith("/"):
+                    continue
+                file_path = os.path.realpath(os.path.join(skill_dir, rel_path))
+                if not file_path.startswith(skill_dir + os.sep) and file_path != skill_dir:
+                    continue
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                if isinstance(content, dict) and "base64" in content:
+                    with open(file_path, "wb") as f:
+                        f.write(base64.b64decode(content["base64"]))
+                else:
+                    with open(file_path, "w") as f:
+                        f.write(content)
+            result[name] = skill_dir
+
+        missing = data.get("missing", [])
+        if missing:
+            import warnings
+            warnings.warn(f"Skills not found on server: {missing}", stacklevel=2)
+
         return result
 
     def validate_token(
