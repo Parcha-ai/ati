@@ -271,6 +271,9 @@ pub struct SkillRegistry {
     provider_index: HashMap<String, Vec<usize>>,
     /// category name → skill indices
     category_index: HashMap<String, Vec<usize>>,
+    /// Cached files for non-filesystem skills (e.g. GCS).
+    /// Key: (skill_name, relative_path), Value: file bytes.
+    files_cache: HashMap<(String, String), Vec<u8>>,
 }
 
 impl SkillRegistry {
@@ -293,6 +296,7 @@ impl SkillRegistry {
                 tool_index,
                 provider_index,
                 category_index,
+                files_cache: HashMap::new(),
             });
         }
 
@@ -336,7 +340,39 @@ impl SkillRegistry {
             tool_index,
             provider_index,
             category_index,
+            files_cache: HashMap::new(),
         })
+    }
+
+    /// Merge skills from a remote source (e.g. GCS).
+    /// Local skills take precedence on name collision.
+    pub fn merge(&mut self, source: crate::core::gcs::GcsSkillSource) {
+        for skill in source.skills {
+            if self.name_index.contains_key(&skill.name) {
+                // Local wins — skip this GCS skill
+                continue;
+            }
+            let idx = self.skills.len();
+            self.name_index.insert(skill.name.clone(), idx);
+            for tool in &skill.tools {
+                self.tool_index.entry(tool.clone()).or_default().push(idx);
+            }
+            for provider in &skill.providers {
+                self.provider_index
+                    .entry(provider.clone())
+                    .or_default()
+                    .push(idx);
+            }
+            for category in &skill.categories {
+                self.category_index
+                    .entry(category.clone())
+                    .or_default()
+                    .push(idx);
+            }
+            self.skills.push(skill);
+        }
+        // Merge file cache
+        self.files_cache.extend(source.files);
     }
 
     /// Get a skill by name.
@@ -445,7 +481,18 @@ impl SkillRegistry {
     }
 
     /// Read the SKILL.md content for a skill, stripping any YAML frontmatter.
+    /// Checks the in-memory files cache first (for GCS skills), then falls back to filesystem.
     pub fn read_content(&self, name: &str) -> Result<String, SkillError> {
+        // Check files cache (GCS / remote skills)
+        if let Some(bytes) = self
+            .files_cache
+            .get(&(name.to_string(), "SKILL.md".to_string()))
+        {
+            let raw = std::str::from_utf8(bytes).unwrap_or("");
+            return Ok(strip_frontmatter(raw).to_string());
+        }
+
+        // Fall back to filesystem (local skills)
         let skill = self
             .get_skill(name)
             .ok_or_else(|| SkillError::NotFound(name.to_string()))?;
@@ -459,7 +506,23 @@ impl SkillRegistry {
     }
 
     /// List reference files for a skill.
+    /// Checks files cache first (GCS), then filesystem.
     pub fn list_references(&self, name: &str) -> Result<Vec<String>, SkillError> {
+        // Check files cache for references/*
+        let prefix = "references/";
+        let cached_refs: Vec<String> = self
+            .files_cache
+            .keys()
+            .filter(|(skill, path)| skill == name && path.starts_with(prefix))
+            .map(|(_, path)| path.strip_prefix(prefix).unwrap_or(path).to_string())
+            .collect();
+        if !cached_refs.is_empty() {
+            let mut refs = cached_refs;
+            refs.sort();
+            return Ok(refs);
+        }
+
+        // Fall back to filesystem
         let skill = self
             .get_skill(name)
             .ok_or_else(|| SkillError::NotFound(name.to_string()))?;
@@ -481,6 +544,7 @@ impl SkillRegistry {
     }
 
     /// Read a specific reference file.
+    /// Checks files cache first (GCS), then filesystem.
     pub fn read_reference(&self, skill_name: &str, ref_name: &str) -> Result<String, SkillError> {
         // Path traversal protection: reject names with path components
         if ref_name.contains("..")
@@ -491,6 +555,14 @@ impl SkillRegistry {
             return Err(SkillError::NotFound(format!(
                 "Invalid reference name '{ref_name}' — path traversal not allowed"
             )));
+        }
+
+        // Check files cache (GCS / remote skills)
+        let cache_key = (skill_name.to_string(), format!("references/{ref_name}"));
+        if let Some(bytes) = self.files_cache.get(&cache_key) {
+            return std::str::from_utf8(bytes)
+                .map(|s| s.to_string())
+                .map_err(|e| SkillError::Invalid(format!("invalid UTF-8 in reference: {e}")));
         }
 
         let skill = self
@@ -780,6 +852,89 @@ fn load_skill_from_dir(dir: &Path) -> Result<SkillMeta, SkillError> {
         Err(SkillError::Invalid(format!(
             "Directory '{}' has neither skill.toml nor SKILL.md",
             dir.display()
+        )))
+    }
+}
+
+/// Parse skill metadata from raw SKILL.md content and optional skill.toml content.
+///
+/// Used by both local filesystem loading and remote sources (GCS).
+/// The `name` parameter is the skill directory name (used as fallback if not in metadata).
+pub fn parse_skill_metadata(
+    name: &str,
+    skill_md_content: &str,
+    skill_toml_content: Option<&str>,
+) -> Result<SkillMeta, SkillError> {
+    let (frontmatter, body) = if !skill_md_content.is_empty() {
+        let (fm, body) = parse_frontmatter(skill_md_content);
+        (fm, Some(body.to_string()))
+    } else {
+        (None, None)
+    };
+
+    if let Some(fm) = frontmatter {
+        // (A) Frontmatter exists → primary source
+        let mut meta = SkillMeta {
+            name: fm.name.unwrap_or_else(|| name.to_string()),
+            description: fm.description.unwrap_or_default(),
+            license: fm.license,
+            compatibility: fm.compatibility,
+            extra_metadata: fm.metadata,
+            allowed_tools: fm.allowed_tools,
+            has_frontmatter: true,
+            format: SkillFormat::Anthropic,
+            ..Default::default()
+        };
+
+        if let Some(author) = meta.extra_metadata.get("author").cloned() {
+            meta.author = Some(author);
+        }
+        if let Some(version) = meta.extra_metadata.get("version").cloned() {
+            meta.version = version;
+        }
+
+        // Merge ATI extensions from skill.toml if provided
+        if let Some(toml_str) = skill_toml_content {
+            if let Ok(parsed) = toml::from_str::<SkillToml>(toml_str) {
+                let ext = parsed.skill;
+                meta.tools = ext.tools;
+                meta.providers = ext.providers;
+                meta.categories = ext.categories;
+                meta.keywords = ext.keywords;
+                meta.hint = ext.hint;
+                meta.depends_on = ext.depends_on;
+                meta.suggests = ext.suggests;
+            }
+        }
+
+        Ok(meta)
+    } else if let Some(toml_str) = skill_toml_content {
+        // (B) No frontmatter + skill.toml → legacy
+        let parsed: SkillToml = toml::from_str(toml_str)
+            .map_err(|e| SkillError::Parse(format!("{name}/skill.toml"), e))?;
+        let mut meta = parsed.skill;
+        meta.format = SkillFormat::LegacyToml;
+        if meta.name.is_empty() {
+            meta.name = name.to_string();
+        }
+        Ok(meta)
+    } else if let Some(body) = body {
+        // (C) SKILL.md without frontmatter or skill.toml → infer
+        let description = body
+            .lines()
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.trim().to_string())
+            .unwrap_or_default();
+
+        Ok(SkillMeta {
+            name: name.to_string(),
+            description,
+            format: SkillFormat::Inferred,
+            ..Default::default()
+        })
+    } else {
+        Err(SkillError::Invalid(format!(
+            "Skill '{name}' has neither skill.toml nor SKILL.md content"
         )))
     }
 }
