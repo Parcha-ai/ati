@@ -275,9 +275,8 @@ fn test_load_openapi_text_output() {
         ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("loaded OpenAPI provider"))
-        .stderr(predicates::str::contains("petstore"))
-        .stderr(predicates::str::contains("ready"));
+        .stdout(predicates::str::contains("petstore"))
+        .stdout(predicates::str::contains("ready"));
 }
 
 // ─── MCP load tests ─────────────────────────────────────────────────────────
@@ -1066,5 +1065,5 @@ fn test_load_mcp_probe_failure_text_output() {
         ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("probe failed"));
+        .stdout(predicates::str::contains("failed"));
 }

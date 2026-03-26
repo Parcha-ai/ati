@@ -29,7 +29,7 @@ pub struct Cli {
     #[arg(
         long,
         value_enum,
-        default_value = "text",
+        default_value = "json",
         global = true,
         env = "ATI_OUTPUT",
         alias = "format"
