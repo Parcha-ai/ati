@@ -168,6 +168,78 @@ class AtiOrchestrator:
             data = json.loads(resp.read())
         return {s["name"]: s.get("content", "") for s in data if "name" in s}
 
+    def download_skill(
+        self,
+        name: str,
+        dest_dir: str,
+        *,
+        token: str | None = None,
+    ) -> str:
+        """Download a full skill directory from the proxy and write it to disk.
+
+        Fetches ``GET /skills/{name}/bundle`` and writes all files
+        (SKILL.md, skill.toml, scripts/\\*, references/\\*, etc.) to
+        ``{dest_dir}/{name}/``.
+
+        Args:
+            name: Skill name.
+            dest_dir: Parent directory (e.g. ``.claude/skills``).
+            token: JWT Bearer token for authentication.
+
+        Returns:
+            Path to the created skill directory.
+        """
+        import base64
+        import json
+        import os
+        import urllib.request
+
+        url = f"{self.proxy_url}/skills/{name}/bundle"
+        req = urllib.request.Request(url)
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+
+        skill_dir = os.path.join(dest_dir, name)
+        for rel_path, content in data.get("files", {}).items():
+            file_path = os.path.join(skill_dir, rel_path)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            if isinstance(content, dict) and "base64" in content:
+                # Binary file
+                with open(file_path, "wb") as f:
+                    f.write(base64.b64decode(content["base64"]))
+            else:
+                # Text file
+                with open(file_path, "w") as f:
+                    f.write(content)
+        return skill_dir
+
+    def download_skills(
+        self,
+        names: list[str],
+        dest_dir: str,
+        *,
+        token: str | None = None,
+    ) -> dict[str, str]:
+        """Download multiple skill directories from the proxy.
+
+        Args:
+            names: List of skill names.
+            dest_dir: Parent directory (e.g. ``.claude/skills``).
+            token: JWT Bearer token for authentication.
+
+        Returns:
+            Dict mapping skill name to the created directory path.
+        """
+        result = {}
+        for name in names:
+            try:
+                result[name] = self.download_skill(name, dest_dir, token=token)
+            except Exception as e:
+                result[name] = f"ERROR: {e}"
+        return result
+
     def validate_token(
         self,
         token: str,

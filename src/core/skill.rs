@@ -591,6 +591,33 @@ impl SkillRegistry {
             .map_err(|e| SkillError::Io(ref_path.display().to_string(), e))
     }
 
+    /// Get all files in a skill as a map of relative_path → bytes.
+    /// Works for both local (filesystem) and remote (cached) skills.
+    pub fn bundle_files(&self, name: &str) -> Result<HashMap<String, Vec<u8>>, SkillError> {
+        let _skill = self
+            .get_skill(name)
+            .ok_or_else(|| SkillError::NotFound(name.to_string()))?;
+
+        let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+
+        // Collect from files_cache (GCS / remote skills)
+        for ((skill_name, rel_path), data) in &self.files_cache {
+            if skill_name == name {
+                files.insert(rel_path.clone(), data.clone());
+            }
+        }
+
+        // If nothing from cache, read from filesystem
+        if files.is_empty() {
+            let skill = self.get_skill(name).unwrap();
+            if skill.dir.is_dir() {
+                collect_dir_files(&skill.dir, &skill.dir, &mut files)?;
+            }
+        }
+
+        Ok(files)
+    }
+
     /// Number of loaded skills.
     pub fn skill_count(&self) -> usize {
         self.skills.len()
@@ -753,6 +780,30 @@ pub fn build_skill_context(skills: &[&SkillMeta]) -> String {
 ///
 /// Priority:
 ///   (A) SKILL.md with YAML frontmatter → primary source; merge ATI extensions from skill.toml
+/// Recursively collect all files in a directory into a map of relative_path → bytes.
+fn collect_dir_files(
+    base: &Path,
+    current: &Path,
+    files: &mut HashMap<String, Vec<u8>>,
+) -> Result<(), SkillError> {
+    let entries =
+        std::fs::read_dir(current).map_err(|e| SkillError::Io(current.display().to_string(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| SkillError::Io(current.display().to_string(), e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dir_files(base, &path, files)?;
+        } else if let Ok(rel) = path.strip_prefix(base) {
+            if let Some(rel_str) = rel.to_str() {
+                if let Ok(data) = std::fs::read(&path) {
+                    files.insert(rel_str.to_string(), data);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 ///   (B) No frontmatter + skill.toml → current legacy behavior
 ///   (C) No frontmatter + no skill.toml + SKILL.md exists → infer from content
 fn load_skill_from_dir(dir: &Path) -> Result<SkillMeta, SkillError> {
