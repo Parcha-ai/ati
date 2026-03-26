@@ -15,12 +15,32 @@ use crate::proxy::client as proxy_client;
 use crate::Cli;
 
 /// Parse CLI args like --key value --flag into a HashMap.
+/// Strips known global flags (-J, --json, --verbose, --output) that may be
+/// captured by trailing_var_arg.
 fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn std::error::Error>> {
+    // Filter out global flags that clap's trailing_var_arg swallowed
+    let filtered: Vec<&String> = {
+        let mut result = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            let arg = &args[i];
+            if arg == "-J" || arg == "--json" || arg == "--verbose" {
+                i += 1; // skip flag
+            } else if arg == "--output" || arg == "--format" {
+                i += 2; // skip flag + value
+            } else {
+                result.push(arg);
+                i += 1;
+            }
+        }
+        result
+    };
+
     let mut map = HashMap::new();
     let mut i = 0;
 
-    while i < args.len() {
-        let arg = &args[i];
+    while i < filtered.len() {
+        let arg = &filtered[i];
         if arg.starts_with("--") {
             let key = arg.trim_start_matches("--").to_string();
             if key.is_empty() {
@@ -28,11 +48,11 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
             }
 
             // Check if next arg exists and is a value (not another flag)
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                let val_str = &args[i + 1];
+            if i + 1 < filtered.len() && !filtered[i + 1].starts_with("--") {
+                let val_str = filtered[i + 1].as_str();
                 // Try to parse as JSON value, fall back to string
                 let value = serde_json::from_str(val_str)
-                    .unwrap_or_else(|_| Value::String(val_str.clone()));
+                    .unwrap_or_else(|_| Value::String(val_str.to_string()));
                 map.insert(key, value);
                 i += 2;
             } else {
@@ -166,6 +186,9 @@ pub async fn execute_with_registry(
     registry: Option<ManifestRegistry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_tool_args(raw_args)?;
+
+    // Note: -J/--json may be swallowed by trailing_var_arg when placed after
+    // tool args. This is handled in execute_local's output formatting.
 
     // Auto-detect: proxy mode if ATI_PROXY_URL is set
     if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
@@ -301,6 +324,13 @@ async fn execute_local(
     };
     let auth_cache = AuthCache::new();
 
+    // Handle -J/--json that trailing_var_arg may have swallowed
+    let effective_output = if raw_args.iter().any(|a| a == "-J" || a == "--json") {
+        crate::OutputFormat::Json
+    } else {
+        cli.output.clone()
+    };
+
     // Execute — dispatch based on handler type, with timing for audit
     let start = std::time::Instant::now();
     let exec_result: Result<String, Box<dyn std::error::Error>> = match provider.handler.as_str() {
@@ -315,7 +345,7 @@ async fn execute_local(
             )
             .await
             {
-                Ok(value) => Ok(output::format_output(&value, &cli.output)),
+                Ok(value) => Ok(output::format_output(&value, &effective_output)),
                 Err(e) => Err(e.into()),
             }
         }
@@ -329,7 +359,7 @@ async fn execute_local(
             )
             .await
             {
-                Ok(value) => Ok(output::format_output(&value, &cli.output)),
+                Ok(value) => Ok(output::format_output(&value, &effective_output)),
                 Err(e) => Err(e.into()),
             }
         }
@@ -339,7 +369,7 @@ async fn execute_local(
                 tool,
                 &args,
                 &keyring,
-                &cli.output,
+                &effective_output,
                 Some(&gen_ctx),
                 Some(&auth_cache),
             )
@@ -373,6 +403,7 @@ async fn execute_local(
 }
 
 /// Proxy mode: forward the call to an external ATI proxy server.
+/// The `-J` flag may have been swallowed by trailing_var_arg — handle it here too.
 async fn execute_via_proxy(
     cli: &Cli,
     tool_name: &str,
@@ -406,7 +437,13 @@ async fn execute_via_proxy(
     }
 
     let result = exec_result?;
-    let formatted = output::format_output(&result, &cli.output);
+    // Handle -J/--json swallowed by trailing_var_arg
+    let effective_output = if raw_args.iter().any(|a| a == "-J" || a == "--json") {
+        crate::OutputFormat::Json
+    } else {
+        cli.output.clone()
+    };
+    let formatted = output::format_output(&result, &effective_output);
     println!("{formatted}");
     Ok(())
 }

@@ -133,6 +133,50 @@ pub async fn call_tool(
     Ok(body.result)
 }
 
+/// List available tools from the proxy.
+pub async fn list_tools(proxy_url: &str, query_params: &str) -> Result<Value, ProxyError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
+        .build()?;
+    let mut url = format!("{}/tools", proxy_url.trim_end_matches('/'));
+    if !query_params.is_empty() {
+        url.push('?');
+        url.push_str(query_params);
+    }
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ProxyError::ProxyResponse {
+            status: status.as_u16(),
+            body,
+        });
+    }
+    Ok(response.json().await?)
+}
+
+/// Get detailed info about a specific tool from the proxy.
+pub async fn get_tool_info(proxy_url: &str, name: &str) -> Result<Value, ProxyError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
+        .build()?;
+    let url = format!("{}/tools/{}", proxy_url.trim_end_matches('/'), name);
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ProxyError::ProxyResponse {
+            status: status.as_u16(),
+            body,
+        });
+    }
+    Ok(response.json().await?)
+}
+
 /// Forward a raw MCP JSON-RPC message via the proxy's /mcp endpoint.
 pub async fn call_mcp(
     proxy_url: &str,

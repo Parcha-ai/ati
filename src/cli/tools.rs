@@ -73,6 +73,12 @@ pub(crate) async fn discover_mcp_tools(
 
 /// Execute: ati tool <subcommand>
 pub async fn execute(cli: &Cli, subcmd: &ToolCommands) -> Result<(), Box<dyn std::error::Error>> {
+    // Proxy mode: forward read-only commands to the proxy
+    if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
+        return execute_via_proxy(cli, subcmd, &proxy_url).await;
+    }
+
+    // Local mode
     let ati_dir = common::ati_dir();
     let manifests_dir = ati_dir.join("manifests");
     let mut registry = ManifestRegistry::load(&manifests_dir)?;
@@ -91,6 +97,110 @@ pub async fn execute(cli: &Cli, subcmd: &ToolCommands) -> Result<(), Box<dyn std
         ToolCommands::Info { name } => tool_info(cli, &registry, name),
         ToolCommands::Search { query } => search_tools(cli, &registry, &scopes, query),
     }
+}
+
+/// Forward tool commands to the proxy server.
+async fn execute_via_proxy(
+    cli: &Cli,
+    subcmd: &ToolCommands,
+    proxy_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::proxy::client as proxy_client;
+
+    tracing::debug!(proxy_url = %proxy_url, "mode: proxy");
+
+    match subcmd {
+        ToolCommands::List { provider } => {
+            let mut params = Vec::new();
+            if let Some(p) = provider {
+                params.push(format!("provider={p}"));
+            }
+            let query = params.join("&");
+            let tools = proxy_client::list_tools(proxy_url, &query).await?;
+            let empty = vec![];
+            let tools_arr = tools.as_array().unwrap_or(&empty);
+
+            if tools_arr.is_empty() {
+                tracing::warn!("no tools available from proxy");
+                return Ok(());
+            }
+
+            match cli.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&tools)?),
+                _ => {
+                    for tool in tools_arr {
+                        let name = tool["name"].as_str().unwrap_or("?");
+                        let desc = tool["description"].as_str().unwrap_or("");
+                        let provider = tool["provider"].as_str().unwrap_or("?");
+                        let desc_short: String = desc.chars().take(80).collect();
+                        println!("{name:<40} {provider:<15} {desc_short}");
+                    }
+                }
+            }
+        }
+        ToolCommands::Info { name } => {
+            let info = proxy_client::get_tool_info(proxy_url, name).await?;
+            if info.get("error").is_some() {
+                return Err(format!("Tool '{}' not found", name).into());
+            }
+            match cli.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&info)?),
+                _ => {
+                    println!("Tool:        {}", info["name"].as_str().unwrap_or("?"));
+                    println!("Provider:    {}", info["provider"].as_str().unwrap_or("?"));
+                    println!(
+                        "Description: {}",
+                        info["description"].as_str().unwrap_or("")
+                    );
+                    println!("Method:      {}", info["method"].as_str().unwrap_or("?"));
+                    if let Some(tags) = info["tags"].as_array() {
+                        let tag_strs: Vec<&str> = tags.iter().filter_map(|t| t.as_str()).collect();
+                        if !tag_strs.is_empty() {
+                            println!("Tags:        {}", tag_strs.join(", "));
+                        }
+                    }
+                    if let Some(schema) = info.get("input_schema") {
+                        if let Some(props) = schema.get("properties") {
+                            println!("\nParameters:");
+                            if let Some(obj) = props.as_object() {
+                                for (key, val) in obj {
+                                    let ptype = val["type"].as_str().unwrap_or("any");
+                                    let pdesc = val["description"].as_str().unwrap_or("");
+                                    println!("  --{key:<20} ({ptype}) {pdesc}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ToolCommands::Search { query } => {
+            let params = format!("search={query}");
+            let tools = proxy_client::list_tools(proxy_url, &params).await?;
+            let empty = vec![];
+            let tools_arr = tools.as_array().unwrap_or(&empty);
+
+            if tools_arr.is_empty() {
+                tracing::warn!(query = %query, "no tools match search");
+                return Ok(());
+            }
+
+            match cli.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&tools)?),
+                _ => {
+                    for tool in tools_arr {
+                        let name = tool["name"].as_str().unwrap_or("?");
+                        let desc = tool["description"].as_str().unwrap_or("");
+                        let provider = tool["provider"].as_str().unwrap_or("?");
+                        let desc_short: String = desc.chars().take(80).collect();
+                        println!("{name:<40} {provider:<15} {desc_short}");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn list_tools(
