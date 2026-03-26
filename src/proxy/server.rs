@@ -239,17 +239,47 @@ async fn handle_call(
         "POST /call"
     );
 
-    // Look up tool in registry
+    // Look up tool in registry.
+    // If not found, try converting underscore format (finnhub_quote) to colon (finnhub:quote).
+    let tool_name_normalized;
     let (provider, tool) = match state.registry.get_tool(&call_req.tool_name) {
         Some(pt) => pt,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(CallResponse {
-                    result: Value::Null,
-                    error: Some(format!("Unknown tool: '{}'", call_req.tool_name)),
-                }),
-            );
+            // Try underscore → colon conversion: "finnhub_quote" → "finnhub:quote"
+            // Only convert the FIRST underscore (provider separator)
+            tool_name_normalized = if let Some(idx) = call_req.tool_name.find('_') {
+                let (provider_part, rest) = call_req.tool_name.split_at(idx);
+                format!("{}:{}", provider_part, &rest[1..])
+            } else {
+                String::new()
+            };
+
+            if !tool_name_normalized.is_empty() {
+                if let Some(pt) = state.registry.get_tool(&tool_name_normalized) {
+                    tracing::debug!(
+                        original = %call_req.tool_name,
+                        resolved = %tool_name_normalized,
+                        "resolved underscore tool name to colon format"
+                    );
+                    pt
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(CallResponse {
+                            result: Value::Null,
+                            error: Some(format!("Unknown tool: '{}'", call_req.tool_name)),
+                        }),
+                    );
+                }
+            } else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(CallResponse {
+                        result: Value::Null,
+                        error: Some(format!("Unknown tool: '{}'", call_req.tool_name)),
+                    }),
+                );
+            }
         }
     };
 
@@ -269,12 +299,28 @@ async fn handle_call(
             }
         };
 
-        if let Err(e) = scopes.check_access(&call_req.tool_name, tool_scope) {
+        // Scope check: try both colon format (tool:finnhub:quote) and legacy
+        // underscore format (tool:finnhub_quote) for backward compatibility.
+        let underscore_scope = if tool_scope.starts_with("tool:") {
+            // "tool:finnhub:quote" → "tool:finnhub_quote"
+            let after_prefix = &tool_scope["tool:".len()..];
+            format!("tool:{}", after_prefix.replacen(':', "_", 1))
+        } else {
+            String::new()
+        };
+
+        let allowed = scopes.is_allowed(tool_scope)
+            || (!underscore_scope.is_empty() && scopes.is_allowed(&underscore_scope));
+
+        if !allowed {
             return (
                 StatusCode::FORBIDDEN,
                 Json(CallResponse {
                     result: Value::Null,
-                    error: Some(format!("Access denied: {e}")),
+                    error: Some(format!(
+                        "Access denied: '{}' is not in your scopes",
+                        tool.name
+                    )),
                 }),
             );
         }
