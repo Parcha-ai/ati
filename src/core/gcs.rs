@@ -72,9 +72,14 @@ impl GcsClient {
             ));
         }
 
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| GcsError::Http(e))?;
+
         Ok(Self {
             bucket,
-            http: reqwest::Client::new(),
+            http,
             service_account: sa,
             token: Mutex::new(None),
         })
@@ -163,13 +168,12 @@ impl GcsClient {
     /// List top-level "directories" (prefixes) in the bucket.
     /// Returns skill names like `["fal-generate", "compliance-screening", ...]`.
     pub async fn list_skill_names(&self) -> Result<Vec<String>, GcsError> {
-        let token = self.access_token().await?;
         let url = format!(
             "https://storage.googleapis.com/storage/v1/b/{}/o?delimiter=/",
             self.bucket
         );
 
-        let resp = self.http.get(&url).bearer_auth(&token).send().await?;
+        let resp = self.get_with_retry(&url).await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -198,7 +202,6 @@ impl GcsClient {
     /// List all objects under a prefix (recursive).
     /// Returns relative paths like `["SKILL.md", "skill.toml", "scripts/generate.sh"]`.
     pub async fn list_objects(&self, prefix: &str) -> Result<Vec<String>, GcsError> {
-        let token = self.access_token().await?;
         let full_prefix = format!("{}/", prefix.trim_end_matches('/'));
         let mut all_objects = Vec::new();
         let mut page_token: Option<String> = None;
@@ -213,7 +216,7 @@ impl GcsClient {
                 url.push_str(&format!("&pageToken={}", urlencoded(pt)));
             }
 
-            let resp = self.http.get(&url).bearer_auth(&token).send().await?;
+            let resp = self.get_with_retry(&url).await?;
 
             if !resp.status().is_success() {
                 let status = resp.status().as_u16();
@@ -259,14 +262,13 @@ impl GcsClient {
 
     /// Read a single object as bytes.
     pub async fn get_object(&self, path: &str) -> Result<Vec<u8>, GcsError> {
-        let token = self.access_token().await?;
         let url = format!(
             "https://storage.googleapis.com/storage/v1/b/{}/o/{}?alt=media",
             self.bucket,
             urlencoded(path)
         );
 
-        let resp = self.http.get(&url).bearer_auth(&token).send().await?;
+        let resp = self.get_with_retry(&url).await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -284,6 +286,36 @@ impl GcsClient {
     pub async fn get_object_text(&self, path: &str) -> Result<String, GcsError> {
         let bytes = self.get_object(path).await?;
         String::from_utf8(bytes).map_err(|e| GcsError::Auth(format!("invalid UTF-8: {e}")))
+    }
+
+    /// Retry-aware wrapper for GET requests. Retries on 429/5xx up to 3 times with backoff.
+    async fn get_with_retry(&self, url: &str) -> Result<reqwest::Response, GcsError> {
+        let mut last_err = None;
+        for attempt in 0..3 {
+            let token = self.access_token().await?;
+            match self.http.get(url).bearer_auth(&token).send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if status == 429 || status >= 500 {
+                        let body = resp.text().await.unwrap_or_default();
+                        last_err = Some(GcsError::Api {
+                            status,
+                            message: body,
+                        });
+                        let delay = std::time::Duration::from_millis(500 * (1 << attempt));
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    last_err = Some(GcsError::Http(e));
+                    let delay = std::time::Duration::from_millis(500 * (1 << attempt));
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+        Err(last_err.unwrap())
     }
 }
 
