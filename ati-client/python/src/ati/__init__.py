@@ -201,9 +201,14 @@ class AtiOrchestrator:
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read())
 
-        skill_dir = os.path.join(dest_dir, name)
+        skill_dir = os.path.realpath(os.path.join(dest_dir, name))
         for rel_path, content in data.get("files", {}).items():
-            file_path = os.path.join(skill_dir, rel_path)
+            # Path traversal protection
+            if ".." in rel_path or rel_path.startswith("/"):
+                continue
+            file_path = os.path.realpath(os.path.join(skill_dir, rel_path))
+            if not file_path.startswith(skill_dir + os.sep) and file_path != skill_dir:
+                continue
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             if isinstance(content, dict) and "base64" in content:
                 # Binary file

@@ -23,6 +23,8 @@ pub enum GcsError {
     Jwt(#[from] jsonwebtoken::errors::Error),
     #[error("GCS API error ({status}): {message}")]
     Api { status: u16, message: String },
+    #[error("Invalid UTF-8 in GCS object: {0}")]
+    Utf8(String),
     #[error("Invalid service account JSON: {0}")]
     InvalidCredentials(String),
 }
@@ -285,7 +287,7 @@ impl GcsClient {
     /// Read a single object as UTF-8 text.
     pub async fn get_object_text(&self, path: &str) -> Result<String, GcsError> {
         let bytes = self.get_object(path).await?;
-        String::from_utf8(bytes).map_err(|e| GcsError::Auth(format!("invalid UTF-8: {e}")))
+        String::from_utf8(bytes).map_err(|e| GcsError::Utf8(e.to_string()))
     }
 
     /// Retry-aware wrapper for GET requests. Retries on 429/5xx up to 3 times with backoff.

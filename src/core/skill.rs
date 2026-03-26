@@ -347,11 +347,14 @@ impl SkillRegistry {
     /// Merge skills from a remote source (e.g. GCS).
     /// Local skills take precedence on name collision.
     pub fn merge(&mut self, source: crate::core::gcs::GcsSkillSource) {
+        let mut added: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for skill in source.skills {
             if self.name_index.contains_key(&skill.name) {
-                // Local wins — skip this GCS skill
+                // Local wins — skip this GCS skill entirely
                 continue;
             }
+            added.insert(skill.name.clone());
             let idx = self.skills.len();
             self.name_index.insert(skill.name.clone(), idx);
             for tool in &skill.tools {
@@ -371,8 +374,14 @@ impl SkillRegistry {
             }
             self.skills.push(skill);
         }
-        // Merge file cache
-        self.files_cache.extend(source.files);
+
+        // Only merge files for skills that were actually added (not skipped).
+        // This preserves "local wins" at the content layer too.
+        for ((skill_name, rel_path), data) in source.files {
+            if added.contains(&skill_name) {
+                self.files_cache.insert((skill_name, rel_path), data);
+            }
+        }
     }
 
     /// Get a skill by name.
