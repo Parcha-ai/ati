@@ -1307,54 +1307,9 @@ pub async fn run(
         }
     };
 
-    // Discover MCP tools at startup so they appear in GET /tools
-    {
-        let mcp_list: Vec<_> = registry
-            .list_mcp_providers()
-            .into_iter()
-            .map(|p| (p.name.clone(), p.clone()))
-            .collect();
-        for (name, provider) in &mcp_list {
-            match mcp_client::McpClient::connect_with_gen(provider, &keyring, None, None).await {
-                Ok(client) => {
-                    match client.list_tools().await {
-                        Ok(tools) => {
-                            let count = tools.len();
-                            let tool_defs: Vec<crate::core::manifest::McpToolDef> = tools
-                                .into_iter()
-                                .map(|t| crate::core::manifest::McpToolDef {
-                                    name: t.name,
-                                    description: t.description,
-                                    input_schema: t.input_schema,
-                                })
-                                .collect();
-                            registry.register_mcp_tools(name, tool_defs);
-                            tracing::info!(
-                                provider = %name,
-                                tools = count,
-                                "discovered MCP tools"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                provider = %name,
-                                error = %e,
-                                "MCP tool discovery failed"
-                            );
-                        }
-                    }
-                    client.disconnect().await;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        provider = %name,
-                        error = %e,
-                        "failed to connect to MCP provider"
-                    );
-                }
-            }
-        }
-    }
+    // Discover MCP tools at startup so they appear in GET /tools.
+    // Runs concurrently across providers with 30s per-provider timeout.
+    mcp_client::discover_all_mcp_tools(&mut registry, &keyring).await;
 
     let tool_count = registry.list_public_tools().len();
 
