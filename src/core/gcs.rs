@@ -75,7 +75,7 @@ impl GcsClient {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| GcsError::Http(e))?;
+            .map_err(GcsError::Http)?;
 
         Ok(Self {
             bucket,
