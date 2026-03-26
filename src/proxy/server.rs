@@ -182,6 +182,11 @@ pub struct SkillResolveRequest {
     pub include_content: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SkillBundleBatchRequest {
+    pub names: Vec<String>,
+}
+
 // --- Handlers ---
 
 async fn handle_call(
@@ -935,6 +940,46 @@ async fn handle_skill_bundle(
     )
 }
 
+/// POST /skills/bundle — return all files for multiple skills in one response.
+/// Request: `{"names": ["fal-generate", "compliance-screening"]}`
+/// Response: `{"skills": {"fal-generate": {"files": {...}}, "compliance-screening": {"files": {...}}}}`
+async fn handle_skills_bundle_batch(
+    State(state): State<Arc<ProxyState>>,
+    Json(req): Json<SkillBundleBatchRequest>,
+) -> impl IntoResponse {
+    tracing::debug!(names = ?req.names, "POST /skills/bundle");
+
+    let mut result = serde_json::Map::new();
+
+    for name in &req.names {
+        let files = match state.skill_registry.bundle_files(name) {
+            Ok(f) => f,
+            Err(_) => continue, // skip missing skills
+        };
+
+        let mut file_map = serde_json::Map::new();
+        for (path, data) in &files {
+            match std::str::from_utf8(data) {
+                Ok(text) => {
+                    file_map.insert(path.clone(), Value::String(text.to_string()));
+                }
+                Err(_) => {
+                    use base64::Engine;
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                    file_map.insert(path.clone(), serde_json::json!({"base64": encoded}));
+                }
+            }
+        }
+
+        result.insert(name.clone(), serde_json::json!({ "files": file_map }));
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "skills": result })),
+    )
+}
+
 async fn handle_skills_resolve(
     State(state): State<Arc<ProxyState>>,
     Json(req): Json<SkillResolveRequest>,
@@ -1034,6 +1079,7 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/mcp", post(handle_mcp))
         .route("/skills", get(handle_skills_list))
         .route("/skills/resolve", post(handle_skills_resolve))
+        .route("/skills/bundle", post(handle_skills_bundle_batch))
         .route("/skills/{name}", get(handle_skill_detail))
         .route("/skills/{name}/bundle", get(handle_skill_bundle))
         .route("/health", get(handle_health))
@@ -1142,23 +1188,20 @@ pub async fn run(
             let cred_key = "gcp_credentials";
             if let Some(cred_json) = keyring.get(cred_key) {
                 match crate::core::gcs::GcsClient::new(bucket.to_string(), cred_json) {
-                    Ok(client) => {
-                        let rt = tokio::runtime::Handle::current();
-                        match rt.block_on(crate::core::gcs::GcsSkillSource::load(&client)) {
-                            Ok(gcs_source) => {
-                                let gcs_count = gcs_source.skill_count();
-                                skill_registry.merge(gcs_source);
-                                tracing::info!(
-                                    bucket = %bucket,
-                                    skills = gcs_count,
-                                    "loaded skills from GCS registry"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, bucket = %bucket, "failed to load GCS skills");
-                            }
+                    Ok(client) => match crate::core::gcs::GcsSkillSource::load(&client).await {
+                        Ok(gcs_source) => {
+                            let gcs_count = gcs_source.skill_count();
+                            skill_registry.merge(gcs_source);
+                            tracing::info!(
+                                bucket = %bucket,
+                                skills = gcs_count,
+                                "loaded skills from GCS registry"
+                            );
                         }
-                    }
+                        Err(e) => {
+                            tracing::warn!(error = %e, bucket = %bucket, "failed to load GCS skills");
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to init GCS client");
                     }
