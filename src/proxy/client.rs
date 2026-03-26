@@ -146,6 +146,14 @@ pub async fn list_tools(proxy_url: &str, query_params: &str) -> Result<Value, Pr
     let response = build_proxy_request(&client, reqwest::Method::GET, &url)
         .send()
         .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ProxyError::ProxyResponse {
+            status: status.as_u16(),
+            body,
+        });
+    }
     Ok(response.json().await?)
 }
 
@@ -158,6 +166,14 @@ pub async fn get_tool_info(proxy_url: &str, name: &str) -> Result<Value, ProxyEr
     let response = build_proxy_request(&client, reqwest::Method::GET, &url)
         .send()
         .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ProxyError::ProxyResponse {
+            status: status.as_u16(),
+            body,
+        });
+    }
     Ok(response.json().await?)
 }
 

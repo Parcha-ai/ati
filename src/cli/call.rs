@@ -403,8 +403,9 @@ async fn execute_local(
 }
 
 /// Proxy mode: forward the call to an external ATI proxy server.
+/// The `-J` flag may have been swallowed by trailing_var_arg — handle it here too.
 async fn execute_via_proxy(
-    _cli: &Cli,
+    cli: &Cli,
     tool_name: &str,
     args: &HashMap<String, Value>,
     raw_args: &[String],
@@ -436,6 +437,13 @@ async fn execute_via_proxy(
     }
 
     let result = exec_result?;
-    println!("{result}");
+    // Handle -J/--json swallowed by trailing_var_arg
+    let effective_output = if raw_args.iter().any(|a| a == "-J" || a == "--json") {
+        crate::OutputFormat::Json
+    } else {
+        cli.output.clone()
+    };
+    let formatted = output::format_output(&result, &effective_output);
+    println!("{formatted}");
     Ok(())
 }

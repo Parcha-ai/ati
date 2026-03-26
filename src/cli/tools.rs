@@ -132,7 +132,7 @@ async fn execute_via_proxy(
                         let name = tool["name"].as_str().unwrap_or("?");
                         let desc = tool["description"].as_str().unwrap_or("");
                         let provider = tool["provider"].as_str().unwrap_or("?");
-                        let desc_short = if desc.len() > 80 { &desc[..80] } else { desc };
+                        let desc_short: String = desc.chars().take(80).collect();
                         println!("{name:<40} {provider:<15} {desc_short}");
                     }
                 }
@@ -141,8 +141,7 @@ async fn execute_via_proxy(
         ToolCommands::Info { name } => {
             let info = proxy_client::get_tool_info(proxy_url, name).await?;
             if info.get("error").is_some() {
-                eprintln!("Tool '{}' not found", name);
-                std::process::exit(1);
+                return Err(format!("Tool '{}' not found", name).into());
             }
             match cli.output {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&info)?),
@@ -193,7 +192,7 @@ async fn execute_via_proxy(
                         let name = tool["name"].as_str().unwrap_or("?");
                         let desc = tool["description"].as_str().unwrap_or("");
                         let provider = tool["provider"].as_str().unwrap_or("?");
-                        let desc_short = if desc.len() > 80 { &desc[..80] } else { desc };
+                        let desc_short: String = desc.chars().take(80).collect();
                         println!("{name:<40} {provider:<15} {desc_short}");
                     }
                 }
