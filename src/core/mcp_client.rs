@@ -119,6 +119,15 @@ struct StdioTransport {
     reader: BufReader<std::process::ChildStdout>,
 }
 
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        // Best-effort cleanup: kill the subprocess if it wasn't explicitly disconnected.
+        // Prevents orphan zombie processes when a future is cancelled (e.g., on timeout).
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Streamable HTTP transport: POST to MCP endpoint.
 struct HttpTransport {
     client: reqwest::Client,
@@ -913,6 +922,87 @@ fn mcp_result_to_value(result: &McpToolResult) -> Value {
             "isError": result.is_error,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared MCP tool discovery (used by both CLI and proxy)
+// ---------------------------------------------------------------------------
+
+/// Discover tools from all MCP providers concurrently and register them.
+///
+/// Each provider has a 30-second timeout. Failures are logged and skipped.
+/// Returns the number of tools discovered.
+pub async fn discover_all_mcp_tools(
+    registry: &mut crate::core::manifest::ManifestRegistry,
+    keyring: &Keyring,
+) -> usize {
+    use futures::stream::{self, StreamExt};
+
+    let providers: Vec<_> = registry
+        .list_mcp_providers()
+        .into_iter()
+        .map(|p| (p.name.clone(), p.clone()))
+        .collect();
+
+    if providers.is_empty() {
+        return 0;
+    }
+
+    // Discover concurrently (up to 10 at a time), with per-provider timeout
+    let results: Vec<_> = stream::iter(&providers)
+        .map(|(name, provider)| async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                discover_one_provider(name, provider, keyring),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(tools)) => Some((name.clone(), tools)),
+                Ok(Err(e)) => {
+                    tracing::warn!(provider = %name, error = %e, "MCP tool discovery failed");
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(provider = %name, "MCP tool discovery timed out (30s)");
+                    None
+                }
+            }
+        })
+        .buffer_unordered(10)
+        .collect()
+        .await;
+
+    // Register discovered tools (sequential — fast, just index inserts)
+    let mut total = 0;
+    for (name, tool_defs) in results.into_iter().flatten() {
+        let count = tool_defs.len();
+        registry.register_mcp_tools(&name, tool_defs);
+        tracing::info!(provider = %name, tools = count, "discovered MCP tools");
+        total += count;
+    }
+    total
+}
+
+/// Discover tools from a single MCP provider.
+async fn discover_one_provider(
+    _name: &str,
+    provider: &Provider,
+    keyring: &Keyring,
+) -> Result<Vec<crate::core::manifest::McpToolDef>, McpError> {
+    let client = McpClient::connect(provider, keyring).await?;
+    let tools = client.list_tools().await;
+    client.disconnect().await;
+
+    let tools = tools?;
+    Ok(tools
+        .into_iter()
+        .map(|t| crate::core::manifest::McpToolDef {
+            name: t.name,
+            description: t.description,
+            input_schema: t.input_schema,
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

@@ -1251,9 +1251,7 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load manifests
     let manifests_dir = ati_dir.join("manifests");
-    let registry = ManifestRegistry::load(&manifests_dir)?;
-
-    let tool_count = registry.list_public_tools().len();
+    let mut registry = ManifestRegistry::load(&manifests_dir)?;
     let provider_count = registry.list_providers().len();
 
     // Load keyring
@@ -1308,6 +1306,12 @@ pub async fn run(
             }
         }
     };
+
+    // Discover MCP tools at startup so they appear in GET /tools.
+    // Runs concurrently across providers with 30s per-provider timeout.
+    mcp_client::discover_all_mcp_tools(&mut registry, &keyring).await;
+
+    let tool_count = registry.list_public_tools().len();
 
     // Log MCP and OpenAPI providers
     let mcp_providers: Vec<(String, String)> = registry
