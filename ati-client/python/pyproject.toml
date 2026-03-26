@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ati-client"
-version = "0.2.0"
+version = "0.4.1"
 description = "Python SDK for ATI (Agent Tools Interface) — token utilities and orchestrator provisioning"
 readme = "README.md"
 license = "MIT"
