@@ -1,7 +1,7 @@
 # ATI Proxy — Agent Tools Interface
 # Multi-stage build: compile Rust binary, then copy to slim runtime image.
 
-FROM rust:1.82-slim-bookworm AS builder
+FROM rust:slim-bookworm AS builder
 WORKDIR /app
 
 # Cache dependency compilation: copy manifests first, build a dummy,
