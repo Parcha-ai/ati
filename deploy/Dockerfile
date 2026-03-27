@@ -12,9 +12,16 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     useradd --system --no-create-home ati
 
-# Download pre-built static binary from GitHub releases
-RUN curl -fSL "https://github.com/Parcha-ai/ati/releases/download/${ATI_VERSION}/ati-x86_64-unknown-linux-musl" \
+# Download pre-built static binary from GitHub releases (multi-arch)
+ARG TARGETARCH
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
+    curl -fSL "https://github.com/Parcha-ai/ati/releases/download/${ATI_VERSION}/ati-${ARCH}-unknown-linux-musl" \
     -o /usr/local/bin/ati && \
+    curl -fSL "https://github.com/Parcha-ai/ati/releases/download/${ATI_VERSION}/ati-${ARCH}-unknown-linux-musl.sha256" \
+    -o /tmp/ati.sha256 && \
+    EXPECTED=$(awk '{print $1}' /tmp/ati.sha256) && \
+    echo "${EXPECTED}  /usr/local/bin/ati" | sha256sum -c - && \
+    rm /tmp/ati.sha256 && \
     chmod +x /usr/local/bin/ati
 
 COPY manifests/ /app/manifests/
