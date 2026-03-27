@@ -1,0 +1,18 @@
+[provider]
+name = "google_ads"
+description = "Google Ads API — campaign management, conversion tracking, search terms, geo reports"
+handler = "cli"
+cli_command = "google-ads"
+cli_default_args = ["--json"]
+cli_timeout_secs = 30
+auth_type = "none"
+category = "marketing"
+tags = ["google", "ads", "campaigns", "conversions", "ppc", "marketing"]
+
+[provider.cli_env]
+GOOGLE_ADS_DEVELOPER_TOKEN = "${google_ads_developer_token}"
+GOOGLE_ADS_CLIENT_ID = "${google_ads_client_id}"
+GOOGLE_ADS_CLIENT_SECRET = "${google_ads_client_secret}"
+GOOGLE_ADS_REFRESH_TOKEN = "${google_ads_refresh_token}"
+GOOGLE_ADS_CUSTOMER_ID = "${google_ads_customer_id}"
+GOOGLE_ADS_LOGIN_CUSTOMER_ID = "${google_ads_login_customer_id}"
