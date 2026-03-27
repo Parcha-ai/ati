@@ -24,6 +24,7 @@ RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
     rm /tmp/ati.sha256 && \
     chmod +x /usr/local/bin/ati
 
+ENV ATI_DIR=/app
 COPY manifests/ /app/manifests/
 
 WORKDIR /app
