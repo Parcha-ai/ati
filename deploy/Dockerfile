@@ -26,6 +26,7 @@ RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
 
 ENV ATI_DIR=/app
 COPY manifests/ /app/manifests/
+COPY specs/ /app/specs/
 
 WORKDIR /app
 USER ati
