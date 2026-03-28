@@ -182,3 +182,73 @@ fn decrypt_keyring(
         .decrypt(nonce, ciphertext)
         .map_err(|e| format!("Decryption failed: {e}").into())
 }
+
+// --- @file: reference tests ---
+
+#[test]
+fn test_load_credentials_with_file_reference() {
+    let dir = TempDir::new().unwrap();
+
+    // Write a secret file
+    let secret_path = dir.path().join("gcp-creds.json");
+    std::fs::write(
+        &secret_path,
+        r#"{"type":"service_account","project_id":"test"}"#,
+    )
+    .unwrap();
+
+    // Write credentials file with @file: reference
+    let creds_path = dir.path().join("credentials");
+    std::fs::write(
+        &creds_path,
+        format!(
+            r#"{{"inline_key": "simple_value", "gcp_credentials": "@file:{}"}}"#,
+            secret_path.display()
+        ),
+    )
+    .unwrap();
+
+    let keyring = ati::core::keyring::Keyring::load_credentials(&creds_path).unwrap();
+    assert_eq!(keyring.get("inline_key").unwrap(), "simple_value");
+    assert!(keyring
+        .get("gcp_credentials")
+        .unwrap()
+        .contains("service_account"));
+}
+
+#[test]
+fn test_load_credentials_file_reference_trims_whitespace() {
+    let dir = TempDir::new().unwrap();
+
+    // Secret file with trailing newline (common with mounted secrets)
+    let secret_path = dir.path().join("api-key.txt");
+    std::fs::write(&secret_path, "my_secret_key\n").unwrap();
+
+    let creds_path = dir.path().join("credentials");
+    std::fs::write(
+        &creds_path,
+        format!(r#"{{"api_key": "@file:{}"}}"#, secret_path.display()),
+    )
+    .unwrap();
+
+    let keyring = ati::core::keyring::Keyring::load_credentials(&creds_path).unwrap();
+    assert_eq!(keyring.get("api_key").unwrap(), "my_secret_key");
+}
+
+#[test]
+fn test_load_credentials_file_reference_missing_file() {
+    let dir = TempDir::new().unwrap();
+
+    let creds_path = dir.path().join("credentials");
+    std::fs::write(
+        &creds_path,
+        r#"{"bad_ref": "@file:/nonexistent/path/secret.txt"}"#,
+    )
+    .unwrap();
+
+    let result = ati::core::keyring::Keyring::load_credentials(&creds_path);
+    assert!(
+        result.is_err(),
+        "should fail when referenced file is missing"
+    );
+}

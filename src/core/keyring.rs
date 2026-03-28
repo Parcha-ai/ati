@@ -104,9 +104,24 @@ impl Keyring {
     ///
     /// Used in local mode where `~/.ati/credentials` stores keys as plaintext JSON
     /// with 0600 permissions (same approach as AWS CLI, gh, Docker, Stripe).
+    ///
+    /// Supports `@file:/path/to/secret` values — the file contents are read and
+    /// used as the credential value. Useful for container platforms that mount
+    /// secrets as individual files (Northflank, Kubernetes, Docker).
     pub fn load_credentials(path: &Path) -> Result<Self, KeyringError> {
         let data = std::fs::read(path)?;
-        let keys: HashMap<String, String> = serde_json::from_slice(&data)?;
+        let mut keys: HashMap<String, String> = serde_json::from_slice(&data)?;
+
+        // Resolve @file: references — read credential value from external file
+        for value in keys.values_mut() {
+            if let Some(file_path) = value.strip_prefix("@file:") {
+                *value = std::fs::read_to_string(file_path.trim())
+                    .map_err(KeyringError::Io)?
+                    .trim()
+                    .to_string();
+            }
+        }
+
         Ok(Keyring {
             keys,
             _raw_json: Vec::new(),
