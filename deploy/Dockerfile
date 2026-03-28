@@ -1,7 +1,7 @@
 # ATI Proxy — Agent Tools Interface
 # Downloads pre-built binary from GitHub releases. No compilation needed.
 
-ARG ATI_VERSION=v0.6.0
+ARG ATI_VERSION=v0.6.1
 
 FROM debian:bookworm-slim
 
@@ -10,7 +10,12 @@ ARG ATI_VERSION
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/* && \
-    useradd --system --no-create-home ati
+    useradd --system --create-home ati
+
+# Node.js for MCP stdio providers (e.g., GitHub MCP server via npx)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Download pre-built static binary from GitHub releases (multi-arch)
 ARG TARGETARCH
