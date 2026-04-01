@@ -175,7 +175,10 @@ async fn test_local_tool_list_requires_token_when_jwt_configured() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
         .args(["tool", "list"])
         .env("ATI_DIR", ati_dir.path())
-        .env("ATI_JWT_SECRET", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+        .env(
+            "ATI_JWT_SECRET",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        )
         .output()
         .expect("Failed to execute ati");
 
@@ -195,7 +198,10 @@ async fn test_local_tool_list_rejects_invalid_token_when_jwt_configured() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
         .args(["tool", "list"])
         .env("ATI_DIR", ati_dir.path())
-        .env("ATI_JWT_SECRET", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+        .env(
+            "ATI_JWT_SECRET",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        )
         .env("ATI_SESSION_TOKEN", "not-a-valid-jwt")
         .output()
         .expect("Failed to execute ati");

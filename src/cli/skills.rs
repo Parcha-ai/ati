@@ -126,7 +126,11 @@ async fn execute_via_proxy(
                 url.push_str(&params.join("&"));
             }
 
-            let resp = proxy_client::list_skills(proxy_url, url.strip_prefix(&format!("{base}/skills?")).unwrap_or("")).await?;
+            let resp = proxy_client::list_skills(
+                proxy_url,
+                url.strip_prefix(&format!("{base}/skills?")).unwrap_or(""),
+            )
+            .await?;
             print_proxy_response(cli, &resp);
         }
         SkillCommands::Show { name, meta, refs } => {
@@ -159,7 +163,9 @@ async fn execute_via_proxy(
             }
         }
         SkillCommands::Search { query } => {
-            let resp = proxy_client::list_skills(proxy_url, &format!("search={}", urlencoding(query))).await?;
+            let resp =
+                proxy_client::list_skills(proxy_url, &format!("search={}", urlencoding(query)))
+                    .await?;
             print_proxy_response(cli, &resp);
         }
         SkillCommands::Info { name } => {
@@ -174,7 +180,11 @@ async fn execute_via_proxy(
             // Read is like show but for agent consumption — delegate to show endpoint
             if let Some(tool_name) = tool {
                 // Get all skills for this tool, then fetch each one's content
-                let resp = proxy_client::list_skills(proxy_url, &format!("tool={}", urlencoding(tool_name))).await?;
+                let resp = proxy_client::list_skills(
+                    proxy_url,
+                    &format!("tool={}", urlencoding(tool_name)),
+                )
+                .await?;
                 if let Some(arr) = resp.as_array() {
                     for item in arr {
                         if let Some(skill_name) = item.get("name").and_then(|n| n.as_str()) {
@@ -348,9 +358,13 @@ fn show_skill(
     let scopes = common::load_local_scopes_from_env()?;
     let visible = skill::visible_skills(&registry, &manifest_registry, &scopes);
 
-    let skill = visible.iter().find(|skill| skill.name == name).copied().ok_or_else(|| {
-        format!("Skill '{name}' not found. Run 'ati skill list' to see available skills.")
-    })?;
+    let skill = visible
+        .iter()
+        .find(|skill| skill.name == name)
+        .copied()
+        .ok_or_else(|| {
+            format!("Skill '{name}' not found. Run 'ati skill list' to see available skills.")
+        })?;
 
     if meta_only {
         match cli.output {

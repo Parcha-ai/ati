@@ -46,7 +46,9 @@ pub fn load_local_scopes_from_env() -> Result<ScopeConfig, Box<dyn std::error::E
             Ok(ScopeConfig::from_jwt(&claims))
         }
         None => {
-            tracing::debug!("JWT validation is not configured locally — running in unrestricted dev mode");
+            tracing::debug!(
+                "JWT validation is not configured locally — running in unrestricted dev mode"
+            );
             Ok(ScopeConfig::unrestricted())
         }
     }

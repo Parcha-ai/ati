@@ -344,19 +344,7 @@ async fn handle_call(
             }
         };
 
-        // Scope check: try both colon format (tool:finnhub:quote) and legacy
-        // underscore format (tool:finnhub_quote) for backward compatibility.
-        let underscore_scope = if let Some(after_prefix) = tool_scope.strip_prefix("tool:") {
-            // "tool:finnhub:quote" → "tool:finnhub_quote"
-            format!("tool:{}", after_prefix.replacen(':', "_", 1))
-        } else {
-            String::new()
-        };
-
-        let allowed = scopes.is_allowed(tool_scope)
-            || (!underscore_scope.is_empty() && scopes.is_allowed(&underscore_scope));
-
-        if !allowed {
+        if !scopes.is_allowed(tool_scope) {
             return (
                 StatusCode::FORBIDDEN,
                 Json(CallResponse {
@@ -990,10 +978,13 @@ async fn handle_tool_info(
     let claims = claims.map(|Extension(claims)| claims);
     let scopes = scopes_for_request(claims.as_ref(), &state);
 
-    match state.registry.get_tool(&name).filter(|(_, tool)| match &tool.scope {
-        Some(scope) => scopes.is_allowed(scope),
-        None => true,
-    }) {
+    match state
+        .registry
+        .get_tool(&name)
+        .filter(|(_, tool)| match &tool.scope {
+            Some(scope) => scopes.is_allowed(scope),
+            None => true,
+        }) {
         Some((provider, tool)) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1917,7 +1908,9 @@ fn build_scoped_prompt(
     skills_section: &str,
 ) -> Option<String> {
     // Check if scope_name is a tool
-    if let Some((provider, tool)) = visible_tools.iter().find(|(_, tool)| tool.name == scope_name)
+    if let Some((provider, tool)) = visible_tools
+        .iter()
+        .find(|(_, tool)| tool.name == scope_name)
     {
         let mut details = format!(
             "**Name**: `{}`\n**Provider**: {} (handler: {})\n**Description**: {}\n",

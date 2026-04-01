@@ -213,7 +213,9 @@ fn tool_info(
             Some(scope) => scopes.is_allowed(scope),
             None => true,
         })
-        .ok_or_else(|| format!("Unknown tool: '{name}'. Run 'ati tool list' to see available tools."))?;
+        .ok_or_else(|| {
+            format!("Unknown tool: '{name}'. Run 'ati tool list' to see available tools.")
+        })?;
 
     match cli.output {
         OutputFormat::Json => {

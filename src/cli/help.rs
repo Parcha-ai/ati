@@ -200,7 +200,9 @@ async fn execute_local(
     // Load scopes from JWT
     let scopes = common::load_local_scopes_from_env()?;
     if !scopes.help_enabled() {
-        return Err("Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into());
+        return Err(
+            "Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into(),
+        );
     }
 
     // Load skills
@@ -275,7 +277,10 @@ fn build_scoped_context<'a>(
     verbose: bool,
 ) -> Result<(String, Vec<(&'a Provider, &'a Tool)>), Box<dyn std::error::Error>> {
     // Check if scope_name is a tool
-    if let Some((provider, tool)) = visible_tools.iter().find(|(_, tool)| tool.name == scope_name) {
+    if let Some((provider, tool)) = visible_tools
+        .iter()
+        .find(|(_, tool)| tool.name == scope_name)
+    {
         let tool_details = build_scoped_tool_details(provider, tool, verbose);
         let prompt = SCOPED_HELP_SYSTEM_PROMPT
             .replace("{tool_name}", &tool.name)
@@ -960,7 +965,9 @@ async fn execute_plan_mode(
     // Build system prompt — similar to normal assist but with plan suffix
     let scopes = common::load_local_scopes_from_env()?;
     if !scopes.help_enabled() {
-        return Err("Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into());
+        return Err(
+            "Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into(),
+        );
     }
     let visible_tools =
         crate::core::scope::filter_tools_by_scope(registry.list_public_tools(), &scopes);

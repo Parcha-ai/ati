@@ -102,6 +102,30 @@ keywords = ["test"]
     .expect("write SKILL.md");
 }
 
+fn create_test_skill_for_tool(dir: &std::path::Path, name: &str, tool: &str, provider: &str) {
+    let skill_dir = dir.join(name);
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+
+    let skill_toml = format!(
+        r#"[skill]
+name = "{name}"
+version = "1.0.0"
+description = "Test skill for {name}"
+author = "test"
+tools = ["{tool}"]
+providers = ["{provider}"]
+categories = ["testing"]
+keywords = ["test"]
+"#
+    );
+    std::fs::write(skill_dir.join("skill.toml"), skill_toml).expect("write skill.toml");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("# {name}\n\nTest skill content."),
+    )
+    .expect("write SKILL.md");
+}
+
 /// GET /skills returns list of skills.
 #[tokio::test]
 async fn test_skills_list_empty() {
@@ -444,4 +468,57 @@ scope = "tool:test_tool"
 
     let resp = app.oneshot(req).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Legacy underscore JWT scopes still expose skills attached to colon-namespaced tools.
+#[tokio::test]
+async fn test_skills_list_legacy_underscore_scope_matches_colon_tool() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    std::fs::write(
+        manifests_dir.join("p.toml"),
+        r#"
+[provider]
+name = "test_provider"
+description = "p"
+base_url = "http://unused"
+auth_type = "none"
+
+[[tools]]
+name = "test_api:get_data"
+description = "t"
+endpoint = "/"
+method = "GET"
+scope = "tool:test_api:get_data"
+"#,
+    )
+    .unwrap();
+
+    let skills_dir = dir.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    create_test_skill_for_tool(
+        &skills_dir,
+        "legacy_visible_skill",
+        "test_api:get_data",
+        "test_provider",
+    );
+
+    let app = build_app_with_skills_and_jwt(&skills_dir, &manifests_dir);
+    let token = issue_test_token("tool:test_api_get_data");
+    let req = Request::builder()
+        .uri("/skills")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = common::body_json(resp.into_body()).await;
+    let skills = json.as_array().unwrap();
+    assert!(skills
+        .iter()
+        .any(|skill| skill["name"] == "legacy_visible_skill"));
 }
