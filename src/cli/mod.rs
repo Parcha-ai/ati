@@ -7,6 +7,7 @@ pub mod init;
 pub mod keys;
 pub mod plan;
 pub mod provider;
+pub mod skillati;
 pub mod skills;
 pub mod token;
 pub mod tools;

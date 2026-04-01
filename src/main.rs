@@ -73,6 +73,10 @@ pub enum Commands {
     #[command(subcommand)]
     Skill(SkillCommands),
 
+    /// Lazily read remote skills from the GCS registry without installing them
+    #[command(name = "skillati", subcommand)]
+    SkillAti(SkillAtiCommands),
+
     /// LLM-powered tool discovery — ask what tool to use
     #[command(name = "assist")]
     Assist {
@@ -275,6 +279,63 @@ pub enum SkillCommands {
         /// Force update even if content hash changed
         #[arg(long)]
         force: bool,
+    },
+    /// View remote skills via the lazy GCS registry
+    Fetch {
+        /// SkillATI-style subcommands (catalog, read, resources, cat, refs, ref, build-index)
+        #[command(subcommand)]
+        fetch: SkillAtiCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillAtiCommands {
+    /// List remote skills available from the GCS registry
+    Catalog {
+        /// Optional fuzzy search over remote skill name/description
+        #[arg(long)]
+        search: Option<String>,
+    },
+    /// Read SKILL.md for a remote skill from the GCS registry
+    Read {
+        /// Skill name
+        name: String,
+    },
+    /// List bundled resources for a remote skill without reading file contents
+    Resources {
+        /// Skill name
+        name: String,
+        /// Optional resource prefix to filter on, e.g. references/ or scripts/
+        #[arg(long)]
+        prefix: Option<String>,
+    },
+    /// Read a skill-relative file path, including nested references, scripts, or assets
+    Cat {
+        /// Skill name
+        name: String,
+        /// Skill-relative path, e.g. references/foo.md or ../other-skill/SKILL.md
+        path: String,
+    },
+    /// List available on-demand reference files for a remote skill
+    Refs {
+        /// Skill name
+        name: String,
+    },
+    /// Read a single reference file for a remote skill
+    Ref {
+        /// Skill name
+        name: String,
+        /// Reference file name under references/
+        reference: String,
+    },
+    /// Build a SkillATI catalog manifest from a local skills directory for GCS publishing
+    #[command(name = "build-index")]
+    BuildIndex {
+        /// Directory containing one subdirectory per skill, or a single skill directory
+        source_dir: String,
+        /// Optional file path to write the manifest JSON to
+        #[arg(long = "output-file")]
+        output_file: Option<String>,
     },
 }
 
@@ -578,6 +639,7 @@ async fn main() {
         Commands::Run { tool_name, args } => cli::call::execute(&cli, tool_name, args).await,
         Commands::Tool(subcmd) => cli::tools::execute(&cli, subcmd).await,
         Commands::Skill(subcmd) => cli::skills::execute(&cli, subcmd).await,
+        Commands::SkillAti(subcmd) => cli::skillati::execute(&cli, subcmd).await,
         Commands::Assist {
             args,
             plan,
