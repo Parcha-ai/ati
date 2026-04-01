@@ -18,6 +18,33 @@ use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
 use ati::proxy::server::{build_router, ProxyState};
 
+struct EnvGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: Option<&str>) -> Self {
+        let original = std::env::var(key).ok();
+        if let Some(v) = value {
+            std::env::set_var(key, v);
+        } else {
+            std::env::remove_var(key);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(val) = &self.original {
+            std::env::set_var(self.key, val);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
 // --- Helpers ---
 
 /// Create a temp directory with a single manifest pointing at the given upstream base_url.
@@ -1231,4 +1258,49 @@ async fn test_call_underscore_scope_matches_colon_tool() {
     );
     // Should also NOT be 404
     assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn skillati_catalog_without_registry_returns_503() {
+    let _env = EnvGuard::set("ATI_SKILL_REGISTRY", None);
+    let app = build_test_app("http://unused.test");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/catalog")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn skillati_resources_without_registry_returns_503() {
+    let _env = EnvGuard::set("ATI_SKILL_REGISTRY", None);
+    let app = build_test_app("http://unused.test");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/demo/resources")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn skillati_file_without_registry_returns_503() {
+    let _env = EnvGuard::set("ATI_SKILL_REGISTRY", None);
+    let app = build_test_app("http://unused.test");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/demo/file?path=SKILL.md")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use super::common;
+use crate::cli::skillati;
 use crate::core::jwt;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::scope::ScopeConfig;
@@ -99,6 +100,7 @@ pub async fn execute(cli: &Cli, subcmd: &SkillCommands) -> Result<(), Box<dyn st
         SkillCommands::Verify { name } => verify_skill(name),
         SkillCommands::Diff { source } => diff_skill(source).await,
         SkillCommands::Update { name, force } => update_skill(name, *force).await,
+        SkillCommands::Fetch { fetch } => skillati::execute(cli, fetch).await,
     }
 }
 
