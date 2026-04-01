@@ -326,19 +326,7 @@ async fn handle_call(
             }
         };
 
-        // Scope check: try both colon format (tool:finnhub:quote) and legacy
-        // underscore format (tool:finnhub_quote) for backward compatibility.
-        let underscore_scope = if let Some(after_prefix) = tool_scope.strip_prefix("tool:") {
-            // "tool:finnhub:quote" → "tool:finnhub_quote"
-            format!("tool:{}", after_prefix.replacen(':', "_", 1))
-        } else {
-            String::new()
-        };
-
-        let allowed = scopes.is_allowed(tool_scope)
-            || (!underscore_scope.is_empty() && scopes.is_allowed(&underscore_scope));
-
-        if !allowed {
+        if !scopes.is_allowed(tool_scope) {
             return (
                 StatusCode::FORBIDDEN,
                 Json(CallResponse {

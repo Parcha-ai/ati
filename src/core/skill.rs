@@ -686,9 +686,17 @@ pub fn resolve_skills<'a>(
             }
         }
 
-        // 2. Tool binding → skills covering that tool
-        if let Some(tool_name) = scope.strip_prefix("tool:") {
-            if let Some(indices) = skill_registry.tool_index.get(tool_name) {
+    }
+
+    // 2-4. Tool/provider/category bindings from visible tools.
+    // Use the shared tool filter so legacy underscore JWT scopes remain compatible
+    // with colon-namespaced tools and their attached skills.
+    if !scopes.is_wildcard() {
+        for (provider, tool) in crate::core::scope::filter_tools_by_scope(
+            manifest_registry.list_public_tools(),
+            scopes,
+        ) {
+            if let Some(indices) = skill_registry.tool_index.get(&tool.name) {
                 for &idx in indices {
                     if seen.insert(idx) {
                         resolved_indices.push(idx);
@@ -696,23 +704,19 @@ pub fn resolve_skills<'a>(
                 }
             }
 
-            // 3. Provider binding → skills covering the tool's provider
-            if let Some((provider, _)) = manifest_registry.get_tool(tool_name) {
-                if let Some(indices) = skill_registry.provider_index.get(&provider.name) {
+            if let Some(indices) = skill_registry.provider_index.get(&provider.name) {
+                for &idx in indices {
+                    if seen.insert(idx) {
+                        resolved_indices.push(idx);
+                    }
+                }
+            }
+
+            if let Some(category) = &provider.category {
+                if let Some(indices) = skill_registry.category_index.get(category) {
                     for &idx in indices {
                         if seen.insert(idx) {
                             resolved_indices.push(idx);
-                        }
-                    }
-                }
-
-                // 4. Category binding → skills covering the provider's category
-                if let Some(category) = &provider.category {
-                    if let Some(indices) = skill_registry.category_index.get(category) {
-                        for &idx in indices {
-                            if seen.insert(idx) {
-                                resolved_indices.push(idx);
-                            }
                         }
                     }
                 }
@@ -1445,6 +1449,46 @@ description = "Test"
         let resolved = resolve_skills(&skill_reg, &manifest_reg, &scopes);
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].name, "sanctions-skill");
+    }
+
+    #[test]
+    fn test_resolve_skills_legacy_underscore_scope_matches_colon_tool_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_skill(tmp.path(), "colon-skill", &["test_api:get_data"], &[], &[]);
+
+        let skill_reg = SkillRegistry::load(tmp.path()).unwrap();
+
+        let manifest_tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            manifest_tmp.path().join("test.toml"),
+            r#"
+[provider]
+name = "test_provider"
+description = "Test provider"
+base_url = "http://unused"
+auth_type = "none"
+
+[[tools]]
+name = "test_api:get_data"
+description = "test"
+endpoint = "/"
+method = "GET"
+scope = "tool:test_api:get_data"
+"#,
+        )
+        .unwrap();
+        let manifest_reg = ManifestRegistry::load(manifest_tmp.path()).unwrap();
+
+        let scopes = ScopeConfig {
+            scopes: vec!["tool:test_api_get_data".to_string()],
+            sub: String::new(),
+            expires_at: 0,
+            rate_config: None,
+        };
+
+        let resolved = resolve_skills(&skill_reg, &manifest_reg, &scopes);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "colon-skill");
     }
 
     #[test]

@@ -1318,3 +1318,97 @@ async fn test_call_underscore_scope_matches_colon_tool() {
     // Should also NOT be 404
     assert_ne!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+/// Legacy underscore JWT scopes still expose colon-namespaced tools in discovery.
+#[tokio::test]
+async fn test_tools_list_legacy_underscore_scope_includes_colon_tool() {
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("tool:test_api_get_data");
+
+    let req = Request::builder()
+        .uri("/tools")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    let tools = json.as_array().unwrap();
+    assert!(tools.iter().any(|tool| tool["name"] == "test_api:get_data"));
+}
+
+/// Legacy underscore JWT scopes still expose colon-namespaced tools in MCP tools/list.
+#[tokio::test]
+async fn test_mcp_tools_list_legacy_underscore_scope_includes_colon_tool() {
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("tool:test_api_get_data");
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    let tools = json["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|tool| tool["name"] == "test_api:get_data"));
+}
+
+/// Legacy underscore JWT scopes are accepted by MCP tools/call just like /call.
+#[tokio::test]
+async fn test_mcp_tools_call_legacy_underscore_scope_matches_colon_tool() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/data"))
+        .and(query_param("id", "123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "123",
+            "ok": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let app = build_test_app_with_jwt(&mock_server.uri());
+    let token = issue_test_token("tool:test_api_get_data");
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "test_api:get_data",
+            "arguments": {"id": "123"}
+        }
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp.into_body()).await;
+    assert!(json.get("error").is_none(), "unexpected MCP error: {json}");
+    assert!(
+        json["result"].is_object(),
+        "expected MCP result object after auth passes: {json}"
+    );
+}
