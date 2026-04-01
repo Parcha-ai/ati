@@ -740,6 +740,25 @@ pub fn resolve_skills<'a>(
         .collect()
 }
 
+/// Return the skills visible under the provided scopes.
+///
+/// Wildcard scopes can see the full registry. Non-wildcard scopes can see
+/// explicitly scoped skills plus skills reachable through tool/provider/category
+/// bindings from their allowed tools.
+pub fn visible_skills<'a>(
+    skill_registry: &'a SkillRegistry,
+    manifest_registry: &ManifestRegistry,
+    scopes: &ScopeConfig,
+) -> Vec<&'a SkillMeta> {
+    if scopes.is_wildcard() {
+        return skill_registry.list_skills().iter().collect();
+    }
+
+    let mut visible = resolve_skills(skill_registry, manifest_registry, scopes);
+    visible.sort_by(|a, b| a.name.cmp(&b.name));
+    visible
+}
+
 /// Maximum size of skill content injected into LLM system prompts (32 KB).
 /// Prevents prompt injection via extremely large SKILL.md files.
 const MAX_SKILL_INJECT_SIZE: usize = 32 * 1024;

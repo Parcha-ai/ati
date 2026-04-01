@@ -119,22 +119,22 @@ echo ""
 echo "=== Test 3: local mode fallback ==="
 OUTPUT=$(ATI_DIR=/tmp/ati-e2e-nonexistent "$ATI_BIN" run web_search --query "test" 2>&1 || true)
 
-if echo "$OUTPUT" | grep -qi "manifest\|directory\|no manifests"; then
-    echo "PASS: Local mode attempted (manifest error expected)"
+if echo "$OUTPUT" | grep -qi "unknown tool\|manifest\|directory\|no manifests"; then
+    echo "PASS: Local mode attempted"
 else
-    echo "FAIL: Expected local mode manifest error. Got: $OUTPUT"
+    echo "FAIL: Expected a local-mode error. Got: $OUTPUT"
     exit 1
 fi
 
 # --- Test 4: verbose output shows mode ---
 echo ""
 echo "=== Test 4: verbose mode detection ==="
-OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/ati-e2e-nonexistent "$ATI_BIN" --verbose --output json call test_tool 2>&1)
+OUTPUT=$(ATI_PROXY_URL="http://127.0.0.1:$PROXY_PORT" ATI_DIR=/tmp/ati-e2e-nonexistent "$ATI_BIN" --verbose --output json run test_tool 2>&1)
 
-if echo "$OUTPUT" | grep -q "Mode: proxy"; then
+if echo "$OUTPUT" | grep -q "mode: proxy"; then
     echo "PASS: Verbose shows proxy mode"
 else
-    echo "FAIL: Expected 'Mode: proxy' in verbose output. Got: $OUTPUT"
+    echo "FAIL: Expected 'mode: proxy' in verbose output. Got: $OUTPUT"
     exit 1
 fi
 

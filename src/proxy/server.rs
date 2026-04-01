@@ -6,7 +6,7 @@
 /// Usage: `ati proxy --port 8080 [--ati-dir ~/.ati]`
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Extension, State},
     http::{Request as HttpRequest, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -24,7 +24,7 @@ use crate::core::auth_generator::{AuthCache, GenContext};
 use crate::core::http;
 use crate::core::jwt::{self, JwtConfig, TokenClaims};
 use crate::core::keyring::Keyring;
-use crate::core::manifest::ManifestRegistry;
+use crate::core::manifest::{ManifestRegistry, Provider, Tool};
 use crate::core::mcp_client;
 use crate::core::response;
 use crate::core::scope::ScopeConfig;
@@ -198,6 +198,36 @@ pub struct ToolsQuery {
 }
 
 // --- Handlers ---
+
+fn scopes_for_request(claims: Option<&TokenClaims>, state: &ProxyState) -> ScopeConfig {
+    match claims {
+        Some(claims) => ScopeConfig::from_jwt(claims),
+        None if state.jwt_config.is_none() => ScopeConfig::unrestricted(),
+        None => ScopeConfig {
+            scopes: Vec::new(),
+            sub: String::new(),
+            expires_at: 0,
+            rate_config: None,
+        },
+    }
+}
+
+fn visible_tools_for_scopes<'a>(
+    state: &'a ProxyState,
+    scopes: &ScopeConfig,
+) -> Vec<(&'a Provider, &'a Tool)> {
+    crate::core::scope::filter_tools_by_scope(state.registry.list_public_tools(), scopes)
+}
+
+fn visible_skill_names(
+    state: &ProxyState,
+    scopes: &ScopeConfig,
+) -> std::collections::HashSet<String> {
+    skill::visible_skills(&state.skill_registry, &state.registry, scopes)
+        .into_iter()
+        .map(|skill| skill.name.clone())
+        .collect()
+}
 
 async fn handle_call(
     State(state): State<Arc<ProxyState>>,
@@ -480,9 +510,22 @@ async fn handle_call(
 
 async fn handle_help(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     Json(req): Json<HelpRequest>,
 ) -> impl IntoResponse {
     tracing::debug!(query = %req.query, tool = ?req.tool, "POST /help");
+
+    let claims = claims.map(|Extension(claims)| claims);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    if !scopes.help_enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(HelpResponse {
+                content: String::new(),
+                error: Some("Help is not enabled in your scopes.".into()),
+            }),
+        );
+    }
 
     let (llm_provider, llm_tool) = match state.registry.get_tool("_chat_completion") {
         Some(pt) => pt,
@@ -514,7 +557,6 @@ async fn handle_help(
         }
     };
 
-    let scopes = ScopeConfig::unrestricted();
     let resolved_skills = skill::resolve_skills(&state.skill_registry, &state.registry, &scopes);
     let skills_section = if resolved_skills.is_empty() {
         String::new()
@@ -526,23 +568,25 @@ async fn handle_help(
     };
 
     // Build system prompt — scoped or unscoped
+    let visible_tools = visible_tools_for_scopes(&state, &scopes);
     let system_prompt = if let Some(ref tool_name) = req.tool {
         // Scoped mode: narrow tools to the specified tool or provider
-        match build_scoped_prompt(tool_name, &state.registry, &skills_section) {
+        match build_scoped_prompt(tool_name, &visible_tools, &skills_section) {
             Some(prompt) => prompt,
             None => {
-                // Fall back to unscoped if tool/provider not found
-                tracing::debug!(scope = %tool_name, "scope not found, falling back to unscoped");
-                let all_tools = state.registry.list_public_tools();
-                let tools_context = build_tool_context(&all_tools);
-                HELP_SYSTEM_PROMPT
-                    .replace("{tools}", &tools_context)
-                    .replace("{skills_section}", &skills_section)
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(HelpResponse {
+                        content: String::new(),
+                        error: Some(format!(
+                            "Scope '{tool_name}' is not visible in your current scopes."
+                        )),
+                    }),
+                );
             }
         }
     } else {
-        let all_tools = state.registry.list_public_tools();
-        let tools_context = build_tool_context(&all_tools);
+        let tools_context = build_tool_context(&visible_tools);
         HELP_SYSTEM_PROMPT
             .replace("{tools}", &tools_context)
             .replace("{skills_section}", &skills_section)
@@ -658,8 +702,11 @@ async fn handle_jwks(State(state): State<Arc<ProxyState>>) -> impl IntoResponse 
 
 async fn handle_mcp(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     Json(msg): Json<Value>,
 ) -> impl IntoResponse {
+    let claims = claims.map(|Extension(claims)| claims);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
 
@@ -683,8 +730,8 @@ async fn handle_mcp(
         "notifications/initialized" => (StatusCode::ACCEPTED, Json(Value::Null)),
 
         "tools/list" => {
-            let all_tools = state.registry.list_public_tools();
-            let mcp_tools: Vec<Value> = all_tools
+            let visible_tools = visible_tools_for_scopes(&state, &scopes);
+            let mcp_tools: Vec<Value> = visible_tools
                 .iter()
                 .map(|(_provider, tool)| {
                     serde_json::json!({
@@ -723,11 +770,27 @@ async fn handle_mcp(
                 }
             };
 
+            if let Some(tool_scope) = &_tool.scope {
+                if !scopes.is_allowed(tool_scope) {
+                    return jsonrpc_error(
+                        id,
+                        -32001,
+                        &format!("Access denied: '{}' is not in your scopes", _tool.name),
+                    );
+                }
+            }
+
             tracing::debug!(%tool_name, provider = %provider.name, "MCP tools/call");
 
             let mcp_gen_ctx = GenContext {
-                jwt_sub: "dev".into(),
-                jwt_scope: "*".into(),
+                jwt_sub: claims
+                    .as_ref()
+                    .map(|claims| claims.sub.clone())
+                    .unwrap_or_else(|| "dev".into()),
+                jwt_scope: claims
+                    .as_ref()
+                    .map(|claims| claims.scope.clone())
+                    .unwrap_or_else(|| "*".into()),
                 tool_name: tool_name.to_string(),
                 timestamp: crate::core::jwt::now_secs(),
             };
@@ -843,6 +906,7 @@ fn jsonrpc_error(id: Option<Value>, code: i64, message: &str) -> (StatusCode, Js
 /// GET /tools — list available tools with optional filters.
 async fn handle_tools_list(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Query(query): axum::extract::Query<ToolsQuery>,
 ) -> impl IntoResponse {
     tracing::debug!(
@@ -851,7 +915,9 @@ async fn handle_tools_list(
         "GET /tools"
     );
 
-    let all_tools = state.registry.list_public_tools();
+    let claims = claims.map(|Extension(claims)| claims);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let all_tools = visible_tools_for_scopes(&state, &scopes);
 
     let tools: Vec<Value> = all_tools
         .iter()
@@ -890,11 +956,18 @@ async fn handle_tools_list(
 /// GET /tools/:name — get detailed info about a specific tool.
 async fn handle_tool_info(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     tracing::debug!(tool = %name, "GET /tools/:name");
 
-    match state.registry.get_tool(&name) {
+    let claims = claims.map(|Extension(claims)| claims);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+
+    match state.registry.get_tool(&name).filter(|(_, tool)| match &tool.scope {
+        Some(scope) => scopes.is_allowed(scope),
+        None => true,
+    }) {
         Some((provider, tool)) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -922,6 +995,7 @@ async fn handle_tool_info(
 
 async fn handle_skills_list(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Query(query): axum::extract::Query<SkillsQuery>,
 ) -> impl IntoResponse {
     tracing::debug!(
@@ -932,16 +1006,45 @@ async fn handle_skills_list(
         "GET /skills"
     );
 
+    let claims = claims.map(|Extension(claims)| claims);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+
     let skills: Vec<&skill::SkillMeta> = if let Some(search_query) = &query.search {
-        state.skill_registry.search(search_query)
+        state
+            .skill_registry
+            .search(search_query)
+            .into_iter()
+            .filter(|skill| visible_names.contains(&skill.name))
+            .collect()
     } else if let Some(cat) = &query.category {
-        state.skill_registry.skills_for_category(cat)
+        state
+            .skill_registry
+            .skills_for_category(cat)
+            .into_iter()
+            .filter(|skill| visible_names.contains(&skill.name))
+            .collect()
     } else if let Some(prov) = &query.provider {
-        state.skill_registry.skills_for_provider(prov)
+        state
+            .skill_registry
+            .skills_for_provider(prov)
+            .into_iter()
+            .filter(|skill| visible_names.contains(&skill.name))
+            .collect()
     } else if let Some(t) = &query.tool {
-        state.skill_registry.skills_for_tool(t)
+        state
+            .skill_registry
+            .skills_for_tool(t)
+            .into_iter()
+            .filter(|skill| visible_names.contains(&skill.name))
+            .collect()
     } else {
-        state.skill_registry.list_skills().iter().collect()
+        state
+            .skill_registry
+            .list_skills()
+            .iter()
+            .filter(|skill| visible_names.contains(&skill.name))
+            .collect()
     };
 
     let json: Vec<Value> = skills
@@ -964,12 +1067,21 @@ async fn handle_skills_list(
 
 async fn handle_skill_detail(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<SkillDetailQuery>,
 ) -> impl IntoResponse {
     tracing::debug!(%name, meta = ?query.meta, refs = ?query.refs, "GET /skills/:name");
 
-    let skill_meta = match state.skill_registry.get_skill(&name) {
+    let claims = claims.map(|Extension(claims)| claims);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+
+    let skill_meta = match state
+        .skill_registry
+        .get_skill(&name)
+        .filter(|skill| visible_names.contains(&skill.name))
+    {
         Some(s) => s,
         None => {
             return (
@@ -1033,9 +1145,20 @@ async fn handle_skill_detail(
 /// Binary files are base64-encoded; text files are returned as-is.
 async fn handle_skill_bundle(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     tracing::debug!(skill = %name, "GET /skills/:name/bundle");
+
+    let claims = claims.map(|Extension(claims)| claims);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+    if !visible_names.contains(&name) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Skill '{name}' not found")})),
+        );
+    }
 
     let files = match state.skill_registry.bundle_files(&name) {
         Ok(f) => f,
@@ -1077,6 +1200,7 @@ async fn handle_skill_bundle(
 /// Response: `{"skills": {...}, "missing": [...]}`
 async fn handle_skills_bundle_batch(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     Json(req): Json<SkillBundleBatchRequest>,
 ) -> impl IntoResponse {
     const MAX_BATCH: usize = 50;
@@ -1091,10 +1215,18 @@ async fn handle_skills_bundle_batch(
 
     tracing::debug!(names = ?req.names, "POST /skills/bundle");
 
+    let claims = claims.map(|Extension(claims)| claims);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+
     let mut result = serde_json::Map::new();
     let mut missing: Vec<String> = Vec::new();
 
     for name in &req.names {
+        if !visible_names.contains(name) {
+            missing.push(name.clone());
+            continue;
+        }
         let files = match state.skill_registry.bundle_files(name) {
             Ok(f) => f,
             Err(_) => {
@@ -1128,19 +1260,27 @@ async fn handle_skills_bundle_batch(
 
 async fn handle_skills_resolve(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     Json(req): Json<SkillResolveRequest>,
 ) -> impl IntoResponse {
     tracing::debug!(scopes = ?req.scopes, include_content = req.include_content, "POST /skills/resolve");
 
     let include_content = req.include_content;
-    let scopes = ScopeConfig {
+    let request_scopes = ScopeConfig {
         scopes: req.scopes,
         sub: String::new(),
         expires_at: 0,
         rate_config: None,
     };
+    let claims = claims.map(|Extension(claims)| claims);
+    let caller_scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &caller_scopes);
 
-    let resolved = skill::resolve_skills(&state.skill_registry, &state.registry, &scopes);
+    let resolved: Vec<&skill::SkillMeta> =
+        skill::resolve_skills(&state.skill_registry, &state.registry, &request_scopes)
+            .into_iter()
+            .filter(|skill| visible_names.contains(&skill.name))
+            .collect();
 
     let json: Vec<Value> = resolved
         .iter()
@@ -1544,11 +1684,12 @@ fn build_tool_context(
 /// Returns None if the scope_name doesn't match any tool or provider.
 fn build_scoped_prompt(
     scope_name: &str,
-    registry: &ManifestRegistry,
+    visible_tools: &[(&Provider, &Tool)],
     skills_section: &str,
 ) -> Option<String> {
     // Check if scope_name is a tool
-    if let Some((provider, tool)) = registry.get_tool(scope_name) {
+    if let Some((provider, tool)) = visible_tools.iter().find(|(_, tool)| tool.name == scope_name)
+    {
         let mut details = format!(
             "**Name**: `{}`\n**Provider**: {} (handler: {})\n**Description**: {}\n",
             tool.name, provider.name, provider.handler, tool.description
@@ -1600,11 +1741,12 @@ fn build_scoped_prompt(
     }
 
     // Check if scope_name is a provider
-    if registry.has_provider(scope_name) {
-        let tools = registry.tools_by_provider(scope_name);
-        if tools.is_empty() {
-            return None;
-        }
+    let tools: Vec<(&Provider, &Tool)> = visible_tools
+        .iter()
+        .copied()
+        .filter(|(provider, _)| provider.name == scope_name)
+        .collect();
+    if !tools.is_empty() {
         let tools_context = build_tool_context(&tools);
         let prompt = format!(
             "You are an expert assistant for the `{}` provider's tools, accessed via the `ati` CLI.\n\n\
