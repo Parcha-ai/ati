@@ -11,6 +11,7 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ati::core::auth_generator::AuthCache;
+use ati::core::jwt::{self, AtiNamespace, TokenClaims};
 use ati::core::keyring::Keyring;
 use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
@@ -126,6 +127,29 @@ async fn body_json(body: Body) -> Value {
     serde_json::from_slice(&bytes).expect("parse body as JSON")
 }
 
+fn issue_help_test_token(scope: &str) -> String {
+    let config = jwt::config_from_secret(
+        b"test-secret-key-32-bytes-long!!!",
+        None,
+        "ati-proxy".into(),
+    );
+    let now = jwt::now_secs();
+    let claims = TokenClaims {
+        iss: None,
+        sub: "test-agent".into(),
+        aud: "ati-proxy".into(),
+        iat: now,
+        exp: now + 3600,
+        jti: None,
+        scope: scope.into(),
+        ati: Some(AtiNamespace {
+            v: 1,
+            rate: std::collections::HashMap::new(),
+        }),
+    };
+    jwt::issue(&claims, &config).unwrap()
+}
+
 // ============================================================
 // Proxy /help endpoint tests (in-process via axum Router)
 // ============================================================
@@ -237,6 +261,51 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
     // Verify the request was made to the LLM (mock expects exactly 1 call)
     // If this passes, the system prompt with tools was sent correctly
     llm_mock.verify().await;
+}
+
+/// Proxy /help requires the `help` scope when JWT auth is configured.
+#[tokio::test]
+async fn test_proxy_help_requires_help_scope() {
+    let llm_mock = MockServer::start().await;
+
+    let dir = create_test_manifests_with_llm("http://unused.test", &llm_mock.uri());
+    let manifests_dir = dir.path().join("manifests");
+    let registry = ManifestRegistry::load(&manifests_dir).expect("load manifests");
+    let (_, keyring, _) = create_test_keyring(dir.path());
+
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring,
+        jwt_config: Some(jwt::config_from_secret(
+            b"test-secret-key-32-bytes-long!!!",
+            None,
+            "ati-proxy".into(),
+        )),
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+    });
+    let app = build_router(state);
+
+    let token = issue_help_test_token("tool:get_stock_quote");
+    let body = serde_json::json!({"query": "What is Apple's stock price?"});
+    let req = Request::builder()
+        .method("POST")
+        .uri("/help")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let json = body_json(resp.into_body()).await;
+    assert!(json["error"]
+        .as_str()
+        .unwrap()
+        .contains("Help is not enabled"));
 }
 
 /// Proxy /help with missing cerebras key in keyring returns 503.

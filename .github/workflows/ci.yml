@@ -11,14 +11,23 @@ env:
 
 jobs:
   test:
-    name: Test
+    name: Test and E2E
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: stable
-      - run: cargo test
+      - name: Rust test suite
+        run: cargo test --quiet
+      - name: Build debug binary for E2E scripts
+        run: cargo build
+      - name: Proxy mode E2E
+        run: bash scripts/test_proxy_e2e.sh
+      - name: Skills E2E
+        run: ATI_BIN=./target/debug/ati bash scripts/test_skills_e2e.sh
+      - name: Proxy server E2E
+        run: bash scripts/test_proxy_server_e2e.sh
 
   deny:
     name: cargo-deny

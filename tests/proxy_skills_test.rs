@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 use ati::core::auth_generator::AuthCache;
+use ati::core::jwt::{self, AtiNamespace, JwtConfig, TokenClaims};
 use ati::core::keyring::Keyring;
 use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
@@ -31,6 +32,50 @@ fn build_app_with_skills(
         auth_cache: AuthCache::new(),
     });
     build_router(state)
+}
+
+fn build_app_with_skills_and_jwt(
+    skills_dir: &std::path::Path,
+    manifests_dir: &std::path::Path,
+) -> axum::Router {
+    let registry = ManifestRegistry::load(manifests_dir).expect("load manifests");
+    let skill_registry = SkillRegistry::load(skills_dir).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring: Keyring::empty(),
+        jwt_config: Some(test_jwt_config()),
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+    });
+    build_router(state)
+}
+
+fn test_jwt_config() -> JwtConfig {
+    jwt::config_from_secret(
+        b"test-secret-key-32-bytes-long!!!",
+        None,
+        "ati-proxy".into(),
+    )
+}
+
+fn issue_test_token(scope: &str) -> String {
+    let config = test_jwt_config();
+    let now = jwt::now_secs();
+    let claims = TokenClaims {
+        iss: None,
+        sub: "test-agent".into(),
+        aud: "ati-proxy".into(),
+        iat: now,
+        exp: now + 3600,
+        jti: None,
+        scope: scope.into(),
+        ati: Some(AtiNamespace {
+            v: 1,
+            rate: std::collections::HashMap::new(),
+        }),
+    };
+    jwt::issue(&claims, &config).unwrap()
 }
 
 fn create_test_skill(dir: &std::path::Path, name: &str) {
@@ -312,4 +357,91 @@ method = "GET"
         "resolve_skill should be in resolved skills: {:?}",
         skills
     );
+}
+
+/// JWT-scoped /skills only exposes visible skills.
+#[tokio::test]
+async fn test_skills_list_filtered_by_jwt_scopes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    std::fs::write(
+        manifests_dir.join("p.toml"),
+        r#"
+[provider]
+name = "test_provider"
+description = "p"
+base_url = "http://unused"
+auth_type = "none"
+
+[[tools]]
+name = "test_tool"
+description = "t"
+endpoint = "/"
+method = "GET"
+scope = "tool:test_tool"
+"#,
+    )
+    .unwrap();
+
+    let skills_dir = dir.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    create_test_skill(&skills_dir, "visible_skill");
+
+    let app = build_app_with_skills_and_jwt(&skills_dir, &manifests_dir);
+    let token = issue_test_token("tool:other_tool");
+    let req = Request::builder()
+        .uri("/skills")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = common::body_json(resp.into_body()).await;
+    assert!(json.as_array().unwrap().is_empty());
+}
+
+/// JWT-scoped /skills/:name hides skills outside the caller scopes.
+#[tokio::test]
+async fn test_skill_detail_hidden_when_out_of_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    std::fs::write(
+        manifests_dir.join("p.toml"),
+        r#"
+[provider]
+name = "test_provider"
+description = "p"
+base_url = "http://unused"
+auth_type = "none"
+
+[[tools]]
+name = "test_tool"
+description = "t"
+endpoint = "/"
+method = "GET"
+scope = "tool:test_tool"
+"#,
+    )
+    .unwrap();
+
+    let skills_dir = dir.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    create_test_skill(&skills_dir, "hidden_skill");
+
+    let app = build_app_with_skills_and_jwt(&skills_dir, &manifests_dir);
+    let token = issue_test_token("tool:other_tool");
+    let req = Request::builder()
+        .uri("/skills/hidden_skill")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
