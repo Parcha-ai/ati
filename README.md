@@ -1,6 +1,6 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Parcha-ai/ati/ci.yml?branch=main&label=CI)](https://github.com/Parcha-ai/ati/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/Parcha-ai/ati)](LICENSE)
-[![642 tests](https://img.shields.io/badge/tests-642-brightgreen)](#building)
+[![663 tests](https://img.shields.io/badge/tests-663-brightgreen)](#building)
 [![PyPI](https://img.shields.io/pypi/v/ati-client)](https://pypi.org/project/ati-client/)
 [![crates.io](https://img.shields.io/crates/v/agent-tools-interface)](https://crates.io/crates/agent-tools-interface)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-blue)](#building)
@@ -288,6 +288,8 @@ export ATI_SESSION_TOKEN=eyJhbG...
 ati run clinicaltrials:searchStudies --query.term "cancer"  # ✓ allowed
 ati run ca_person_sanctions_search --search_term "Name"      # ✗ denied
 ```
+
+When JWT validation is configured, ATI treats tokens strictly: invalid or missing `ATI_SESSION_TOKEN` values are rejected instead of being partially trusted. If JWT validation is not configured, ATI stays in unrestricted dev mode for local workflows.
 
 ---
 
@@ -1041,7 +1043,7 @@ cargo build                                            # Debug
 cargo build --release                                  # Release
 cargo build --release --target x86_64-unknown-linux-musl  # Static binary (no glibc)
 
-cargo test                                             # 642 tests
+cargo test                                             # 663 tests
 bash scripts/test_skills_e2e.sh                        # Skill e2e tests
 cargo test --test mcp_live_test -- --ignored           # Live MCP tests (needs API keys)
 ```

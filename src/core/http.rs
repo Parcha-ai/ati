@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::net::ToSocketAddrs;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -52,45 +53,31 @@ pub fn validate_url_not_private(url: &str) -> Result<(), HttpError> {
     if !enforce && !warn_only {
         return Ok(());
     }
-    // Parse just the host part
-    let host = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("");
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(()),
+    };
+    let host = parsed.host_str().unwrap_or("");
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let ip_host = host.trim_matches(['[', ']']);
 
     if host.is_empty() {
         return Ok(());
     }
 
-    let mut is_private = false;
-
-    // Check literal IP addresses
-    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
-        if ip.is_loopback()           // 127.0.0.0/8
-            || ip.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-            || ip.is_link_local()     // 169.254.0.0/16
-            || ip.is_unspecified()    // 0.0.0.0
-            || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127)
-        // CGNAT 100.64.0.0/10
-        {
-            is_private = true;
-        }
-    }
-
     // Check common internal hostnames
     let host_lower = host.to_lowercase();
-    if host_lower == "localhost"
+    let mut is_private = host_lower == "localhost"
         || host_lower == "metadata.google.internal"
         || host_lower.ends_with(".internal")
-        || host_lower.ends_with(".local")
-    {
-        is_private = true;
+        || host_lower.ends_with(".local");
+
+    if !is_private {
+        if let Ok(ip) = ip_host.parse::<std::net::IpAddr>() {
+            is_private = is_private_ip(ip);
+        } else if let Ok(addrs) = (ip_host, port).to_socket_addrs() {
+            is_private = addrs.into_iter().any(|addr| is_private_ip(addr.ip()));
+        }
     }
 
     if is_private {
@@ -304,7 +291,7 @@ fn percent_encode_path_segment(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len());
     for byte in s.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 encoded.push(byte as char);
             }
             _ => {
@@ -313,6 +300,24 @@ fn percent_encode_path_segment(s: &str) -> String {
         }
     }
     encoded
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127)
+        }
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+    }
 }
 
 /// Convert a serde_json::Value to a URL-safe string.
@@ -729,11 +734,11 @@ mod tests {
     }
 
     #[test]
-    fn test_substitute_path_params_allows_slash() {
+    fn test_substitute_path_params_encodes_slash() {
         let mut args = HashMap::new();
         args.insert("id".to_string(), "fal-ai/flux/dev".to_string());
         let result = substitute_path_params("/resource/{id}", &args).unwrap();
-        assert_eq!(result, "/resource/fal-ai/flux/dev");
+        assert_eq!(result, "/resource/fal-ai%2Fflux%2Fdev");
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use super::common;
-use crate::core::jwt;
 use crate::core::manifest::{ManifestRegistry, Provider, Tool};
-use crate::core::scope::{self, ScopeConfig};
+use crate::core::scope;
 use crate::core::skill::SkillRegistry;
 use crate::proxy::client as proxy_client;
 use crate::Cli;
@@ -199,21 +198,10 @@ async fn execute_local(
     }
 
     // Load scopes from JWT
-    let scopes = match std::env::var("ATI_SESSION_TOKEN") {
-        Ok(token) if !token.is_empty() => {
-            match jwt::inspect(&token) {
-                Ok(claims) => {
-                    let s = ScopeConfig::from_jwt(&claims);
-                    if !s.help_enabled() {
-                        return Err("Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into());
-                    }
-                    s
-                }
-                Err(_) => ScopeConfig::unrestricted(),
-            }
-        }
-        _ => ScopeConfig::unrestricted(),
-    };
+    let scopes = common::load_local_scopes_from_env()?;
+    if !scopes.help_enabled() {
+        return Err("Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into());
+    }
 
     // Load skills
     let skills_dir = ati_dir.join("skills");
@@ -221,16 +209,17 @@ async fn execute_local(
         .unwrap_or_else(|_| SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap());
 
     // Build system prompt — scoped vs unscoped
+    let all_tools = registry.list_public_tools();
+    let visible_tools = scope::filter_tools_by_scope(all_tools, &scopes);
+
     let (system_prompt, scoped_tools) = if let Some(ref tool_name) = scope_name {
         // For scoped mode, find skills for the specific tool/provider
         let skills_section =
             build_skills_for_tools(&skill_registry, &[tool_name.as_str()], cli.verbose);
-        build_scoped_context(tool_name, &registry, &skills_section, cli.verbose)?
+        build_scoped_context(tool_name, &visible_tools, &skills_section, cli.verbose)?
     } else {
         // Unscoped: all public tools, pre-filtered by query
-        let all_tools = registry.list_public_tools();
-        let scoped = scope::filter_tools_by_scope(all_tools, &scopes);
-        let scoped = prefilter_tools_by_query(&scoped, &query, 50);
+        let scoped = prefilter_tools_by_query(&visible_tools, &query, 50);
         let tools_context = build_tool_context(&scoped, false);
 
         // Find skills for the pre-filtered tools (not just JWT scopes)
@@ -281,26 +270,27 @@ async fn execute_local(
 /// Returns (system_prompt, tools_in_context).
 fn build_scoped_context<'a>(
     scope_name: &str,
-    registry: &'a ManifestRegistry,
+    visible_tools: &'a [(&'a Provider, &'a Tool)],
     skills_section: &str,
     verbose: bool,
 ) -> Result<(String, Vec<(&'a Provider, &'a Tool)>), Box<dyn std::error::Error>> {
     // Check if scope_name is a tool
-    if let Some((provider, tool)) = registry.get_tool(scope_name) {
+    if let Some((provider, tool)) = visible_tools.iter().find(|(_, tool)| tool.name == scope_name) {
         let tool_details = build_scoped_tool_details(provider, tool, verbose);
         let prompt = SCOPED_HELP_SYSTEM_PROMPT
             .replace("{tool_name}", &tool.name)
             .replace("{tool_details}", &tool_details)
             .replace("{skills_section}", skills_section);
-        return Ok((prompt, vec![(provider, tool)]));
+        return Ok((prompt, vec![(*provider, *tool)]));
     }
 
     // Check if scope_name is a provider
-    if registry.has_provider(scope_name) {
-        let tools = registry.tools_by_provider(scope_name);
-        if tools.is_empty() {
-            return Err(format!("Provider '{}' has no tools registered.", scope_name).into());
-        }
+    let tools: Vec<(&Provider, &Tool)> = visible_tools
+        .iter()
+        .copied()
+        .filter(|(provider, _)| provider.name == scope_name)
+        .collect();
+    if !tools.is_empty() {
         // For provider scope, build detailed context for all tools in the provider
         let tools_context = build_tool_context(&tools, true);
         let prompt = format!(
@@ -312,7 +302,7 @@ fn build_scoped_context<'a>(
         return Ok((prompt, tools));
     }
 
-    Err(format!("'{}' is not a known tool or provider.", scope_name).into())
+    Err(format!("'{}' is not visible in your current scopes.", scope_name).into())
 }
 
 /// Build detailed context for a single tool (used in scoped mode).
@@ -968,15 +958,19 @@ async fn execute_plan_mode(
         });
 
     // Build system prompt — similar to normal assist but with plan suffix
+    let scopes = common::load_local_scopes_from_env()?;
+    if !scopes.help_enabled() {
+        return Err("Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into());
+    }
+    let visible_tools =
+        crate::core::scope::filter_tools_by_scope(registry.list_public_tools(), &scopes);
+
     let (system_prompt, _scoped_tools) = if let Some(ref tool_name) = scope_name {
         let skills_section =
             build_skills_for_tools(&skill_registry, &[tool_name.as_str()], cli.verbose);
-        build_scoped_context(tool_name, &registry, &skills_section, cli.verbose)?
+        build_scoped_context(tool_name, &visible_tools, &skills_section, cli.verbose)?
     } else {
-        let all_tools = registry.list_public_tools();
-        let scoped =
-            crate::core::scope::filter_tools_by_scope(all_tools, &ScopeConfig::unrestricted());
-        let scoped = prefilter_tools_by_query(&scoped, &query, 50);
+        let scoped = prefilter_tools_by_query(&visible_tools, &query, 50);
         let tools_context = build_tool_context(&scoped, false);
         let tool_names: Vec<&str> = scoped.iter().map(|(_, t)| t.name.as_str()).collect();
         let skills_section = build_skills_for_tools(&skill_registry, &tool_names, cli.verbose);

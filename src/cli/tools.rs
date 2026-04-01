@@ -1,21 +1,9 @@
 use super::common;
-use crate::core::jwt;
 use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::scope::{self, ScopeConfig};
 use crate::output;
 use crate::{Cli, OutputFormat, ToolCommands};
-
-/// Load scopes from ATI_SESSION_TOKEN JWT, or return unrestricted.
-fn load_scopes_from_env() -> ScopeConfig {
-    match std::env::var("ATI_SESSION_TOKEN") {
-        Ok(token) if !token.is_empty() => match jwt::inspect(&token) {
-            Ok(claims) => ScopeConfig::from_jwt(&claims),
-            Err(_) => ScopeConfig::unrestricted(),
-        },
-        _ => ScopeConfig::unrestricted(),
-    }
-}
 
 /// Discover and register tools from all MCP providers.
 pub(crate) async fn discover_mcp_tools(
@@ -45,11 +33,11 @@ pub async fn execute(cli: &Cli, subcmd: &ToolCommands) -> Result<(), Box<dyn std
     discover_mcp_tools(&mut registry, &keyring, cli.verbose).await;
 
     // Load scopes from JWT
-    let scopes = load_scopes_from_env();
+    let scopes = common::load_local_scopes_from_env()?;
 
     match subcmd {
         ToolCommands::List { provider } => list_tools(cli, &registry, &scopes, provider.as_deref()),
-        ToolCommands::Info { name } => tool_info(cli, &registry, name),
+        ToolCommands::Info { name } => tool_info(cli, &registry, &scopes, name),
         ToolCommands::Search { query } => search_tools(cli, &registry, &scopes, query),
     }
 }
@@ -216,11 +204,16 @@ fn list_tools(
 fn tool_info(
     cli: &Cli,
     registry: &ManifestRegistry,
+    scopes: &ScopeConfig,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (provider, tool) = registry.get_tool(name).ok_or_else(|| {
-        format!("Unknown tool: '{name}'. Run 'ati tool list' to see available tools.")
-    })?;
+    let (provider, tool) = registry
+        .get_tool(name)
+        .filter(|(_, tool)| match &tool.scope {
+            Some(scope) => scopes.is_allowed(scope),
+            None => true,
+        })
+        .ok_or_else(|| format!("Unknown tool: '{name}'. Run 'ati tool list' to see available tools."))?;
 
     match cli.output {
         OutputFormat::Json => {

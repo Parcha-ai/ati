@@ -28,6 +28,19 @@ pub fn matches_wildcard(name: &str, pattern: &str) -> bool {
     false
 }
 
+/// Convert a canonical tool scope like `tool:github:search_repositories`
+/// into the legacy underscore alias `tool:github_search_repositories`.
+fn legacy_tool_scope_alias(tool_scope: &str) -> Option<String> {
+    let suffix = tool_scope.strip_prefix("tool:")?;
+    let colon_pos = suffix.find(':')?;
+    let mut alias = String::with_capacity(tool_scope.len());
+    alias.push_str("tool:");
+    alias.push_str(&suffix[..colon_pos]);
+    alias.push('_');
+    alias.push_str(&suffix[colon_pos + 1..]);
+    Some(alias)
+}
+
 #[derive(Error, Debug)]
 pub enum ScopeError {
     #[error("Scopes have expired (expired at {0})")]
@@ -96,6 +109,8 @@ impl ScopeConfig {
     /// - Wildcard suffix: `"tool:github:*"` matches `"tool:github:search_repos"`
     /// - Global wildcard: `"*"` matches everything
     /// - Empty tool scope: always allowed (tool has no scope requirement)
+    /// - Legacy alias match for colon-namespaced tools, e.g.
+    ///   `tool:github_search_repositories` or `tool:github_*`
     pub fn is_allowed(&self, tool_scope: &str) -> bool {
         if self.is_expired() {
             return false;
@@ -104,9 +119,14 @@ impl ScopeConfig {
         if tool_scope.is_empty() {
             return true;
         }
+        let legacy_alias = legacy_tool_scope_alias(tool_scope);
         // Check each scope pattern
         for scope in &self.scopes {
-            if matches_wildcard(tool_scope, scope) {
+            if matches_wildcard(tool_scope, scope)
+                || legacy_alias
+                    .as_deref()
+                    .is_some_and(|alias| matches_wildcard(alias, scope))
+            {
                 return true;
             }
         }
@@ -209,6 +229,20 @@ mod tests {
     #[test]
     fn test_wildcard_suffix() {
         let config = make_scopes(&["tool:github:*"]);
+        assert!(config.is_allowed("tool:github:search_repos"));
+        assert!(config.is_allowed("tool:github:create_issue"));
+        assert!(!config.is_allowed("tool:linear:list_issues"));
+    }
+
+    #[test]
+    fn test_legacy_underscore_scope_matches_canonical_tool_scope() {
+        let config = make_scopes(&["tool:test_api_get_data"]);
+        assert!(config.is_allowed("tool:test_api:get_data"));
+    }
+
+    #[test]
+    fn test_legacy_underscore_wildcard_matches_canonical_tool_scope() {
+        let config = make_scopes(&["tool:github_*"]);
         assert!(config.is_allowed("tool:github:search_repos"));
         assert!(config.is_allowed("tool:github:create_issue"));
         assert!(!config.is_allowed("tool:linear:list_issues"));

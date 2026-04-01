@@ -10,7 +10,7 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_ssrf_mode(mode: &str, f: impl FnOnce()) {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     std::env::set_var("ATI_SSRF_PROTECTION", mode);
     f();
     std::env::remove_var("ATI_SSRF_PROTECTION");
@@ -77,6 +77,20 @@ fn test_ssrf_blocks_localhost_hostname() {
     with_ssrf_mode("1", || {
         assert!(validate_url_not_private("http://localhost/api").is_err());
         assert!(validate_url_not_private("http://localhost:8080/api").is_err());
+    });
+}
+
+#[test]
+fn test_ssrf_blocks_ipv6_loopback() {
+    with_ssrf_mode("1", || {
+        assert!(validate_url_not_private("http://[::1]/api").is_err());
+    });
+}
+
+#[test]
+fn test_ssrf_blocks_ipv6_unique_local() {
+    with_ssrf_mode("1", || {
+        assert!(validate_url_not_private("http://[fd00::1]/api").is_err());
     });
 }
 
