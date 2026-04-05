@@ -309,6 +309,165 @@ pub async fn get_skill(
         .map_err(|e| ProxyError::InvalidResponse(e.to_string()))
 }
 
+async fn get_proxy_json(proxy_url: &str, path: &str) -> Result<serde_json::Value, ProxyError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
+        .build()?;
+
+    let url = format!(
+        "{}/{}",
+        proxy_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    );
+
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+        .send()
+        .await?;
+    let status = response.status();
+
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_else(|_| "empty".into());
+        return Err(ProxyError::ProxyResponse {
+            status: status.as_u16(),
+            body,
+        });
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|e| ProxyError::InvalidResponse(e.to_string()))
+}
+
+async fn get_proxy_json_with_query(
+    proxy_url: &str,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<serde_json::Value, ProxyError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
+        .build()?;
+
+    let mut url = format!(
+        "{}/{}",
+        proxy_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    );
+
+    if !query.is_empty() {
+        let params = query
+            .iter()
+            .map(|(key, value)| format!("{key}={}", urlencoding(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        url.push('?');
+        url.push_str(&params);
+    }
+
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+        .send()
+        .await?;
+    let status = response.status();
+
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_else(|_| "empty".into());
+        return Err(ProxyError::ProxyResponse {
+            status: status.as_u16(),
+            body,
+        });
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|e| ProxyError::InvalidResponse(e.to_string()))
+}
+
+/// List remote SkillATI skills from the proxy server.
+pub async fn get_skillati_catalog(
+    proxy_url: &str,
+    search: Option<&str>,
+) -> Result<serde_json::Value, ProxyError> {
+    let query = search
+        .map(|value| vec![("search", value.to_string())])
+        .unwrap_or_default();
+    get_proxy_json_with_query(proxy_url, "skillati/catalog", &query).await
+}
+
+/// Read a remote SkillATI skill from the proxy server.
+pub async fn get_skillati_read(
+    proxy_url: &str,
+    name: &str,
+) -> Result<serde_json::Value, ProxyError> {
+    get_proxy_json(proxy_url, &format!("skillati/{}", urlencoding(name))).await
+}
+
+/// List bundled resources for a remote SkillATI skill via the proxy server.
+pub async fn get_skillati_resources(
+    proxy_url: &str,
+    name: &str,
+    prefix: Option<&str>,
+) -> Result<serde_json::Value, ProxyError> {
+    let query = prefix
+        .map(|value| vec![("prefix", value.to_string())])
+        .unwrap_or_default();
+    get_proxy_json_with_query(
+        proxy_url,
+        &format!("skillati/{}/resources", urlencoding(name)),
+        &query,
+    )
+    .await
+}
+
+/// Read one arbitrary skill-relative path from a remote SkillATI skill via the proxy server.
+pub async fn get_skillati_file(
+    proxy_url: &str,
+    name: &str,
+    path: &str,
+) -> Result<serde_json::Value, ProxyError> {
+    get_proxy_json_with_query(
+        proxy_url,
+        &format!("skillati/{}/file", urlencoding(name)),
+        &[("path", path.to_string())],
+    )
+    .await
+}
+
+/// List on-demand references for a remote SkillATI skill via the proxy server.
+pub async fn get_skillati_refs(
+    proxy_url: &str,
+    name: &str,
+) -> Result<serde_json::Value, ProxyError> {
+    get_proxy_json(proxy_url, &format!("skillati/{}/refs", urlencoding(name))).await
+}
+
+/// Read one reference file from a remote SkillATI skill via the proxy server.
+pub async fn get_skillati_ref(
+    proxy_url: &str,
+    name: &str,
+    reference: &str,
+) -> Result<serde_json::Value, ProxyError> {
+    get_proxy_json(
+        proxy_url,
+        &format!(
+            "skillati/{}/ref/{}",
+            urlencoding(name),
+            urlencoding(reference)
+        ),
+    )
+    .await
+}
+
+fn urlencoding(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('#', "%23")
+        .replace('&', "%26")
+        .replace('?', "%3F")
+        .replace('/', "%2F")
+        .replace('=', "%3D")
+}
+
 /// Resolve skills for given scopes via the proxy.
 pub async fn resolve_skills(
     proxy_url: &str,

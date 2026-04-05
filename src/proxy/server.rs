@@ -6,7 +6,7 @@
 /// Usage: `ati proxy --port 8080 [--ati-dir ~/.ati]`
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Query, State},
     http::{Request as HttpRequest, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -29,6 +29,7 @@ use crate::core::mcp_client;
 use crate::core::response;
 use crate::core::scope::ScopeConfig;
 use crate::core::skill::{self, SkillRegistry};
+use crate::core::skillati::{RemoteSkillMeta, SkillAtiClient, SkillAtiError};
 use crate::core::xai;
 
 /// Shared state for the proxy server.
@@ -185,6 +186,23 @@ pub struct SkillResolveRequest {
 #[derive(Debug, Deserialize)]
 pub struct SkillBundleBatchRequest {
     pub names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SkillAtiCatalogQuery {
+    #[serde(default)]
+    pub search: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SkillAtiResourcesQuery {
+    #[serde(default)]
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillAtiFileQuery {
+    pub path: String,
 }
 
 // --- Tool endpoint types ---
@@ -516,7 +534,7 @@ async fn handle_help(
 
     let scopes = ScopeConfig::unrestricted();
     let resolved_skills = skill::resolve_skills(&state.skill_registry, &state.registry, &scopes);
-    let skills_section = if resolved_skills.is_empty() {
+    let local_skills_section = if resolved_skills.is_empty() {
         String::new()
     } else {
         format!(
@@ -524,6 +542,14 @@ async fn handle_help(
             skill::build_skill_context(&resolved_skills)
         )
     };
+    let remote_query = req
+        .tool
+        .as_ref()
+        .map(|tool| format!("{tool} {}", req.query))
+        .unwrap_or_else(|| req.query.clone());
+    let remote_skills_section =
+        build_remote_skillati_section(&state.keyring, &remote_query, 12).await;
+    let skills_section = merge_help_skill_sections(&[local_skills_section, remote_skills_section]);
 
     // Build system prompt — scoped or unscoped
     let system_prompt = if let Some(ref tool_name) = req.tool {
@@ -1165,6 +1191,169 @@ async fn handle_skills_resolve(
     (StatusCode::OK, Json(Value::Array(json)))
 }
 
+fn skillati_client(keyring: &Keyring) -> Result<SkillAtiClient, SkillAtiError> {
+    match SkillAtiClient::from_env(keyring)? {
+        Some(client) => Ok(client),
+        None => Err(SkillAtiError::NotConfigured),
+    }
+}
+
+async fn handle_skillati_catalog(
+    State(state): State<Arc<ProxyState>>,
+    Query(query): Query<SkillAtiCatalogQuery>,
+) -> impl IntoResponse {
+    tracing::debug!(search = ?query.search, "GET /skillati/catalog");
+
+    let client = match skillati_client(&state.keyring) {
+        Ok(client) => client,
+        Err(err) => return skillati_error_response(err),
+    };
+
+    match client.catalog().await {
+        Ok(catalog) => {
+            let skills = if let Some(search) = query.search.as_deref() {
+                SkillAtiClient::filter_catalog(&catalog, search, 25)
+            } else {
+                catalog
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "skills": skills,
+                })),
+            )
+        }
+        Err(err) => skillati_error_response(err),
+    }
+}
+
+async fn handle_skillati_read(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    tracing::debug!(%name, "GET /skillati/:name");
+
+    let client = match skillati_client(&state.keyring) {
+        Ok(client) => client,
+        Err(err) => return skillati_error_response(err),
+    };
+
+    match client.read_skill(&name).await {
+        Ok(activation) => (StatusCode::OK, Json(serde_json::json!(activation))),
+        Err(err) => skillati_error_response(err),
+    }
+}
+
+async fn handle_skillati_resources(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Query(query): Query<SkillAtiResourcesQuery>,
+) -> impl IntoResponse {
+    tracing::debug!(%name, prefix = ?query.prefix, "GET /skillati/:name/resources");
+
+    let client = match skillati_client(&state.keyring) {
+        Ok(client) => client,
+        Err(err) => return skillati_error_response(err),
+    };
+
+    match client.list_resources(&name, query.prefix.as_deref()).await {
+        Ok(resources) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "name": name,
+                "prefix": query.prefix,
+                "resources": resources,
+            })),
+        ),
+        Err(err) => skillati_error_response(err),
+    }
+}
+
+async fn handle_skillati_file(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Query(query): Query<SkillAtiFileQuery>,
+) -> impl IntoResponse {
+    tracing::debug!(%name, path = %query.path, "GET /skillati/:name/file");
+
+    let client = match skillati_client(&state.keyring) {
+        Ok(client) => client,
+        Err(err) => return skillati_error_response(err),
+    };
+
+    match client.read_path(&name, &query.path).await {
+        Ok(file) => (StatusCode::OK, Json(serde_json::json!(file))),
+        Err(err) => skillati_error_response(err),
+    }
+}
+
+async fn handle_skillati_refs(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    tracing::debug!(%name, "GET /skillati/:name/refs");
+
+    let client = match skillati_client(&state.keyring) {
+        Ok(client) => client,
+        Err(err) => return skillati_error_response(err),
+    };
+
+    match client.list_references(&name).await {
+        Ok(references) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "name": name,
+                "references": references,
+            })),
+        ),
+        Err(err) => skillati_error_response(err),
+    }
+}
+
+async fn handle_skillati_ref(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path((name, reference)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    tracing::debug!(%name, %reference, "GET /skillati/:name/ref/:reference");
+
+    let client = match skillati_client(&state.keyring) {
+        Ok(client) => client,
+        Err(err) => return skillati_error_response(err),
+    };
+
+    match client.read_reference(&name, &reference).await {
+        Ok(content) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "name": name,
+                "reference": reference,
+                "content": content,
+            })),
+        ),
+        Err(err) => skillati_error_response(err),
+    }
+}
+
+fn skillati_error_response(err: SkillAtiError) -> (StatusCode, Json<Value>) {
+    let status = match &err {
+        SkillAtiError::NotConfigured
+        | SkillAtiError::UnsupportedRegistry(_)
+        | SkillAtiError::MissingCredentials(_) => StatusCode::SERVICE_UNAVAILABLE,
+        SkillAtiError::SkillNotFound(_) | SkillAtiError::PathNotFound { .. } => {
+            StatusCode::NOT_FOUND
+        }
+        SkillAtiError::InvalidPath(_) => StatusCode::BAD_REQUEST,
+        SkillAtiError::Gcs(_) => StatusCode::BAD_GATEWAY,
+    };
+
+    (
+        status,
+        Json(serde_json::json!({
+            "error": err.to_string(),
+        })),
+    )
+}
+
 // --- Auth middleware ---
 
 /// JWT authentication middleware.
@@ -1230,6 +1419,12 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/skills/bundle", post(handle_skills_bundle_batch))
         .route("/skills/{name}", get(handle_skill_detail))
         .route("/skills/{name}/bundle", get(handle_skill_bundle))
+        .route("/skillati/catalog", get(handle_skillati_catalog))
+        .route("/skillati/{name}", get(handle_skillati_read))
+        .route("/skillati/{name}/resources", get(handle_skillati_resources))
+        .route("/skillati/{name}/file", get(handle_skillati_file))
+        .route("/skillati/{name}/refs", get(handle_skillati_refs))
+        .route("/skillati/{name}/ref/{reference}", get(handle_skillati_ref))
         .route("/health", get(handle_health))
         .route("/.well-known/jwks.json", get(handle_jwks))
         .layer(middleware::from_fn_with_state(
@@ -1327,48 +1522,21 @@ pub async fn run(
         .collect();
     let openapi_count = openapi_providers.len();
 
-    // Load skill registry (local + optional GCS)
+    // Load installed/local skill registry only.
     let skills_dir = ati_dir.join("skills");
-    let mut skill_registry = SkillRegistry::load(&skills_dir).unwrap_or_else(|e| {
+    let skill_registry = SkillRegistry::load(&skills_dir).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "failed to load skills");
         SkillRegistry::load(std::path::Path::new("/nonexistent-fallback")).unwrap()
     });
 
-    // Load GCS skills if ATI_SKILL_REGISTRY is set
     if let Ok(registry_url) = std::env::var("ATI_SKILL_REGISTRY") {
-        if let Some(bucket) = registry_url.strip_prefix("gcs://") {
-            let cred_key = "gcp_credentials";
-            if let Some(cred_json) = keyring.get(cred_key) {
-                match crate::core::gcs::GcsClient::new(bucket.to_string(), cred_json) {
-                    Ok(client) => match crate::core::gcs::GcsSkillSource::load(&client).await {
-                        Ok(gcs_source) => {
-                            let gcs_count = gcs_source.skill_count();
-                            skill_registry.merge(gcs_source);
-                            tracing::info!(
-                                bucket = %bucket,
-                                skills = gcs_count,
-                                "loaded skills from GCS registry"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, bucket = %bucket, "failed to load GCS skills");
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to init GCS client");
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    key = %cred_key,
-                    "ATI_SKILL_REGISTRY set but GCS credentials not found in keyring"
-                );
-            }
-        } else {
-            tracing::warn!(
-                url = %registry_url,
-                "unsupported skill registry scheme (only gcs:// is supported)"
+        if registry_url.strip_prefix("gcs://").is_some() {
+            tracing::info!(
+                registry = %registry_url,
+                "SkillATI remote registry configured for lazy reads"
             );
+        } else {
+            tracing::warn!(url = %registry_url, "SkillATI only supports gcs:// registries");
         }
     }
 
@@ -1481,6 +1649,67 @@ Answer the agent's question naturally, like a knowledgeable colleague would. Kee
 - If skills are relevant, suggest `ati skill show <name>` for the full methodology
 
 Keep your answer concise — a few short paragraphs with embedded code blocks. Only recommend tools from the list above."#;
+
+async fn build_remote_skillati_section(keyring: &Keyring, query: &str, limit: usize) -> String {
+    let client = match SkillAtiClient::from_env(keyring) {
+        Ok(Some(client)) => client,
+        Ok(None) => return String::new(),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to initialize SkillATI catalog for proxy help");
+            return String::new();
+        }
+    };
+
+    let catalog = match client.catalog().await {
+        Ok(catalog) => catalog,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load SkillATI catalog for proxy help");
+            return String::new();
+        }
+    };
+
+    let matched = SkillAtiClient::filter_catalog(&catalog, query, limit);
+    if matched.is_empty() {
+        return String::new();
+    }
+
+    render_remote_skillati_section(&matched, catalog.len())
+}
+
+fn render_remote_skillati_section(skills: &[RemoteSkillMeta], total_catalog: usize) -> String {
+    let mut section = String::from("## Remote Skills Available Via SkillATI\n\n");
+    section.push_str(
+        "These skills are available remotely from the SkillATI registry. They are not installed locally. Activate one on demand with `ati skillati read <name>`, inspect bundled paths with `ati skillati resources <name>`, and fetch specific files with `ati skillati cat <name> <path>`.\n\n",
+    );
+
+    for skill in skills {
+        section.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
+    }
+
+    if total_catalog > skills.len() {
+        section.push_str(&format!(
+            "\nOnly the most relevant {} remote skills are shown here.\n",
+            skills.len()
+        ));
+    }
+
+    section
+}
+
+fn merge_help_skill_sections(sections: &[String]) -> String {
+    sections
+        .iter()
+        .filter_map(|section| {
+            let trimmed = section.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
 
 fn build_tool_context(
     tools: &[(

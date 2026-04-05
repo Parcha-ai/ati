@@ -15,4 +15,5 @@ pub mod rate;
 pub mod response;
 pub mod scope;
 pub mod skill;
+pub mod skillati;
 pub mod xai;
