@@ -26,7 +26,7 @@ description="Demo"
     let output = dir.path().join("catalog.json");
 
     Command::new(env!("CARGO_BIN_EXE_ati"))
-        .args(&[
+        .args([
             "skill",
             "fetch",
             "build-index",
@@ -64,7 +64,7 @@ description="Demo 2"
     .unwrap();
 
     Command::new(env!("CARGO_BIN_EXE_ati"))
-        .args(&["skill", "fetch", "build-index", skill_dir.to_str().unwrap()])
+        .args(["skill", "fetch", "build-index", skill_dir.to_str().unwrap()])
         .assert()
         .success()
         .stdout(contains("\"name\": \"demo-skill-2\""));
