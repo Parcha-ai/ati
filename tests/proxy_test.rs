@@ -1,6 +1,31 @@
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+fn create_local_ati_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).expect("create manifests");
+    std::fs::write(
+        manifests_dir.join("test.toml"),
+        r#"
+[provider]
+name = "test_provider"
+description = "Test provider"
+base_url = "http://unused"
+auth_type = "none"
+
+[[tools]]
+name = "web_search"
+description = "Search"
+endpoint = "/search"
+method = "GET"
+scope = "tool:web_search"
+"#,
+    )
+    .expect("write manifest");
+    dir
+}
+
 /// Without ATI_PROXY_URL, `ati run` should attempt local mode.
 /// Since there's no manifest dir in the test env, it fails with a manifest error (not a proxy error).
 #[tokio::test]
@@ -139,5 +164,52 @@ async fn test_help_with_proxy_url_routes_to_proxy() {
     assert!(
         stdout.contains("web_search"),
         "Should contain proxy help response. stdout: {stdout}"
+    );
+}
+
+/// Local commands require a valid session token once JWT validation is configured.
+#[tokio::test]
+async fn test_local_tool_list_requires_token_when_jwt_configured() {
+    let ati_dir = create_local_ati_dir();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
+        .args(["tool", "list"])
+        .env("ATI_DIR", ati_dir.path())
+        .env(
+            "ATI_JWT_SECRET",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        )
+        .output()
+        .expect("Failed to execute ati");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "Expected auth failure");
+    assert!(
+        stderr.contains("ATI_SESSION_TOKEN is required"),
+        "Unexpected stderr: {stderr}"
+    );
+}
+
+/// Local commands reject invalid tokens when JWT validation is configured.
+#[tokio::test]
+async fn test_local_tool_list_rejects_invalid_token_when_jwt_configured() {
+    let ati_dir = create_local_ati_dir();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ati"))
+        .args(["tool", "list"])
+        .env("ATI_DIR", ati_dir.path())
+        .env(
+            "ATI_JWT_SECRET",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        )
+        .env("ATI_SESSION_TOKEN", "not-a-valid-jwt")
+        .output()
+        .expect("Failed to execute ati");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "Expected auth failure");
+    assert!(
+        stderr.contains("Invalid ATI_SESSION_TOKEN"),
+        "Unexpected stderr: {stderr}"
     );
 }

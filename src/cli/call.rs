@@ -8,7 +8,6 @@ use crate::core::jwt;
 use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::mcp_client;
-use crate::core::scope::ScopeConfig;
 use crate::output;
 use crate::providers::generic;
 use crate::proxy::client as proxy_client;
@@ -111,55 +110,6 @@ fn normalize_arg_keys(
         }
     }
     normalized
-}
-
-/// Load scopes from ATI_SESSION_TOKEN JWT, or return unrestricted if not set.
-fn load_scopes_from_env() -> ScopeConfig {
-    match std::env::var("ATI_SESSION_TOKEN") {
-        Ok(token) if !token.is_empty() => {
-            // Try to load JWT config for full verification
-            match jwt::config_from_env() {
-                Ok(Some(config)) => match jwt::validate(&token, &config) {
-                    Ok(claims) => {
-                        tracing::debug!(sub = %claims.sub, scopes = %claims.scope, "JWT validated");
-                        ScopeConfig::from_jwt(&claims)
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "JWT validation failed");
-                        tracing::warn!("falling back to inspect-only mode (scopes extracted but signature not verified)");
-                        match jwt::inspect(&token) {
-                            Ok(claims) => ScopeConfig::from_jwt(&claims),
-                            Err(e2) => {
-                                tracing::error!(error = %e2, "cannot decode JWT");
-                                ScopeConfig::unrestricted()
-                            }
-                        }
-                    }
-                },
-                Ok(None) => {
-                    // No JWT config — inspect without verification
-                    tracing::debug!(
-                        "no JWT public key configured — inspecting token without verification"
-                    );
-                    match jwt::inspect(&token) {
-                        Ok(claims) => ScopeConfig::from_jwt(&claims),
-                        Err(e) => {
-                            tracing::error!(error = %e, "cannot decode JWT");
-                            ScopeConfig::unrestricted()
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "JWT config error");
-                    ScopeConfig::unrestricted()
-                }
-            }
-        }
-        _ => {
-            tracing::debug!("no ATI_SESSION_TOKEN — running in unrestricted mode");
-            ScopeConfig::unrestricted()
-        }
-    }
 }
 
 /// Execute: ati run <tool_name> [--arg val]...
@@ -304,7 +254,7 @@ async fn execute_local(
     let args = normalize_arg_keys(args, tool);
 
     // Load scopes from JWT
-    let scopes = load_scopes_from_env();
+    let scopes = common::load_local_scopes_from_env()?;
 
     if let Some(scope) = &tool.scope {
         scopes.check_access(tool_name, scope)?;
@@ -413,7 +363,13 @@ async fn execute_via_proxy(
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::debug!(tool = %tool_name, ?args, proxy_url = %proxy_url, "execute via proxy");
 
-    let scopes = load_scopes_from_env();
+    let scopes = match std::env::var("ATI_SESSION_TOKEN") {
+        Ok(token) if !token.is_empty() => match jwt::inspect(&token) {
+            Ok(claims) => crate::core::scope::ScopeConfig::from_jwt(&claims),
+            Err(_) => crate::core::scope::ScopeConfig::unrestricted(),
+        },
+        _ => crate::core::scope::ScopeConfig::unrestricted(),
+    };
     let start = std::time::Instant::now();
     // Always send the parsed args map to the proxy, not raw CLI args.
     // The proxy uses args_as_map() for HTTP/MCP/OpenAPI tools — sending raw_args

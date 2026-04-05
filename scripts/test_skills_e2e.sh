@@ -16,6 +16,7 @@ fi
 # Use a temp directory for isolated testing
 TEST_DIR=$(mktemp -d /tmp/ati-skill-e2e-XXXXXX)
 export ATI_DIR="$TEST_DIR"
+export ATI_OUTPUT=text
 SKILLS_DIR="$TEST_DIR/skills"
 MANIFESTS_DIR="$TEST_DIR/manifests"
 SPECS_DIR="$TEST_DIR/specs"
@@ -293,7 +294,7 @@ fi
 # Test 4: List with JSON output
 echo ""
 echo "Test: ati skill list --output json"
-OUTPUT=$("$ATI_BIN" --output json skills list 2>&1)
+OUTPUT=$("$ATI_BIN" --output json skill list 2>&1)
 if echo "$OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d)>=4" 2>/dev/null; then
     pass "skills list JSON output is valid with >=4 skills"
 else

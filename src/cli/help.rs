@@ -1,9 +1,7 @@
 use super::common;
-use crate::core::jwt;
 use crate::core::manifest::{ManifestRegistry, Provider, Tool};
-use crate::core::scope::{self, ScopeConfig};
+use crate::core::scope;
 use crate::core::skill::SkillRegistry;
-use crate::core::skillati::{RemoteSkillMeta, SkillAtiClient};
 use crate::proxy::client as proxy_client;
 use crate::Cli;
 use std::process::{Command, Stdio};
@@ -200,55 +198,35 @@ async fn execute_local(
     }
 
     // Load scopes from JWT
-    let scopes = match std::env::var("ATI_SESSION_TOKEN") {
-        Ok(token) if !token.is_empty() => {
-            match jwt::inspect(&token) {
-                Ok(claims) => {
-                    let s = ScopeConfig::from_jwt(&claims);
-                    if !s.help_enabled() {
-                        return Err("Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into());
-                    }
-                    s
-                }
-                Err(_) => ScopeConfig::unrestricted(),
-            }
-        }
-        _ => ScopeConfig::unrestricted(),
-    };
+    let scopes = common::load_local_scopes_from_env()?;
+    if !scopes.help_enabled() {
+        return Err(
+            "Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into(),
+        );
+    }
 
     // Load skills
     let skills_dir = ati_dir.join("skills");
     let skill_registry = SkillRegistry::load(&skills_dir)
         .unwrap_or_else(|_| SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap());
 
-    let remote_query = scope_name
-        .as_ref()
-        .map(|scope| format!("{scope} {query}"))
-        .unwrap_or_else(|| query.clone());
-    let remote_skills_section =
-        build_remote_skillati_section(&keyring, &remote_query, 12, cli.verbose).await;
-
     // Build system prompt — scoped vs unscoped
+    let all_tools = registry.list_public_tools();
+    let visible_tools = scope::filter_tools_by_scope(all_tools, &scopes);
+
     let (system_prompt, scoped_tools) = if let Some(ref tool_name) = scope_name {
         // For scoped mode, find skills for the specific tool/provider
-        let skills_section = merge_skill_sections(&[
-            build_skills_for_tools(&skill_registry, &[tool_name.as_str()], cli.verbose),
-            remote_skills_section.clone(),
-        ]);
-        build_scoped_context(tool_name, &registry, &skills_section, cli.verbose)?
+        let skills_section =
+            build_skills_for_tools(&skill_registry, &[tool_name.as_str()], cli.verbose);
+        build_scoped_context(tool_name, &visible_tools, &skills_section, cli.verbose)?
     } else {
         // Unscoped: all public tools, pre-filtered by query
-        let all_tools = registry.list_public_tools();
-        let scoped = scope::filter_tools_by_scope(all_tools, &scopes);
-        let scoped = prefilter_tools_by_query(&scoped, &query, 50);
+        let scoped = prefilter_tools_by_query(&visible_tools, &query, 50);
         let tools_context = build_tool_context(&scoped, false);
 
         // Find skills for the pre-filtered tools (not just JWT scopes)
         let tool_names: Vec<&str> = scoped.iter().map(|(_, t)| t.name.as_str()).collect();
-        let skills_section = merge_skill_sections(&[
-            build_skills_for_tools(&skill_registry, &tool_names, cli.verbose),
-            remote_skills_section.clone(),
-        ]);
+        let skills_section = build_skills_for_tools(&skill_registry, &tool_names, cli.verbose);
 
         let prompt = HELP_SYSTEM_PROMPT
             .replace("{tools}", &tools_context)
@@ -294,26 +272,30 @@ async fn execute_local(
 /// Returns (system_prompt, tools_in_context).
 fn build_scoped_context<'a>(
     scope_name: &str,
-    registry: &'a ManifestRegistry,
+    visible_tools: &'a [(&'a Provider, &'a Tool)],
     skills_section: &str,
     verbose: bool,
 ) -> Result<(String, Vec<(&'a Provider, &'a Tool)>), Box<dyn std::error::Error>> {
     // Check if scope_name is a tool
-    if let Some((provider, tool)) = registry.get_tool(scope_name) {
+    if let Some((provider, tool)) = visible_tools
+        .iter()
+        .find(|(_, tool)| tool.name == scope_name)
+    {
         let tool_details = build_scoped_tool_details(provider, tool, verbose);
         let prompt = SCOPED_HELP_SYSTEM_PROMPT
             .replace("{tool_name}", &tool.name)
             .replace("{tool_details}", &tool_details)
             .replace("{skills_section}", skills_section);
-        return Ok((prompt, vec![(provider, tool)]));
+        return Ok((prompt, vec![(*provider, *tool)]));
     }
 
     // Check if scope_name is a provider
-    if registry.has_provider(scope_name) {
-        let tools = registry.tools_by_provider(scope_name);
-        if tools.is_empty() {
-            return Err(format!("Provider '{}' has no tools registered.", scope_name).into());
-        }
+    let tools: Vec<(&Provider, &Tool)> = visible_tools
+        .iter()
+        .copied()
+        .filter(|(provider, _)| provider.name == scope_name)
+        .collect();
+    if !tools.is_empty() {
         // For provider scope, build detailed context for all tools in the provider
         let tools_context = build_tool_context(&tools, true);
         let prompt = format!(
@@ -325,7 +307,7 @@ fn build_scoped_context<'a>(
         return Ok((prompt, tools));
     }
 
-    Err(format!("'{}' is not a known tool or provider.", scope_name).into())
+    Err(format!("'{}' is not visible in your current scopes.", scope_name).into())
 }
 
 /// Build detailed context for a single tool (used in scoped mode).
@@ -815,81 +797,6 @@ fn add_skill_content(
     }
 }
 
-async fn build_remote_skillati_section(
-    keyring: &crate::core::keyring::Keyring,
-    query: &str,
-    limit: usize,
-    verbose: bool,
-) -> String {
-    let client = match SkillAtiClient::from_env(keyring) {
-        Ok(Some(client)) => client,
-        Ok(None) => return String::new(),
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to initialize SkillATI catalog for assist");
-            return String::new();
-        }
-    };
-
-    let catalog = match client.catalog().await {
-        Ok(catalog) => catalog,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to load SkillATI catalog for assist");
-            return String::new();
-        }
-    };
-
-    let matched = SkillAtiClient::filter_catalog(&catalog, query, limit);
-    if matched.is_empty() {
-        return String::new();
-    }
-
-    if verbose {
-        tracing::debug!(
-            query = %query,
-            returned = matched.len(),
-            total = catalog.len(),
-            "loaded SkillATI remote catalog for assist"
-        );
-    }
-
-    render_remote_skillati_section(&matched, catalog.len())
-}
-
-fn render_remote_skillati_section(skills: &[RemoteSkillMeta], total_catalog: usize) -> String {
-    let mut section = String::from("## Remote Skills Available Via SkillATI\n\n");
-    section.push_str(
-        "These skills are available remotely from the SkillATI registry. They are not installed locally. Activate one on demand with `ati skillati read <name>`, inspect bundled paths with `ati skillati resources <name>`, and fetch specific files with `ati skillati cat <name> <path>`.\n\n",
-    );
-
-    for skill in skills {
-        section.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
-    }
-
-    if total_catalog > skills.len() {
-        section.push_str(&format!(
-            "\nOnly the most relevant {} remote skills are shown here.\n",
-            skills.len()
-        ));
-    }
-
-    section
-}
-
-fn merge_skill_sections(sections: &[String]) -> String {
-    sections
-        .iter()
-        .filter_map(|section| {
-            let trimmed = section.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 /// Pre-filter tools by fuzzy matching against the query.
 /// Returns up to `limit` tools, sorted by relevance score (best first).
 /// If fewer than `limit` tools match (score > 0), all tools are returned up to the limit.
@@ -1055,31 +962,25 @@ async fn execute_plan_mode(
             crate::core::skill::SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap()
         });
 
-    let remote_query = scope_name
-        .as_ref()
-        .map(|scope| format!("{scope} {query}"))
-        .unwrap_or_else(|| query.clone());
-    let remote_skills_section =
-        build_remote_skillati_section(&keyring, &remote_query, 12, cli.verbose).await;
-
     // Build system prompt — similar to normal assist but with plan suffix
+    let scopes = common::load_local_scopes_from_env()?;
+    if !scopes.help_enabled() {
+        return Err(
+            "Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into(),
+        );
+    }
+    let visible_tools =
+        crate::core::scope::filter_tools_by_scope(registry.list_public_tools(), &scopes);
+
     let (system_prompt, _scoped_tools) = if let Some(ref tool_name) = scope_name {
-        let skills_section = merge_skill_sections(&[
-            build_skills_for_tools(&skill_registry, &[tool_name.as_str()], cli.verbose),
-            remote_skills_section.clone(),
-        ]);
-        build_scoped_context(tool_name, &registry, &skills_section, cli.verbose)?
+        let skills_section =
+            build_skills_for_tools(&skill_registry, &[tool_name.as_str()], cli.verbose);
+        build_scoped_context(tool_name, &visible_tools, &skills_section, cli.verbose)?
     } else {
-        let all_tools = registry.list_public_tools();
-        let scoped =
-            crate::core::scope::filter_tools_by_scope(all_tools, &ScopeConfig::unrestricted());
-        let scoped = prefilter_tools_by_query(&scoped, &query, 50);
+        let scoped = prefilter_tools_by_query(&visible_tools, &query, 50);
         let tools_context = build_tool_context(&scoped, false);
         let tool_names: Vec<&str> = scoped.iter().map(|(_, t)| t.name.as_str()).collect();
-        let skills_section = merge_skill_sections(&[
-            build_skills_for_tools(&skill_registry, &tool_names, cli.verbose),
-            remote_skills_section.clone(),
-        ]);
+        let skills_section = build_skills_for_tools(&skill_registry, &tool_names, cli.verbose);
         let prompt = HELP_SYSTEM_PROMPT
             .replace("{tools}", &tools_context)
             .replace("{skills_section}", &skills_section);

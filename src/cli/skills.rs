@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use super::common;
 use crate::cli::skillati;
-use crate::core::jwt;
 use crate::core::manifest::ManifestRegistry;
-use crate::core::scope::ScopeConfig;
 use crate::core::skill::{self, SkillRegistry};
 use crate::{Cli, OutputFormat, SkillCommands};
 
@@ -22,16 +20,6 @@ fn load_manifest_registry() -> Result<ManifestRegistry, Box<dyn std::error::Erro
         Ok(ManifestRegistry::load(&manifests_dir)?)
     } else {
         Ok(ManifestRegistry::empty())
-    }
-}
-
-fn load_scopes_from_env() -> ScopeConfig {
-    match std::env::var("ATI_SESSION_TOKEN") {
-        Ok(token) if !token.is_empty() => match jwt::inspect(&token) {
-            Ok(claims) => ScopeConfig::from_jwt(&claims),
-            Err(_) => ScopeConfig::unrestricted(),
-        },
-        _ => ScopeConfig::unrestricted(),
     }
 }
 
@@ -113,10 +101,8 @@ async fn execute_via_proxy(
     subcmd: &SkillCommands,
     proxy_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
     let base = proxy_url.trim_end_matches('/');
+    use crate::proxy::client as proxy_client;
 
     match subcmd {
         SkillCommands::List {
@@ -140,11 +126,14 @@ async fn execute_via_proxy(
                 url.push_str(&params.join("&"));
             }
 
-            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+            let resp = proxy_client::list_skills(
+                proxy_url,
+                url.strip_prefix(&format!("{base}/skills?")).unwrap_or(""),
+            )
+            .await?;
             print_proxy_response(cli, &resp);
         }
         SkillCommands::Show { name, meta, refs } => {
-            let mut url = format!("{base}/skills/{name}");
             let mut params = Vec::new();
             if *meta {
                 params.push("meta=true".to_string());
@@ -152,12 +141,7 @@ async fn execute_via_proxy(
             if *refs {
                 params.push("refs=true".to_string());
             }
-            if !params.is_empty() {
-                url.push('?');
-                url.push_str(&params.join("&"));
-            }
-
-            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+            let resp = proxy_client::get_skill(proxy_url, name, &params.join("&")).await?;
             if *meta {
                 println!("{}", serde_json::to_string_pretty(&resp)?);
             } else if let Some(content) = resp.get("content").and_then(|c| c.as_str()) {
@@ -179,13 +163,13 @@ async fn execute_via_proxy(
             }
         }
         SkillCommands::Search { query } => {
-            let url = format!("{base}/skills?search={}", urlencoding(query));
-            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+            let resp =
+                proxy_client::list_skills(proxy_url, &format!("search={}", urlencoding(query)))
+                    .await?;
             print_proxy_response(cli, &resp);
         }
         SkillCommands::Info { name } => {
-            let url = format!("{base}/skills/{name}?meta=true");
-            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+            let resp = proxy_client::get_skill(proxy_url, name, "meta=true").await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         SkillCommands::Read {
@@ -196,17 +180,20 @@ async fn execute_via_proxy(
             // Read is like show but for agent consumption — delegate to show endpoint
             if let Some(tool_name) = tool {
                 // Get all skills for this tool, then fetch each one's content
-                let url = format!("{base}/skills?tool={}", urlencoding(tool_name));
-                let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+                let resp = proxy_client::list_skills(
+                    proxy_url,
+                    &format!("tool={}", urlencoding(tool_name)),
+                )
+                .await?;
                 if let Some(arr) = resp.as_array() {
                     for item in arr {
                         if let Some(skill_name) = item.get("name").and_then(|n| n.as_str()) {
-                            let mut detail_url = format!("{base}/skills/{skill_name}");
-                            if *with_refs {
-                                detail_url.push_str("?refs=true");
-                            }
-                            let detail: serde_json::Value =
-                                client.get(&detail_url).send().await?.json().await?;
+                            let detail = proxy_client::get_skill(
+                                proxy_url,
+                                skill_name,
+                                if *with_refs { "refs=true" } else { "" },
+                            )
+                            .await?;
                             if let Some(content) = detail.get("content").and_then(|c| c.as_str()) {
                                 println!("{content}");
                             }
@@ -214,11 +201,12 @@ async fn execute_via_proxy(
                     }
                 }
             } else if let Some(skill_name) = name {
-                let mut url = format!("{base}/skills/{skill_name}");
-                if *with_refs {
-                    url.push_str("?refs=true");
-                }
-                let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+                let resp = proxy_client::get_skill(
+                    proxy_url,
+                    skill_name,
+                    if *with_refs { "refs=true" } else { "" },
+                )
+                .await?;
                 if let Some(content) = resp.get("content").and_then(|c| c.as_str()) {
                     println!("{content}");
                 }
@@ -233,9 +221,7 @@ async fn execute_via_proxy(
             } else {
                 serde_json::json!({"scopes": ["*"]})
             };
-            let url = format!("{base}/skills/resolve");
-            let resp: serde_json::Value =
-                client.post(&url).json(&body).send().await?.json().await?;
+            let resp = proxy_client::resolve_skills(proxy_url, &body).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         _ => unreachable!("Non-proxy commands should not reach here"),
@@ -290,15 +276,30 @@ fn list_skills(
     tool: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = load_registry()?;
+    let manifest_registry = load_manifest_registry()?;
+    let scopes = common::load_local_scopes_from_env()?;
+    let visible = skill::visible_skills(&registry, &manifest_registry, &scopes);
 
     let skills: Vec<&crate::core::skill::SkillMeta> = if let Some(cat) = category {
-        registry.skills_for_category(cat)
+        visible
+            .iter()
+            .copied()
+            .filter(|skill| skill.categories.iter().any(|value| value == cat))
+            .collect()
     } else if let Some(prov) = provider {
-        registry.skills_for_provider(prov)
+        visible
+            .iter()
+            .copied()
+            .filter(|skill| skill.providers.iter().any(|value| value == prov))
+            .collect()
     } else if let Some(t) = tool {
-        registry.skills_for_tool(t)
+        visible
+            .iter()
+            .copied()
+            .filter(|skill| skill.tools.iter().any(|value| value == t))
+            .collect()
     } else {
-        registry.list_skills().iter().collect()
+        visible
     };
 
     if skills.is_empty() {
@@ -353,10 +354,17 @@ fn show_skill(
     show_refs: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = load_registry()?;
+    let manifest_registry = load_manifest_registry()?;
+    let scopes = common::load_local_scopes_from_env()?;
+    let visible = skill::visible_skills(&registry, &manifest_registry, &scopes);
 
-    let skill = registry.get_skill(name).ok_or_else(|| {
-        format!("Skill '{name}' not found. Run 'ati skill list' to see available skills.")
-    })?;
+    let skill = visible
+        .iter()
+        .find(|skill| skill.name == name)
+        .copied()
+        .ok_or_else(|| {
+            format!("Skill '{name}' not found. Run 'ati skill list' to see available skills.")
+        })?;
 
     if meta_only {
         match cli.output {
@@ -437,7 +445,18 @@ fn show_skill(
 
 fn search_skills(cli: &Cli, query: &str) -> Result<(), Box<dyn std::error::Error>> {
     let registry = load_registry()?;
-    let results = registry.search(query);
+    let manifest_registry = load_manifest_registry()?;
+    let scopes = common::load_local_scopes_from_env()?;
+    let visible_names: std::collections::HashSet<String> =
+        skill::visible_skills(&registry, &manifest_registry, &scopes)
+            .into_iter()
+            .map(|skill| skill.name.clone())
+            .collect();
+    let results: Vec<&crate::core::skill::SkillMeta> = registry
+        .search(query)
+        .into_iter()
+        .filter(|skill| visible_names.contains(&skill.name))
+        .collect();
 
     if results.is_empty() {
         println!("No skills match '{query}'.");
@@ -485,14 +504,28 @@ fn read_skill(
     with_refs: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = load_registry()?;
+    let manifest_registry = load_manifest_registry()?;
+    let scopes = common::load_local_scopes_from_env()?;
+    let visible_names: std::collections::HashSet<String> =
+        skill::visible_skills(&registry, &manifest_registry, &scopes)
+            .into_iter()
+            .map(|skill| skill.name.clone())
+            .collect();
 
     let skill_names: Vec<String> = if let Some(tool_name) = tool {
-        let skills = registry.skills_for_tool(tool_name);
+        let skills: Vec<&crate::core::skill::SkillMeta> = registry
+            .skills_for_tool(tool_name)
+            .into_iter()
+            .filter(|skill| visible_names.contains(&skill.name))
+            .collect();
         if skills.is_empty() {
             return Err(format!("No skills found for tool '{tool_name}'.").into());
         }
         skills.iter().map(|s| s.name.clone()).collect()
     } else if let Some(skill_name) = name {
+        if !visible_names.contains(skill_name) {
+            return Err(format!("Skill '{skill_name}' not found.").into());
+        }
         vec![skill_name.to_string()]
     } else {
         return Err("Either <name> or --tool <tool> is required for 'skill read'.".into());
@@ -983,10 +1016,34 @@ fn validate_skill(
     Ok(())
 }
 
-fn resolve_skills(cli: &Cli, _scopes_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn resolve_skills(cli: &Cli, scopes_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let skill_registry = load_registry()?;
     let manifest_registry = load_manifest_registry()?;
-    let scopes = load_scopes_from_env();
+    let scopes = if let Some(path) = scopes_path {
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        let scopes = value
+            .get("scopes")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|value| value.to_string()))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        crate::core::scope::ScopeConfig {
+            scopes,
+            sub: value
+                .get("agent_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            expires_at: 0,
+            rate_config: None,
+        }
+    } else {
+        common::load_local_scopes_from_env()?
+    };
 
     let resolved = skill::resolve_skills(&skill_registry, &manifest_registry, &scopes);
 
