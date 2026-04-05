@@ -106,7 +106,8 @@ The proxy server is built into the same `ati` binary — run `ati proxy` to star
 | `ATI_PROXY_URL` leak | URL is not secret; proxy validates requests |
 | Man-in-the-middle on proxy | Use HTTPS for proxy URL |
 | Proxy server compromise | Same risk as any credential store (Vault, etc.) |
-| Agent sends malicious requests | Proxy can validate/rate-limit per-tool |
+| Agent sends malicious requests | Proxy validates JWT scopes on every request |
+| Agent enumerates tools/skills it shouldn't see | Discovery endpoints are scope-filtered |
 
 ### Honest Limitations (Proxy Mode)
 
@@ -136,6 +137,58 @@ Other scope properties:
 - Scope expiry is enforced via JWT `exp`
 - Wildcards such as `tool:github:*` are supported
 - Help access requires the `help` scope when JWT auth is enabled
+
+### Scope-Driven Discovery
+
+Tool and skill listing is scope-filtered — callers only see what their JWT allows:
+
+- `GET /tools` returns only tools the caller's scopes permit
+- `GET /skills` returns only skills reachable from the caller's tool/provider/category scopes
+- MCP `tools/list` returns only the scoped tool subset
+- `ati assist` / `POST /help` builds its LLM context from visible tools and skills only
+
+This prevents scope enumeration: an agent with `tool:web_search` cannot discover the existence of other tools, providers, or skills.
+
+### Skill Scope Resolution
+
+Skills are resolved transitively from tool scopes:
+
+1. `skill:X` → load skill X directly
+2. `tool:Y` → skills whose `tools` binding includes Y
+3. Tool Y's provider → skills whose `providers` binding includes that provider
+4. Provider's category → skills whose `categories` binding includes that category
+5. Any loaded skill's `depends_on` → transitively load those dependencies
+
+Legacy underscore JWT scopes (e.g. `tool:github_search_repos`) are normalized to their colon-namespaced equivalents (`tool:github:search_repos`) for scope checking, maintaining backward compatibility without weakening enforcement.
+
+## SSRF Protection
+
+ATI's HTTP executor optionally blocks Server-Side Request Forgery attacks via `ATI_SSRF_PROTECTION`:
+
+| Mode | Behavior |
+|------|----------|
+| Not set (default) | No SSRF checking |
+| `warn` | Log a warning but allow the request |
+| `1` or `true` | Block requests to private/internal addresses |
+
+When enabled, ATI resolves the target hostname and rejects requests to:
+
+- Loopback addresses (`127.0.0.0/8`, `::1`)
+- Private network ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`)
+- Link-local addresses (`169.254.0.0/16`, `fe80::/10`)
+- Other IPv6 local ranges
+
+DNS resolution is performed at check time to cover hosts that resolve to private IPs. This applies to hand-written HTTP tools; MCP and CLI tools are not currently in scope for SSRF checking.
+
+## GCS Skill Registry Security
+
+When `ATI_SKILL_REGISTRY=gcs://bucket` is configured:
+
+- GCS credentials (`gcp_credentials` keyring key) are a full GCP service account JSON — treat them with the same care as any API key
+- In local mode, credentials come from the ATI keyring (encrypted at rest)
+- In proxy mode, credentials live only on the proxy server; agent sandboxes never see them
+- Remote skill content is fetched on demand and cached in memory for the session; nothing is written to disk
+- Skill content is injected into LLM context via `ati assist` — operators should audit skills in their registry for prompt injection risks before deploying
 
 ## Memory Security (Local Mode)
 

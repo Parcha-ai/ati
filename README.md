@@ -651,9 +651,11 @@ Each agent session gets a JWT with identity, permissions, and an expiry. The pro
 |-------|--------|
 | `tool:web_search` | One specific tool |
 | `tool:github:*` | Wildcard — all GitHub MCP tools |
-| `help` | Access to `ati assist` |
-| `skill:compliance-screening` | A specific skill |
+| `help` | Access to `ati assist` / proxy `/help` endpoint |
+| `skill:compliance-screening` | A specific skill (visible in `/skills` and assist context) |
 | `*` | Everything (dev/testing only) |
+
+Scopes also control **discovery**: `/tools`, `/skills`, and MCP `tools/list` only return what the caller's JWT allows. An agent with `tool:web_search` cannot enumerate any other tools or skills.
 
 ```bash
 # Generate signing keys
@@ -700,11 +702,28 @@ ati skill init my-skill --tools T1,T2       # Scaffold a new skill
 ati skill install ./my-skill/               # Install from local dir
 ati skill install https://github.com/org/repo#skill-name  # Install from git URL
 ati skill resolve                           # See what resolves for current scopes
+
+# Remote skill access (GCS registry, no local install required)
+ati skill fetch catalog                     # List available remote skills
+ati skill fetch catalog --search "sanctions"# Fuzzy search remote catalog
+ati skill fetch read compliance-screening   # Read remote SKILL.md
+ati skill fetch resources fal-generate      # List bundled files for a skill
+ati skill fetch cat fal-generate scripts/generate.sh  # Read a specific file
+ati skill fetch refs fal-generate           # List on-demand references
+ati skill fetch ref fal-generate usage.md  # Read a reference file
+ati skill fetch build-index ./skills/ --output-file catalog.json  # Build a catalog index
 ```
+
+> **`ati skill fetch` vs `ati skillati`:** Both invoke the same commands. `ati skill fetch <cmd>` is the standard entry point; `ati skillati <cmd>` is the standalone alias.
 
 ### GCS Skill Registry
 
-Store skills in a Google Cloud Storage bucket for centralized management. The proxy loads them at startup and serves them to agents — agents don't need GCS credentials.
+Store skills in a Google Cloud Storage bucket for centralized management. The proxy serves them to agents on demand — agents don't need GCS credentials.
+
+**Two access modes:**
+
+- **Via proxy** — agents call `/skillati/*` endpoints; the proxy fetches lazily from GCS on first access, caching results in memory for the session. Local `~/.ati/skills/` skills are always available via `/skills`; GCS skills are served separately via `/skillati/`.
+- **Direct (local mode)** — `ati skill fetch` / `ati skillati` calls GCS directly using credentials from the local keyring.
 
 **Setup:**
 
@@ -724,6 +743,12 @@ Store skills in a Google Cloud Storage bucket for centralized management. The pr
    └── ...
    ```
 
+   Optionally generate a fast-path catalog index for O(1) discovery:
+   ```bash
+   ati skill fetch build-index ./skills/ --output-file catalog.json
+   # Upload catalog.json as gs://my-skills-bucket/_skillati/catalog.v1.json
+   ```
+
 2. Add GCP service account credentials to the ATI keyring:
    ```bash
    ati key set gcp_credentials < /path/to/service-account.json
@@ -734,7 +759,7 @@ Store skills in a Google Cloud Storage bucket for centralized management. The pr
    ATI_SKILL_REGISTRY=gcs://my-skills-bucket ati proxy --port 8090
    ```
 
-The proxy loads all skills from GCS concurrently (~3s for 300 skills), merges them with local `~/.ati/skills/` (local wins on name collision), and serves them via the standard `/skills` endpoints.
+The proxy reads remote skills lazily on first access and caches them for the session. Local `~/.ati/skills/` is always loaded at startup; GCS skills layer on top and are fetched on demand via the `/skillati/*` endpoints.
 
 **Python SDK — downloading skills for agent sandboxes:**
 
@@ -763,9 +788,15 @@ orch.download_skills(
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /skills` | List all skills (local + GCS) |
+| `GET /skills` | List installed (local) skills |
 | `GET /skills/:name/bundle` | Download full skill directory as JSON |
 | `POST /skills/resolve` | Resolve skills for given scopes (with optional content) |
+| `GET /skillati/catalog` | List remote GCS skills (optionally `?search=query`) |
+| `GET /skillati/:name` | Read SKILL.md for a remote skill |
+| `GET /skillati/:name/resources` | List bundled files for a remote skill |
+| `GET /skillati/:name/file?path=...` | Read an arbitrary file from a remote skill |
+| `GET /skillati/:name/refs` | List on-demand reference files |
+| `GET /skillati/:name/ref/:ref` | Read a specific reference file |
 
 ### End-to-End Example: Image → Voice → Lip-Sync Video
 
@@ -918,13 +949,22 @@ ati init --proxy --es256                           # Initialize with JWT keys
 | `/health` | GET | Status — tool/provider/skill counts |
 | `/call` | POST | Execute tool — `{tool_name, args}` |
 | `/mcp` | POST | MCP JSON-RPC pass-through |
-| `/help` | POST | LLM-powered tool guidance |
-| `/skills` | GET | List/search skills |
+| `/help` | POST | LLM-powered tool guidance (`help` scope required) |
+| `/tools` | GET | List/search visible tools (scope-filtered) |
+| `/tools/:name` | GET | Tool detail |
+| `/skills` | GET | List/search installed skills (scope-filtered) |
 | `/skills/:name` | GET | Skill content and metadata |
+| `/skills/:name/bundle` | GET | Full skill directory as JSON |
 | `/skills/resolve` | POST | Resolve skills for scopes |
+| `/skillati/catalog` | GET | List remote GCS skills (`?search=query`) |
+| `/skillati/:name` | GET | Read remote SKILL.md |
+| `/skillati/:name/resources` | GET | List remote skill files |
+| `/skillati/:name/file` | GET | Read a remote skill file (`?path=...`) |
+| `/skillati/:name/refs` | GET | List remote reference files |
+| `/skillati/:name/ref/:ref` | GET | Read a remote reference file |
 | `/.well-known/jwks.json` | GET | JWKS public key |
 
-All endpoints except `/health` and JWKS require `Authorization: Bearer <JWT>` when JWT is configured.
+All endpoints except `/health` and JWKS require `Authorization: Bearer <JWT>` when JWT is configured. Tool and skill listing is scope-filtered — callers only see what their JWT allows.
 
 ---
 
@@ -989,6 +1029,7 @@ COMMANDS:
     tool       List, inspect, search, and discover tools
     provider   Add, list, remove, inspect, and import providers
     skill      Manage skills (methodology docs for agents)
+    skillati   Lazily read remote skills from the GCS registry (alias for `skill fetch`)
     assist     Ask which tools to use and how (LLM-powered)
     key        Manage API keys in the credentials store
     token      JWT token management (keygen, issue, inspect, validate)
@@ -1033,6 +1074,25 @@ ati run finnhub_quote --symbol AAPL                    # Human-readable text (de
 ati --output json run finnhub_quote --symbol AAPL      # JSON for programmatic use
 ati --output table run finnhub_quote --symbol AAPL     # Table for tabular data
 ```
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ATI_PROXY_URL` | Enable proxy mode — forward all calls to this URL |
+| `ATI_SESSION_TOKEN` | JWT Bearer token for proxy auth (carries scopes) |
+| `ATI_DIR` | Override ATI directory (default: `~/.ati`) |
+| `ATI_KEY_FILE` | Override session key path (default: `/run/ati/.key`) |
+| `ATI_OUTPUT` | Default output format: `json`, `table`, `text` |
+| `ATI_JWT_PUBLIC_KEY` | Path to ES256 public key PEM (proxy JWT validation) |
+| `ATI_JWT_PRIVATE_KEY` | Path to ES256 private key PEM (token issuance) |
+| `ATI_JWT_SECRET` | Hex-encoded HS256 shared secret |
+| `ATI_JWT_ISSUER` | Expected `iss` claim in JWTs (optional) |
+| `ATI_JWT_AUDIENCE` | Expected `aud` claim (default: `ati-proxy`) |
+| `ATI_SSRF_PROTECTION` | SSRF protection: `1`/`true` to block, `warn` to log only |
+| `ATI_SKILL_REGISTRY` | GCS bucket URL for remote skills, e.g. `gcs://my-bucket` |
+| `ATI_SKILL_REGISTRY_INDEX_OBJECT` | Override catalog index path in the GCS bucket (default: `_skillati/catalog.v1.json`) |
+| `RUST_LOG` | Tracing log level, e.g. `debug`, `ati=debug` |
 
 ---
 
