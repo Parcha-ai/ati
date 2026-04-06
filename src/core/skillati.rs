@@ -660,7 +660,12 @@ impl SkillAtiClient {
 
     async fn read_text(&self, name: &str, relative_path: &str) -> Result<String, SkillAtiError> {
         let bytes = self.read_bytes(name, relative_path).await?;
-        String::from_utf8(bytes).map_err(|e| SkillAtiError::Gcs(GcsError::Utf8(e.to_string())))
+        String::from_utf8(bytes).map_err(|e| match &self.transport {
+            SkillAtiTransport::Gcs(_) => SkillAtiError::Gcs(GcsError::Utf8(e.to_string())),
+            SkillAtiTransport::Proxy { .. } => SkillAtiError::ProxyResponse(format!(
+                "invalid UTF-8 in {name}/{relative_path}: {e}"
+            )),
+        })
     }
 
     async fn read_bytes(&self, name: &str, relative_path: &str) -> Result<Vec<u8>, SkillAtiError> {

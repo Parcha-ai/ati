@@ -1331,6 +1331,7 @@ fn skillati_client(keyring: &Keyring) -> Result<SkillAtiClient, SkillAtiError> {
 
 async fn handle_skillati_catalog(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     Query(query): Query<SkillAtiCatalogQuery>,
 ) -> impl IntoResponse {
     tracing::debug!(search = ?query.search, "GET /skillati/catalog");
@@ -1340,13 +1341,19 @@ async fn handle_skillati_catalog(
         Err(err) => return skillati_error_response(err),
     };
 
+    let claims = claims.map(|Extension(c)| c);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+
     match client.catalog().await {
         Ok(catalog) => {
-            let skills = if let Some(search) = query.search.as_deref() {
-                SkillAtiClient::filter_catalog(&catalog, search, 25)
-            } else {
-                catalog
-            };
+            let mut skills: Vec<_> = catalog
+                .into_iter()
+                .filter(|s| visible_names.contains(&s.name))
+                .collect();
+            if let Some(search) = query.search.as_deref() {
+                skills = SkillAtiClient::filter_catalog(&skills, search, 25);
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1360,6 +1367,7 @@ async fn handle_skillati_catalog(
 
 async fn handle_skillati_read(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     tracing::debug!(%name, "GET /skillati/:name");
@@ -1369,6 +1377,13 @@ async fn handle_skillati_read(
         Err(err) => return skillati_error_response(err),
     };
 
+    let claims = claims.map(|Extension(c)| c);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+    if !visible_names.contains(&name) {
+        return skillati_error_response(SkillAtiError::SkillNotFound(name));
+    }
+
     match client.read_skill(&name).await {
         Ok(activation) => (StatusCode::OK, Json(serde_json::json!(activation))),
         Err(err) => skillati_error_response(err),
@@ -1377,6 +1392,7 @@ async fn handle_skillati_read(
 
 async fn handle_skillati_resources(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     Query(query): Query<SkillAtiResourcesQuery>,
 ) -> impl IntoResponse {
@@ -1386,6 +1402,13 @@ async fn handle_skillati_resources(
         Ok(client) => client,
         Err(err) => return skillati_error_response(err),
     };
+
+    let claims = claims.map(|Extension(c)| c);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+    if !visible_names.contains(&name) {
+        return skillati_error_response(SkillAtiError::SkillNotFound(name));
+    }
 
     match client.list_resources(&name, query.prefix.as_deref()).await {
         Ok(resources) => (
@@ -1402,6 +1425,7 @@ async fn handle_skillati_resources(
 
 async fn handle_skillati_file(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     Query(query): Query<SkillAtiFileQuery>,
 ) -> impl IntoResponse {
@@ -1412,6 +1436,13 @@ async fn handle_skillati_file(
         Err(err) => return skillati_error_response(err),
     };
 
+    let claims = claims.map(|Extension(c)| c);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+    if !visible_names.contains(&name) {
+        return skillati_error_response(SkillAtiError::SkillNotFound(name));
+    }
+
     match client.read_path(&name, &query.path).await {
         Ok(file) => (StatusCode::OK, Json(serde_json::json!(file))),
         Err(err) => skillati_error_response(err),
@@ -1420,6 +1451,7 @@ async fn handle_skillati_file(
 
 async fn handle_skillati_refs(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     tracing::debug!(%name, "GET /skillati/:name/refs");
@@ -1428,6 +1460,13 @@ async fn handle_skillati_refs(
         Ok(client) => client,
         Err(err) => return skillati_error_response(err),
     };
+
+    let claims = claims.map(|Extension(c)| c);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+    if !visible_names.contains(&name) {
+        return skillati_error_response(SkillAtiError::SkillNotFound(name));
+    }
 
     match client.list_references(&name).await {
         Ok(references) => (
@@ -1443,6 +1482,7 @@ async fn handle_skillati_refs(
 
 async fn handle_skillati_ref(
     State(state): State<Arc<ProxyState>>,
+    claims: Option<Extension<TokenClaims>>,
     axum::extract::Path((name, reference)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
     tracing::debug!(%name, %reference, "GET /skillati/:name/ref/:reference");
@@ -1451,6 +1491,13 @@ async fn handle_skillati_ref(
         Ok(client) => client,
         Err(err) => return skillati_error_response(err),
     };
+
+    let claims = claims.map(|Extension(c)| c);
+    let scopes = scopes_for_request(claims.as_ref(), &state);
+    let visible_names = visible_skill_names(&state, &scopes);
+    if !visible_names.contains(&name) {
+        return skillati_error_response(SkillAtiError::SkillNotFound(name));
+    }
 
     match client.read_reference(&name, &reference).await {
         Ok(content) => (
