@@ -182,13 +182,23 @@ DNS resolution is performed at check time to cover hosts that resolve to private
 
 ## GCS Skill Registry Security
 
-When `ATI_SKILL_REGISTRY=gcs://bucket` is configured:
+Two registry transports are supported via `ATI_SKILL_REGISTRY`:
+
+**`ATI_SKILL_REGISTRY=gcs://bucket`** — direct GCS access:
 
 - GCS credentials (`gcp_credentials` keyring key) are a full GCP service account JSON — treat them with the same care as any API key
 - In local mode, credentials come from the ATI keyring (encrypted at rest)
 - In proxy mode, credentials live only on the proxy server; agent sandboxes never see them
 - Remote skill content is fetched on demand and cached in memory for the session; nothing is written to disk
-- Skill content is injected into LLM context via `ati assist` — operators should audit skills in their registry for prompt injection risks before deploying
+
+**`ATI_SKILL_REGISTRY=proxy`** — fetch skills through the ATI proxy:
+
+- Requires `ATI_PROXY_URL` to be set; `ATI_SESSION_TOKEN` provides auth
+- The sandbox holds zero GCS credentials — skill content is served by the proxy's `/skillati/*` endpoints
+- Useful for network-restricted sandboxes that cannot reach GCS directly but can reach the proxy
+- Skill access is still JWT-scope-gated on the proxy side
+
+Both transports: skill content is injected into LLM context via `ati assist` — operators should audit skills in their registry for prompt injection risks before deploying.
 
 ## Memory Security (Local Mode)
 
