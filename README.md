@@ -1090,7 +1090,7 @@ ati --output table run finnhub_quote --symbol AAPL     # Table for tabular data
 | `ATI_JWT_ISSUER` | Expected `iss` claim in JWTs (optional) |
 | `ATI_JWT_AUDIENCE` | Expected `aud` claim (default: `ati-proxy`) |
 | `ATI_SSRF_PROTECTION` | SSRF protection: `1`/`true` to block, `warn` to log only |
-| `ATI_SKILL_REGISTRY` | GCS bucket URL for remote skills, e.g. `gcs://my-bucket` |
+| `ATI_SKILL_REGISTRY` | Remote skill registry: `gcs://my-bucket` (direct GCS) or `proxy` (fetch through `ATI_PROXY_URL`) |
 | `ATI_SKILL_REGISTRY_INDEX_OBJECT` | Override catalog index path in the GCS bucket (default: `_skillati/catalog.v1.json`) |
 | `RUST_LOG` | Tracing log level, e.g. `debug`, `ati=debug` |
 

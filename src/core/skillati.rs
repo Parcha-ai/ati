@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use base64::Engine;
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -24,12 +25,14 @@ const FALLBACK_CATALOG_CONCURRENCY: usize = 24;
 
 #[derive(Error, Debug)]
 pub enum SkillAtiError {
-    #[error("SkillATI is not configured (set ATI_SKILL_REGISTRY=gcs://<bucket>)")]
+    #[error("SkillATI is not configured (set ATI_SKILL_REGISTRY=gcs://<bucket> or ATI_SKILL_REGISTRY=proxy)")]
     NotConfigured,
     #[error("Unsupported skill registry URL: {0}")]
     UnsupportedRegistry(String),
     #[error("GCS credentials not found in keyring: {0}")]
     MissingCredentials(&'static str),
+    #[error("ATI_PROXY_URL must be set when ATI_SKILL_REGISTRY=proxy")]
+    ProxyUrlRequired,
     #[error("Skill '{0}' not found")]
     SkillNotFound(String),
     #[error("Path '{path}' not found in skill '{skill}'")]
@@ -38,6 +41,10 @@ pub enum SkillAtiError {
     InvalidPath(String),
     #[error(transparent)]
     Gcs(#[from] GcsError),
+    #[error("Proxy request failed: {0}")]
+    ProxyRequest(String),
+    #[error("Proxy returned invalid response: {0}")]
+    ProxyResponse(String),
 }
 
 #[derive(Error, Debug)]
@@ -112,8 +119,17 @@ pub struct SkillAtiFile {
     pub data: SkillAtiFileData,
 }
 
+enum SkillAtiTransport {
+    Gcs(GcsClient),
+    Proxy {
+        http: Client,
+        base_url: String,
+        token: Option<String>,
+    },
+}
+
 pub struct SkillAtiClient {
-    gcs: GcsClient,
+    transport: SkillAtiTransport,
     bytes_cache: Mutex<HashMap<(String, String), Vec<u8>>>,
     resources_cache: Mutex<HashMap<String, Vec<String>>>,
     catalog_cache: Mutex<Option<Vec<SkillAtiCatalogEntry>>>,
@@ -128,6 +144,31 @@ impl SkillAtiClient {
     }
 
     pub fn from_registry_url(registry_url: &str, keyring: &Keyring) -> Result<Self, SkillAtiError> {
+        if registry_url.trim() == "proxy" {
+            let base_url = std::env::var("ATI_PROXY_URL")
+                .ok()
+                .filter(|u| !u.trim().is_empty())
+                .ok_or(SkillAtiError::ProxyUrlRequired)?;
+            let base_url = base_url.trim_end_matches('/').to_string();
+            let token = std::env::var("ATI_SESSION_TOKEN")
+                .ok()
+                .filter(|t| !t.trim().is_empty());
+            let http = Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| SkillAtiError::ProxyRequest(e.to_string()))?;
+            return Ok(Self {
+                transport: SkillAtiTransport::Proxy {
+                    http,
+                    base_url,
+                    token,
+                },
+                bytes_cache: Mutex::new(HashMap::new()),
+                resources_cache: Mutex::new(HashMap::new()),
+                catalog_cache: Mutex::new(None),
+            });
+        }
+
         let bucket = registry_url
             .strip_prefix("gcs://")
             .ok_or_else(|| SkillAtiError::UnsupportedRegistry(registry_url.to_string()))?;
@@ -138,11 +179,203 @@ impl SkillAtiClient {
 
         let gcs = GcsClient::new(bucket.to_string(), cred_json)?;
         Ok(Self {
-            gcs,
+            transport: SkillAtiTransport::Gcs(gcs),
             bytes_cache: Mutex::new(HashMap::new()),
             resources_cache: Mutex::new(HashMap::new()),
             catalog_cache: Mutex::new(None),
         })
+    }
+
+    /// Build an authenticated request to the proxy.
+    fn proxy_request(
+        http: &Client,
+        method: reqwest::Method,
+        url: &str,
+        token: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let mut req = http.request(method, url);
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        req
+    }
+
+    /// Fetch the catalog from the proxy's /skillati/catalog endpoint.
+    async fn proxy_catalog(
+        http: &Client,
+        base_url: &str,
+        token: Option<&str>,
+    ) -> Result<Vec<SkillAtiCatalogEntry>, SkillAtiError> {
+        let url = format!("{base_url}/skillati/catalog");
+        let resp = Self::proxy_request(http, reqwest::Method::GET, &url, token)
+            .send()
+            .await
+            .map_err(|e| SkillAtiError::ProxyRequest(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| SkillAtiError::ProxyRequest(e.to_string()))?;
+
+        if status != 200 {
+            return Err(SkillAtiError::ProxyResponse(format!(
+                "HTTP {status}: {body}"
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct CatalogResp {
+            skills: Vec<RemoteSkillMeta>,
+        }
+        let parsed: CatalogResp =
+            serde_json::from_str(&body).map_err(|e| SkillAtiError::ProxyResponse(e.to_string()))?;
+
+        Ok(parsed
+            .skills
+            .into_iter()
+            .map(|meta| SkillAtiCatalogEntry {
+                meta,
+                resources: Vec::new(),
+                resources_complete: false,
+            })
+            .collect())
+    }
+
+    /// Fetch SKILL.md bytes from the proxy's /skillati/:name endpoint.
+    async fn proxy_read_skill_md(
+        http: &Client,
+        base_url: &str,
+        token: Option<&str>,
+        name: &str,
+    ) -> Result<Vec<u8>, SkillAtiError> {
+        let url = format!("{base_url}/skillati/{name}");
+        let resp = Self::proxy_request(http, reqwest::Method::GET, &url, token)
+            .send()
+            .await
+            .map_err(|e| SkillAtiError::ProxyRequest(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| SkillAtiError::ProxyRequest(e.to_string()))?;
+
+        match status {
+            404 => return Err(SkillAtiError::SkillNotFound(name.to_string())),
+            200 => {}
+            _ => {
+                return Err(SkillAtiError::ProxyResponse(format!(
+                    "HTTP {status}: {body}"
+                )))
+            }
+        }
+
+        // Response is a SkillAtiActivation JSON — extract the content field
+        #[derive(Deserialize)]
+        struct ActivationResp {
+            content: String,
+        }
+        let parsed: ActivationResp =
+            serde_json::from_str(&body).map_err(|e| SkillAtiError::ProxyResponse(e.to_string()))?;
+
+        Ok(parsed.content.into_bytes())
+    }
+
+    /// Fetch a file from the proxy's /skillati/:name/file?path=... endpoint.
+    async fn proxy_read_file(
+        http: &Client,
+        base_url: &str,
+        token: Option<&str>,
+        name: &str,
+        path: &str,
+    ) -> Result<Vec<u8>, SkillAtiError> {
+        if path == "SKILL.md" {
+            return Self::proxy_read_skill_md(http, base_url, token, name).await;
+        }
+
+        let url = format!("{base_url}/skillati/{name}/file");
+        let resp = Self::proxy_request(http, reqwest::Method::GET, &url, token)
+            .query(&[("path", path)])
+            .send()
+            .await
+            .map_err(|e| SkillAtiError::ProxyRequest(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| SkillAtiError::ProxyRequest(e.to_string()))?;
+
+        match status {
+            404 => {
+                return Err(SkillAtiError::PathNotFound {
+                    skill: name.to_string(),
+                    path: path.to_string(),
+                })
+            }
+            200 => {}
+            _ => {
+                return Err(SkillAtiError::ProxyResponse(format!(
+                    "HTTP {status}: {body}"
+                )))
+            }
+        }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum FileDataResp {
+            Text { content: String },
+            Binary { content: String },
+        }
+        let parsed: FileDataResp =
+            serde_json::from_str(&body).map_err(|e| SkillAtiError::ProxyResponse(e.to_string()))?;
+
+        match parsed {
+            FileDataResp::Text { content } => Ok(content.into_bytes()),
+            FileDataResp::Binary { content } => base64::engine::general_purpose::STANDARD
+                .decode(content)
+                .map_err(|e| SkillAtiError::ProxyResponse(e.to_string())),
+        }
+    }
+
+    /// List resources from the proxy's /skillati/:name/resources endpoint.
+    async fn proxy_list_resources(
+        http: &Client,
+        base_url: &str,
+        token: Option<&str>,
+        name: &str,
+    ) -> Result<Vec<String>, SkillAtiError> {
+        let url = format!("{base_url}/skillati/{name}/resources");
+        let resp = Self::proxy_request(http, reqwest::Method::GET, &url, token)
+            .send()
+            .await
+            .map_err(|e| SkillAtiError::ProxyRequest(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| SkillAtiError::ProxyRequest(e.to_string()))?;
+
+        match status {
+            404 => return Err(SkillAtiError::SkillNotFound(name.to_string())),
+            200 => {}
+            _ => {
+                return Err(SkillAtiError::ProxyResponse(format!(
+                    "HTTP {status}: {body}"
+                )))
+            }
+        }
+
+        #[derive(Deserialize)]
+        struct ResourcesResp {
+            resources: Vec<String>,
+        }
+        let parsed: ResourcesResp =
+            serde_json::from_str(&body).map_err(|e| SkillAtiError::ProxyResponse(e.to_string()))?;
+
+        Ok(parsed.resources)
     }
 
     pub async fn catalog(&self) -> Result<Vec<RemoteSkillMeta>, SkillAtiError> {
@@ -274,9 +507,16 @@ impl SkillAtiClient {
             return Ok(cached);
         }
 
-        let entries = match self.load_catalog_index().await? {
-            Some(entries) => entries,
-            None => self.load_catalog_fallback().await?,
+        let entries = match &self.transport {
+            SkillAtiTransport::Proxy {
+                http,
+                base_url,
+                token,
+            } => Self::proxy_catalog(http, base_url, token.as_deref()).await?,
+            SkillAtiTransport::Gcs(_) => match self.load_catalog_index().await? {
+                Some(entries) => entries,
+                None => self.load_catalog_fallback().await?,
+            },
         };
 
         self.catalog_cache.lock().unwrap().replace(entries.clone());
@@ -284,8 +524,14 @@ impl SkillAtiClient {
     }
 
     async fn load_catalog_index(&self) -> Result<Option<Vec<SkillAtiCatalogEntry>>, SkillAtiError> {
+        let gcs = match &self.transport {
+            SkillAtiTransport::Gcs(gcs) => gcs,
+            SkillAtiTransport::Proxy { .. } => {
+                unreachable!("load_catalog_index called on proxy transport")
+            }
+        };
         for candidate in catalog_index_candidates() {
-            match self.gcs.get_object_text(&candidate).await {
+            match gcs.get_object_text(&candidate).await {
                 Ok(raw) => match serde_json::from_str::<SkillAtiCatalogManifest>(&raw) {
                     Ok(mut manifest) => {
                         for entry in &mut manifest.skills {
@@ -319,7 +565,13 @@ impl SkillAtiClient {
     }
 
     async fn load_catalog_fallback(&self) -> Result<Vec<SkillAtiCatalogEntry>, SkillAtiError> {
-        let mut names = self.gcs.list_skill_names().await?;
+        let gcs = match &self.transport {
+            SkillAtiTransport::Gcs(gcs) => gcs,
+            SkillAtiTransport::Proxy { .. } => {
+                unreachable!("load_catalog_fallback called on proxy transport")
+            }
+        };
+        let mut names = gcs.list_skill_names().await?;
         names.sort();
 
         let mut entries: Vec<SkillAtiCatalogEntry> = stream::iter(names.into_iter())
@@ -355,6 +607,22 @@ impl SkillAtiClient {
             return Ok(cached);
         }
 
+        // For proxy transport, fetch directly from proxy
+        if let SkillAtiTransport::Proxy {
+            http,
+            base_url,
+            token,
+        } = &self.transport
+        {
+            let resources =
+                Self::proxy_list_resources(http, base_url, token.as_deref(), name).await?;
+            self.resources_cache
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), resources.clone());
+            return Ok(resources);
+        }
+
         if let Some(indexed) = self
             .catalog_entries()
             .await?
@@ -370,7 +638,11 @@ impl SkillAtiClient {
 
         self.ensure_skill_exists(name).await?;
 
-        let mut resources = self.gcs.list_objects(name).await?;
+        let gcs = match &self.transport {
+            SkillAtiTransport::Gcs(gcs) => gcs,
+            SkillAtiTransport::Proxy { .. } => unreachable!(),
+        };
+        let mut resources = gcs.list_objects(name).await?;
         resources.retain(|path| is_visible_resource(path));
         resources.sort();
         resources.dedup();
@@ -397,12 +669,21 @@ impl SkillAtiClient {
             return Ok(cached);
         }
 
-        let gcs_path = format!("{name}/{relative_path}");
-        let bytes = self
-            .gcs
-            .get_object(&gcs_path)
-            .await
-            .map_err(|e| map_gcs_error(name, relative_path, e))?;
+        let bytes = match &self.transport {
+            SkillAtiTransport::Proxy {
+                http,
+                base_url,
+                token,
+            } => {
+                Self::proxy_read_file(http, base_url, token.as_deref(), name, relative_path).await?
+            }
+            SkillAtiTransport::Gcs(gcs) => {
+                let gcs_path = format!("{name}/{relative_path}");
+                gcs.get_object(&gcs_path)
+                    .await
+                    .map_err(|e| map_gcs_error(name, relative_path, e))?
+            }
+        };
 
         self.bytes_cache
             .lock()

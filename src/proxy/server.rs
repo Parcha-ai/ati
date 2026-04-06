@@ -1469,12 +1469,15 @@ fn skillati_error_response(err: SkillAtiError) -> (StatusCode, Json<Value>) {
     let status = match &err {
         SkillAtiError::NotConfigured
         | SkillAtiError::UnsupportedRegistry(_)
-        | SkillAtiError::MissingCredentials(_) => StatusCode::SERVICE_UNAVAILABLE,
+        | SkillAtiError::MissingCredentials(_)
+        | SkillAtiError::ProxyUrlRequired => StatusCode::SERVICE_UNAVAILABLE,
         SkillAtiError::SkillNotFound(_) | SkillAtiError::PathNotFound { .. } => {
             StatusCode::NOT_FOUND
         }
         SkillAtiError::InvalidPath(_) => StatusCode::BAD_REQUEST,
-        SkillAtiError::Gcs(_) => StatusCode::BAD_GATEWAY,
+        SkillAtiError::Gcs(_)
+        | SkillAtiError::ProxyRequest(_)
+        | SkillAtiError::ProxyResponse(_) => StatusCode::BAD_GATEWAY,
     };
 
     (
