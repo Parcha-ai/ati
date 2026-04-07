@@ -1,7 +1,7 @@
 # ATI Proxy — Agent Tools Interface
 # Downloads pre-built binary from GitHub releases. No compilation needed.
 
-ARG ATI_VERSION=v0.7.0
+ARG ATI_VERSION=v0.7.1
 
 FROM debian:bookworm-slim
 
