@@ -66,11 +66,11 @@ pub enum Commands {
     },
 
     /// List, inspect, and discover tools
-    #[command(subcommand)]
+    #[command(subcommand, alias = "tools")]
     Tool(ToolCommands),
 
     /// Manage skill files (methodology docs for agents)
-    #[command(subcommand)]
+    #[command(subcommand, alias = "skills")]
     Skill(SkillCommands),
 
     /// Lazily read remote skills from the GCS registry without installing them
