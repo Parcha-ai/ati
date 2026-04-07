@@ -522,18 +522,34 @@ impl ManifestRegistry {
 
             // For CLI providers with no [[tools]], auto-register one implicit tool
             if manifest.provider.is_cli() && manifest.tools.is_empty() {
+                let tool_name = manifest.provider.name.clone();
                 manifest.tools.push(Tool {
-                    name: manifest.provider.name.clone(),
+                    name: tool_name.clone(),
                     description: manifest.provider.description.clone(),
                     endpoint: String::new(),
                     method: HttpMethod::Get,
-                    scope: None,
+                    scope: Some(format!("tool:{tool_name}")),
                     input_schema: None,
                     response: None,
                     tags: Vec::new(),
                     hint: None,
                     examples: Vec::new(),
                 });
+            }
+
+            // Auto-assign scope to tools that don't have one explicitly set.
+            // This ensures all tools participate in JWT scope filtering.
+            let provider_name = &manifest.provider.name;
+            for tool in &mut manifest.tools {
+                if tool.scope.is_none() && !manifest.provider.internal {
+                    tool.scope = Some(format!("tool:{}", tool.name));
+                    tracing::trace!(
+                        tool = %tool.name,
+                        provider = %provider_name,
+                        scope = ?tool.scope,
+                        "auto-assigned scope to tool"
+                    );
+                }
             }
 
             let mi = manifests.len();

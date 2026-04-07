@@ -819,7 +819,8 @@ async fn test_jwt_scopes_filter_tools_endpoint() {
     let json = body_json(resp.into_body()).await;
     let tools = json.as_array().unwrap();
     assert!(tools.iter().any(|tool| tool["name"] == "test_search"));
-    assert!(tools.iter().any(|tool| tool["name"] == "test_create"));
+    // test_create has auto-assigned scope "tool:test_create" — not in this JWT
+    assert!(!tools.iter().any(|tool| tool["name"] == "test_create"));
     assert!(!tools.iter().any(|tool| tool["name"] == "test_api:get_data"));
 }
 
@@ -849,7 +850,8 @@ async fn test_jwt_scopes_filter_mcp_tools_list() {
     let json = body_json(resp.into_body()).await;
     let tools = json["result"]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|tool| tool["name"] == "test_search"));
-    assert!(tools.iter().any(|tool| tool["name"] == "test_create"));
+    // test_create has auto-assigned scope "tool:test_create" — not in this JWT
+    assert!(!tools.iter().any(|tool| tool["name"] == "test_create"));
     assert!(!tools.iter().any(|tool| tool["name"] == "test_api:get_data"));
 }
 
