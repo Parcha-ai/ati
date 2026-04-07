@@ -11,7 +11,6 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ati::core::auth_generator::AuthCache;
-use ati::core::jwt::{self, AtiNamespace, TokenClaims};
 use ati::core::keyring::Keyring;
 use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
@@ -125,29 +124,6 @@ fn create_test_keyring(dir: &std::path::Path) -> (std::path::PathBuf, Keyring, s
 async fn body_json(body: Body) -> Value {
     let bytes = body.collect().await.expect("collect body").to_bytes();
     serde_json::from_slice(&bytes).expect("parse body as JSON")
-}
-
-fn issue_help_test_token(scope: &str) -> String {
-    let config = jwt::config_from_secret(
-        b"test-secret-key-32-bytes-long!!!",
-        None,
-        "ati-proxy".into(),
-    );
-    let now = jwt::now_secs();
-    let claims = TokenClaims {
-        iss: None,
-        sub: "test-agent".into(),
-        aud: "ati-proxy".into(),
-        iat: now,
-        exp: now + 3600,
-        jti: None,
-        scope: scope.into(),
-        ati: Some(AtiNamespace {
-            v: 1,
-            rate: std::collections::HashMap::new(),
-        }),
-    };
-    jwt::issue(&claims, &config).unwrap()
 }
 
 // ============================================================
