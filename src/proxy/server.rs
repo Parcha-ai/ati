@@ -523,15 +523,6 @@ async fn handle_help(
 
     let claims = claims.map(|Extension(claims)| claims);
     let scopes = scopes_for_request(claims.as_ref(), &state);
-    if !scopes.help_enabled() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(HelpResponse {
-                content: String::new(),
-                error: Some("Help is not enabled in your scopes.".into()),
-            }),
-        );
-    }
 
     let (llm_provider, llm_tool) = match state.registry.get_tool("_chat_completion") {
         Some(pt) => pt,

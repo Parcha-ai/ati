@@ -197,13 +197,8 @@ async fn execute_local(
         tracing::debug!(scope = %s, "scoped assist");
     }
 
-    // Load scopes from JWT
+    // Load scopes from JWT — used to filter which tools are shown, not to gate access
     let scopes = common::load_local_scopes_from_env()?;
-    if !scopes.help_enabled() {
-        return Err(
-            "Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into(),
-        );
-    }
 
     // Load skills
     let skills_dir = ati_dir.join("skills");
@@ -964,11 +959,6 @@ async fn execute_plan_mode(
 
     // Build system prompt — similar to normal assist but with plan suffix
     let scopes = common::load_local_scopes_from_env()?;
-    if !scopes.help_enabled() {
-        return Err(
-            "Help is not enabled in your scopes. Add 'help' to your JWT scope claim.".into(),
-        );
-    }
     let visible_tools =
         crate::core::scope::filter_tools_by_scope(registry.list_public_tools(), &scopes);
 
