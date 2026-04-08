@@ -5,8 +5,8 @@ use std::process::Stdio;
 use thiserror::Error;
 
 use crate::core::auth_generator::{self, AuthCache, GenContext};
-use crate::core::keyring::Keyring;
 use crate::core::manifest::Provider;
+use crate::core::secret_resolver::SecretResolver;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -117,7 +117,7 @@ pub fn materialize_credential_file(
 
 /// Resolve `${key_ref}` placeholders in a string from the keyring.
 /// Same logic as `resolve_env_value` in `mcp_client.rs`.
-fn resolve_env_value(value: &str, keyring: &Keyring) -> Result<String, CliError> {
+fn resolve_env_value(value: &str, keyring: &SecretResolver<'_>) -> Result<String, CliError> {
     let mut result = value.to_string();
     while let Some(start) = result.find("${") {
         let rest = &result[start + 2..];
@@ -145,7 +145,7 @@ fn resolve_env_value(value: &str, keyring: &Keyring) -> Result<String, CliError>
 /// must span the subprocess execution (they are wiped on drop).
 pub fn resolve_cli_env(
     env_map: &HashMap<String, String>,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
     wipe_on_drop: bool,
     ati_dir: &Path,
 ) -> Result<(HashMap<String, String>, Vec<CredentialFile>), CliError> {
@@ -187,7 +187,7 @@ pub fn resolve_cli_env(
 pub async fn execute(
     provider: &Provider,
     raw_args: &[String],
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
 ) -> Result<serde_json::Value, CliError> {
     execute_with_gen(provider, raw_args, keyring, None, None).await
 }
@@ -196,7 +196,7 @@ pub async fn execute(
 pub async fn execute_with_gen(
     provider: &Provider,
     raw_args: &[String],
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
     gen_ctx: Option<&GenContext>,
     auth_cache: Option<&AuthCache>,
 ) -> Result<serde_json::Value, CliError> {
@@ -216,7 +216,7 @@ pub async fn execute_with_gen(
                 .join(".ati")
         });
 
-    let wipe_on_drop = keyring.ephemeral;
+    let wipe_on_drop = keyring.ephemeral();
 
     // Resolve provider CLI env vars against keyring.
     // cred_files must live until after the subprocess exits (Drop does cleanup).

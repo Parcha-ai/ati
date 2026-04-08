@@ -1,0 +1,13 @@
+[provider]
+name = "browserbase"
+description = "Browser automation CLI for AI agents — navigate, click, type, screenshot, get page content"
+handler = "cli"
+cli_command = "npx"
+cli_default_args = ["@browserbasehq/browse-cli"]
+cli_timeout_secs = 60
+auth_type = "none"
+category = "browser"
+
+[provider.cli_env]
+BROWSERBASE_API_KEY = "${browserbase_api_key}"
+BROWSERBASE_PROJECT_ID = "${browserbase_project_id}"

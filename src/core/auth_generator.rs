@@ -14,8 +14,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
-use crate::core::keyring::Keyring;
 use crate::core::manifest::{AuthGenType, AuthGenerator, AuthOutputFormat, Provider};
+use crate::core::secret_resolver::SecretResolver;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -147,7 +147,7 @@ pub async fn generate(
     provider: &Provider,
     gen: &AuthGenerator,
     ctx: &GenContext,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
     cache: &AuthCache,
 ) -> Result<GeneratedCredential, AuthGenError> {
     // 1. Check cache
@@ -335,7 +335,7 @@ pub async fn generate(
 fn expand_variables(
     input: &str,
     ctx: &GenContext,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
 ) -> Result<String, AuthGenError> {
     let mut result = input.to_string();
     // Process all ${...} patterns
@@ -394,6 +394,8 @@ fn extract_json_path(value: &serde_json::Value, path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::keyring::Keyring;
+    use crate::core::secret_resolver::SecretResolver;
 
     #[test]
     fn test_expand_variables_context() {
@@ -404,21 +406,22 @@ mod tests {
             timestamp: 1773096459,
         };
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
 
         assert_eq!(
-            expand_variables("${JWT_SUB}", &ctx, &keyring).unwrap(),
+            expand_variables("${JWT_SUB}", &ctx, &resolver).unwrap(),
             "agent-7"
         );
         assert_eq!(
-            expand_variables("${TOOL_NAME}", &ctx, &keyring).unwrap(),
+            expand_variables("${TOOL_NAME}", &ctx, &resolver).unwrap(),
             "brain:query"
         );
         assert_eq!(
-            expand_variables("${TIMESTAMP}", &ctx, &keyring).unwrap(),
+            expand_variables("${TIMESTAMP}", &ctx, &resolver).unwrap(),
             "1773096459"
         );
         assert_eq!(
-            expand_variables("sub=${JWT_SUB}&tool=${TOOL_NAME}", &ctx, &keyring).unwrap(),
+            expand_variables("sub=${JWT_SUB}&tool=${TOOL_NAME}", &ctx, &resolver).unwrap(),
             "sub=agent-7&tool=brain:query"
         );
     }
@@ -429,10 +432,11 @@ mod tests {
         let path = dir.path().join("creds");
         std::fs::write(&path, r#"{"my_secret":"s3cr3t"}"#).unwrap();
         let keyring = Keyring::load_credentials(&path).unwrap();
+        let resolver = SecretResolver::operator_only(&keyring);
 
         let ctx = GenContext::default();
         assert_eq!(
-            expand_variables("${my_secret}", &ctx, &keyring).unwrap(),
+            expand_variables("${my_secret}", &ctx, &resolver).unwrap(),
             "s3cr3t"
         );
     }
@@ -440,17 +444,19 @@ mod tests {
     #[test]
     fn test_expand_variables_missing_key() {
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
         let ctx = GenContext::default();
-        let err = expand_variables("${nonexistent}", &ctx, &keyring).unwrap_err();
+        let err = expand_variables("${nonexistent}", &ctx, &resolver).unwrap_err();
         assert!(matches!(err, AuthGenError::KeyringMissing(_)));
     }
 
     #[test]
     fn test_expand_variables_no_placeholder() {
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
         let ctx = GenContext::default();
         assert_eq!(
-            expand_variables("plain text", &ctx, &keyring).unwrap(),
+            expand_variables("plain text", &ctx, &resolver).unwrap(),
             "plain text"
         );
     }
@@ -589,9 +595,10 @@ mod tests {
 
         let ctx = GenContext::default();
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
         let cache = AuthCache::new();
 
-        let cred = generate(&provider, &gen, &ctx, &keyring, &cache)
+        let cred = generate(&provider, &gen, &ctx, &resolver, &cache)
             .await
             .unwrap();
         assert_eq!(cred.value, "hello-token");
@@ -669,9 +676,10 @@ mod tests {
 
         let ctx = GenContext::default();
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
         let cache = AuthCache::new();
 
-        let cred = generate(&provider, &gen, &ctx, &keyring, &cache)
+        let cred = generate(&provider, &gen, &ctx, &resolver, &cache)
             .await
             .unwrap();
         assert_eq!(cred.extra_headers.get("X-Access-Key").unwrap(), "AKIA123");
@@ -731,9 +739,10 @@ mod tests {
 
         let ctx = GenContext::default();
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
         let cache = AuthCache::new();
 
-        let cred = generate(&provider, &gen, &ctx, &keyring, &cache)
+        let cred = generate(&provider, &gen, &ctx, &resolver, &cache)
             .await
             .unwrap();
         assert_eq!(cred.value, "script-token-42");
@@ -795,12 +804,13 @@ mod tests {
             ..GenContext::default()
         };
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
         let cache = AuthCache::new();
 
-        let cred1 = generate(&provider, &gen, &ctx, &keyring, &cache)
+        let cred1 = generate(&provider, &gen, &ctx, &resolver, &cache)
             .await
             .unwrap();
-        let cred2 = generate(&provider, &gen, &ctx, &keyring, &cache)
+        let cred2 = generate(&provider, &gen, &ctx, &resolver, &cache)
             .await
             .unwrap();
         // Second call should return cached value (same value)
@@ -865,9 +875,10 @@ mod tests {
             timestamp: 1234567890,
         };
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
         let cache = AuthCache::new();
 
-        let cred = generate(&provider, &gen, &ctx, &keyring, &cache)
+        let cred = generate(&provider, &gen, &ctx, &resolver, &cache)
             .await
             .unwrap();
         assert_eq!(cred.value, "agent-42");
@@ -926,9 +937,10 @@ mod tests {
 
         let ctx = GenContext::default();
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
         let cache = AuthCache::new();
 
-        let err = generate(&provider, &gen, &ctx, &keyring, &cache)
+        let err = generate(&provider, &gen, &ctx, &resolver, &cache)
             .await
             .unwrap_err();
         assert!(matches!(err, AuthGenError::Timeout(1)));

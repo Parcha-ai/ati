@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::gcs::{GcsClient, GcsError};
-use crate::core::keyring::Keyring;
+use crate::core::secret_resolver::SecretResolver;
 use crate::core::skill::{is_anthropic_valid_name, parse_skill_metadata, strip_frontmatter};
 
 const GCS_CREDENTIAL_KEY: &str = "gcp_credentials";
@@ -136,14 +136,17 @@ pub struct SkillAtiClient {
 }
 
 impl SkillAtiClient {
-    pub fn from_env(keyring: &Keyring) -> Result<Option<Self>, SkillAtiError> {
+    pub fn from_env(keyring: &SecretResolver<'_>) -> Result<Option<Self>, SkillAtiError> {
         match std::env::var("ATI_SKILL_REGISTRY") {
             Ok(url) if !url.trim().is_empty() => Ok(Some(Self::from_registry_url(&url, keyring)?)),
             _ => Ok(None),
         }
     }
 
-    pub fn from_registry_url(registry_url: &str, keyring: &Keyring) -> Result<Self, SkillAtiError> {
+    pub fn from_registry_url(
+        registry_url: &str,
+        keyring: &SecretResolver<'_>,
+    ) -> Result<Self, SkillAtiError> {
         if registry_url.trim() == "proxy" {
             let base_url = std::env::var("ATI_PROXY_URL")
                 .ok()

@@ -12,6 +12,7 @@ use crate::core::keyring::Keyring;
 use crate::core::manifest::{CachedProvider, ManifestRegistry};
 use crate::core::mcp_client::McpClient;
 use crate::core::openapi::{self, OpenApiFilters};
+use crate::core::secret_resolver::SecretResolver;
 use crate::output;
 use crate::{Cli, OutputFormat, ProviderCommands};
 use chrono::Utc;
@@ -1407,7 +1408,8 @@ async fn probe_mcp_provider(
     keyring: &Keyring,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let provider = cached.to_provider();
-    let client = McpClient::connect(&provider, keyring).await?;
+    let resolver = SecretResolver::operator_only(keyring);
+    let client = McpClient::connect(&provider, &resolver).await?;
     let tools = client.list_tools().await?;
     let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
     client.disconnect().await;

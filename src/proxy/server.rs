@@ -28,6 +28,7 @@ use crate::core::manifest::{ManifestRegistry, Provider, Tool};
 use crate::core::mcp_client;
 use crate::core::response;
 use crate::core::scope::ScopeConfig;
+use crate::core::secret_resolver::SecretResolver;
 use crate::core::skill::{self, SkillRegistry};
 use crate::core::skillati::{RemoteSkillMeta, SkillAtiClient, SkillAtiError};
 use crate::core::xai;
@@ -393,6 +394,7 @@ async fn handle_call(
 
     // Execute tool call — dispatch based on handler type, with timing for audit
     let agent_sub = claims.as_ref().map(|c| c.sub.clone()).unwrap_or_default();
+    let resolver = SecretResolver::operator_only(&state.keyring);
     let start = std::time::Instant::now();
 
     let response = match provider.handler.as_str() {
@@ -402,7 +404,7 @@ async fn handle_call(
                 provider,
                 &call_req.tool_name,
                 &args_map,
-                &state.keyring,
+                &resolver,
                 Some(&gen_ctx),
                 Some(&state.auth_cache),
             )
@@ -429,7 +431,7 @@ async fn handle_call(
             match crate::core::cli_executor::execute_with_gen(
                 provider,
                 &positional,
-                &state.keyring,
+                &resolver,
                 Some(&gen_ctx),
                 Some(&state.auth_cache),
             )
@@ -454,13 +456,13 @@ async fn handle_call(
         _ => {
             let args_map = call_req.args_as_map();
             let raw_response = match match provider.handler.as_str() {
-                "xai" => xai::execute_xai_tool(provider, tool, &args_map, &state.keyring).await,
+                "xai" => xai::execute_xai_tool(provider, tool, &args_map, &resolver).await,
                 _ => {
                     http::execute_tool_with_gen(
                         provider,
                         tool,
                         &args_map,
-                        &state.keyring,
+                        &resolver,
                         Some(&gen_ctx),
                         Some(&state.auth_cache),
                     )
@@ -523,6 +525,7 @@ async fn handle_help(
 
     let claims = claims.map(|Extension(claims)| claims);
     let scopes = scopes_for_request(claims.as_ref(), &state);
+    let resolver = SecretResolver::operator_only(&state.keyring);
 
     let (llm_provider, llm_tool) = match state.registry.get_tool("_chat_completion") {
         Some(pt) => pt,
@@ -540,7 +543,7 @@ async fn handle_help(
     let api_key = match llm_provider
         .auth_key_name
         .as_deref()
-        .and_then(|k| state.keyring.get(k))
+        .and_then(|k| resolver.get(k))
     {
         Some(key) => key.to_string(),
         None => {
@@ -568,8 +571,7 @@ async fn handle_help(
         .as_ref()
         .map(|tool| format!("{tool} {}", req.query))
         .unwrap_or_else(|| req.query.clone());
-    let remote_skills_section =
-        build_remote_skillati_section(&state.keyring, &remote_query, 12).await;
+    let remote_skills_section = build_remote_skillati_section(&resolver, &remote_query, 12).await;
     let skills_section = merge_help_skill_sections(&[local_skills_section, remote_skills_section]);
 
     // Build system prompt — scoped or unscoped
@@ -712,6 +714,7 @@ async fn handle_mcp(
 ) -> impl IntoResponse {
     let claims = claims.map(|Extension(claims)| claims);
     let scopes = scopes_for_request(claims.as_ref(), &state);
+    let resolver = SecretResolver::operator_only(&state.keyring);
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
 
@@ -805,7 +808,7 @@ async fn handle_mcp(
                     provider,
                     tool_name,
                     &arguments,
-                    &state.keyring,
+                    &resolver,
                     Some(&mcp_gen_ctx),
                     Some(&state.auth_cache),
                 )
@@ -825,7 +828,7 @@ async fn handle_mcp(
                 crate::core::cli_executor::execute_with_gen(
                     provider,
                     &raw,
-                    &state.keyring,
+                    &resolver,
                     Some(&mcp_gen_ctx),
                     Some(&state.auth_cache),
                 )
@@ -833,15 +836,13 @@ async fn handle_mcp(
                 .map_err(|e| mcp_client::McpError::Transport(e.to_string()))
             } else {
                 match match provider.handler.as_str() {
-                    "xai" => {
-                        xai::execute_xai_tool(provider, _tool, &arguments, &state.keyring).await
-                    }
+                    "xai" => xai::execute_xai_tool(provider, _tool, &arguments, &resolver).await,
                     _ => {
                         http::execute_tool_with_gen(
                             provider,
                             _tool,
                             &arguments,
-                            &state.keyring,
+                            &resolver,
                             Some(&mcp_gen_ctx),
                             Some(&state.auth_cache),
                         )
@@ -1313,7 +1314,7 @@ async fn handle_skills_resolve(
     (StatusCode::OK, Json(Value::Array(json)))
 }
 
-fn skillati_client(keyring: &Keyring) -> Result<SkillAtiClient, SkillAtiError> {
+fn skillati_client(keyring: &SecretResolver<'_>) -> Result<SkillAtiClient, SkillAtiError> {
     match SkillAtiClient::from_env(keyring)? {
         Some(client) => Ok(client),
         None => Err(SkillAtiError::NotConfigured),
@@ -1327,7 +1328,7 @@ async fn handle_skillati_catalog(
 ) -> impl IntoResponse {
     tracing::debug!(search = ?query.search, "GET /skillati/catalog");
 
-    let client = match skillati_client(&state.keyring) {
+    let client = match skillati_client(&SecretResolver::operator_only(&state.keyring)) {
         Ok(client) => client,
         Err(err) => return skillati_error_response(err),
     };
@@ -1363,7 +1364,7 @@ async fn handle_skillati_read(
 ) -> impl IntoResponse {
     tracing::debug!(%name, "GET /skillati/:name");
 
-    let client = match skillati_client(&state.keyring) {
+    let client = match skillati_client(&SecretResolver::operator_only(&state.keyring)) {
         Ok(client) => client,
         Err(err) => return skillati_error_response(err),
     };
@@ -1389,7 +1390,7 @@ async fn handle_skillati_resources(
 ) -> impl IntoResponse {
     tracing::debug!(%name, prefix = ?query.prefix, "GET /skillati/:name/resources");
 
-    let client = match skillati_client(&state.keyring) {
+    let client = match skillati_client(&SecretResolver::operator_only(&state.keyring)) {
         Ok(client) => client,
         Err(err) => return skillati_error_response(err),
     };
@@ -1422,7 +1423,7 @@ async fn handle_skillati_file(
 ) -> impl IntoResponse {
     tracing::debug!(%name, path = %query.path, "GET /skillati/:name/file");
 
-    let client = match skillati_client(&state.keyring) {
+    let client = match skillati_client(&SecretResolver::operator_only(&state.keyring)) {
         Ok(client) => client,
         Err(err) => return skillati_error_response(err),
     };
@@ -1447,7 +1448,7 @@ async fn handle_skillati_refs(
 ) -> impl IntoResponse {
     tracing::debug!(%name, "GET /skillati/:name/refs");
 
-    let client = match skillati_client(&state.keyring) {
+    let client = match skillati_client(&SecretResolver::operator_only(&state.keyring)) {
         Ok(client) => client,
         Err(err) => return skillati_error_response(err),
     };
@@ -1478,7 +1479,7 @@ async fn handle_skillati_ref(
 ) -> impl IntoResponse {
     tracing::debug!(%name, %reference, "GET /skillati/:name/ref/:reference");
 
-    let client = match skillati_client(&state.keyring) {
+    let client = match skillati_client(&SecretResolver::operator_only(&state.keyring)) {
         Ok(client) => client,
         Err(err) => return skillati_error_response(err),
     };
@@ -1676,7 +1677,8 @@ pub async fn run(
 
     // Discover MCP tools at startup so they appear in GET /tools.
     // Runs concurrently across providers with 30s per-provider timeout.
-    mcp_client::discover_all_mcp_tools(&mut registry, &keyring).await;
+    let startup_resolver = SecretResolver::operator_only(&keyring);
+    mcp_client::discover_all_mcp_tools(&mut registry, &startup_resolver).await;
 
     let tool_count = registry.list_public_tools().len();
 
@@ -1822,7 +1824,11 @@ Answer the agent's question naturally, like a knowledgeable colleague would. Kee
 
 Keep your answer concise — a few short paragraphs with embedded code blocks. Only recommend tools from the list above."#;
 
-async fn build_remote_skillati_section(keyring: &Keyring, query: &str, limit: usize) -> String {
+async fn build_remote_skillati_section(
+    keyring: &SecretResolver<'_>,
+    query: &str,
+    limit: usize,
+) -> String {
     let client = match SkillAtiClient::from_env(keyring) {
         Ok(Some(client)) => client,
         Ok(None) => return String::new(),

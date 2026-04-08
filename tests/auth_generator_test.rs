@@ -12,6 +12,7 @@ use ati::core::manifest::{
     AuthGenType, AuthGenerator, AuthOutputFormat, AuthType, HttpMethod, InjectTarget,
     ManifestRegistry,
 };
+use ati::core::secret_resolver::SecretResolver;
 use serde_json::json;
 use std::collections::HashMap;
 use wiremock::matchers::{header, method, path};
@@ -39,13 +40,15 @@ async fn test_auth_generator_bearer_token_injected() {
     let tool = common::test_tool("gen_data", "/data", HttpMethod::Get);
 
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
     let args = HashMap::new();
 
-    let result = execute_tool_with_gen(&provider, &tool, &args, &keyring, Some(&ctx), Some(&cache))
-        .await
-        .expect("execute_tool_with_gen should succeed");
+    let result =
+        execute_tool_with_gen(&provider, &tool, &args, &resolver, Some(&ctx), Some(&cache))
+            .await
+            .expect("execute_tool_with_gen should succeed");
 
     assert_eq!(result["status"], "authenticated");
 }
@@ -83,6 +86,7 @@ async fn test_auth_generator_variable_expansion() {
     let tool = common::test_tool("agent_tool", "/agent", HttpMethod::Get);
 
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext {
         jwt_sub: "agent-42".into(),
@@ -90,9 +94,10 @@ async fn test_auth_generator_variable_expansion() {
     };
     let args = HashMap::new();
 
-    let result = execute_tool_with_gen(&provider, &tool, &args, &keyring, Some(&ctx), Some(&cache))
-        .await
-        .expect("variable expansion should work");
+    let result =
+        execute_tool_with_gen(&provider, &tool, &args, &resolver, Some(&ctx), Some(&cache))
+            .await
+            .expect("variable expansion should work");
 
     assert_eq!(result["agent"], "verified");
 }
@@ -148,13 +153,15 @@ async fn test_auth_generator_json_output_with_inject() {
     let tool = common::test_tool("secure_create", "/secure", HttpMethod::Post);
 
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
     let args = HashMap::new();
 
-    let result = execute_tool_with_gen(&provider, &tool, &args, &keyring, Some(&ctx), Some(&cache))
-        .await
-        .expect("JSON inject should work");
+    let result =
+        execute_tool_with_gen(&provider, &tool, &args, &resolver, Some(&ctx), Some(&cache))
+            .await
+            .expect("JSON inject should work");
 
     assert_eq!(result["injected"], true);
 }
@@ -193,6 +200,7 @@ async fn test_auth_generator_caching() {
     let tool = common::test_tool("cached_tool", "/cached", HttpMethod::Get);
 
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext {
         jwt_sub: "cache-agent".into(),
@@ -201,12 +209,12 @@ async fn test_auth_generator_caching() {
     let args = HashMap::new();
 
     // First call — generator runs, result cached
-    let _r1 = execute_tool_with_gen(&provider, &tool, &args, &keyring, Some(&ctx), Some(&cache))
+    let _r1 = execute_tool_with_gen(&provider, &tool, &args, &resolver, Some(&ctx), Some(&cache))
         .await
         .expect("first call should succeed");
 
     // Second call — should use cached value
-    let _r2 = execute_tool_with_gen(&provider, &tool, &args, &keyring, Some(&ctx), Some(&cache))
+    let _r2 = execute_tool_with_gen(&provider, &tool, &args, &resolver, Some(&ctx), Some(&cache))
         .await
         .expect("second call should succeed");
 
@@ -272,11 +280,12 @@ type = "object"
     let (provider, tool) = registry.get_tool("gen_info").expect("tool should exist");
 
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
     let args = HashMap::new();
 
-    let result = execute_tool_with_gen(provider, tool, &args, &keyring, Some(&ctx), Some(&cache))
+    let result = execute_tool_with_gen(provider, tool, &args, &resolver, Some(&ctx), Some(&cache))
         .await
         .expect("manifest round-trip should succeed");
 

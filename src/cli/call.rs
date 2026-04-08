@@ -201,13 +201,14 @@ async fn execute_local(
 
     // Load keyring using cascade
     let keyring = load_keyring(&ati_dir);
+    let resolver = crate::core::secret_resolver::SecretResolver::operator_only(&keyring);
 
     // Look up tool — if not found, try MCP discovery
     if registry.get_tool(tool_name).is_none() {
         if let Some(mcp_provider) = registry.find_mcp_provider_for_tool(tool_name) {
             tracing::debug!(provider = %mcp_provider.name, "tool not in static index, discovering from MCP provider");
             let provider_name = mcp_provider.name.clone();
-            let client = mcp_client::McpClient::connect(mcp_provider, &keyring).await?;
+            let client = mcp_client::McpClient::connect(mcp_provider, &resolver).await?;
             let mcp_tools = client.list_tools().await?;
             client.disconnect().await;
             let tools = mcp_tools
@@ -289,7 +290,7 @@ async fn execute_local(
                 provider,
                 tool_name,
                 &args,
-                &keyring,
+                &resolver,
                 Some(&gen_ctx),
                 Some(&auth_cache),
             )
@@ -303,7 +304,7 @@ async fn execute_local(
             match crate::core::cli_executor::execute_with_gen(
                 provider,
                 raw_args,
-                &keyring,
+                &resolver,
                 Some(&gen_ctx),
                 Some(&auth_cache),
             )
@@ -318,7 +319,7 @@ async fn execute_local(
                 provider,
                 tool,
                 &args,
-                &keyring,
+                &resolver,
                 &effective_output,
                 Some(&gen_ctx),
                 Some(&auth_cache),

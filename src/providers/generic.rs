@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use crate::core::auth_generator::{AuthCache, GenContext};
 use crate::core::{
     http,
-    keyring::Keyring,
     manifest::{Provider, Tool},
     response,
+    secret_resolver::SecretResolver,
 };
 use crate::output;
 use crate::OutputFormat;
@@ -21,7 +21,7 @@ pub async fn execute(
     provider: &Provider,
     tool: &Tool,
     args: &HashMap<String, Value>,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
     output_format: &OutputFormat,
 ) -> Result<String, Box<dyn std::error::Error>> {
     execute_with_gen(provider, tool, args, keyring, output_format, None, None).await
@@ -32,7 +32,7 @@ pub async fn execute_with_gen(
     provider: &Provider,
     tool: &Tool,
     args: &HashMap<String, Value>,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
     output_format: &OutputFormat,
     gen_ctx: Option<&GenContext>,
     auth_cache: Option<&AuthCache>,

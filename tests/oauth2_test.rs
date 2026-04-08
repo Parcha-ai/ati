@@ -10,6 +10,7 @@ mod common;
 use ati::core::http::execute_tool_with_gen;
 use ati::core::keyring::Keyring;
 use ati::core::manifest::AuthType;
+use ati::core::secret_resolver::SecretResolver;
 use std::collections::HashMap;
 use wiremock::MockServer;
 
@@ -31,9 +32,10 @@ async fn test_oauth2_rejects_http_token_url() {
         ati::core::manifest::HttpMethod::Get,
     );
     let keyring = common::test_keyring(&[("client_id", "id"), ("client_secret", "secret")]);
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let args = HashMap::new();
-    let err = execute_tool_with_gen(&provider, &tool, &args, &keyring, None, None)
+    let err = execute_tool_with_gen(&provider, &tool, &args, &resolver, None, None)
         .await
         .unwrap_err();
 
@@ -57,9 +59,10 @@ async fn test_oauth2_missing_client_id_key() {
     };
     let tool = common::test_tool("oauth_tool", "/data", ati::core::manifest::HttpMethod::Get);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let args = HashMap::new();
-    let err = execute_tool_with_gen(&provider, &tool, &args, &keyring, None, None)
+    let err = execute_tool_with_gen(&provider, &tool, &args, &resolver, None, None)
         .await
         .unwrap_err();
 
@@ -82,9 +85,10 @@ async fn test_oauth2_missing_client_secret_key() {
     };
     let tool = common::test_tool("oauth_tool", "/data", ati::core::manifest::HttpMethod::Get);
     let keyring = common::test_keyring(&[("client_id", "test-id")]);
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let args = HashMap::new();
-    let err = execute_tool_with_gen(&provider, &tool, &args, &keyring, None, None)
+    let err = execute_tool_with_gen(&provider, &tool, &args, &resolver, None, None)
         .await
         .unwrap_err();
 
@@ -107,9 +111,10 @@ async fn test_oauth2_missing_token_url() {
     };
     let tool = common::test_tool("oauth_tool", "/data", ati::core::manifest::HttpMethod::Get);
     let keyring = common::test_keyring(&[("client_id", "id"), ("client_secret", "secret")]);
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let args = HashMap::new();
-    let err = execute_tool_with_gen(&provider, &tool, &args, &keyring, None, None)
+    let err = execute_tool_with_gen(&provider, &tool, &args, &resolver, None, None)
         .await
         .unwrap_err();
 
@@ -132,9 +137,10 @@ async fn test_oauth2_missing_keyring_creds() {
     };
     let tool = common::test_tool("oauth_tool", "/data", ati::core::manifest::HttpMethod::Get);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let args = HashMap::new();
-    let err = execute_tool_with_gen(&provider, &tool, &args, &keyring, None, None)
+    let err = execute_tool_with_gen(&provider, &tool, &args, &resolver, None, None)
         .await
         .unwrap_err();
 
