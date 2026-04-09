@@ -44,6 +44,8 @@ pub struct ProxyState {
     pub jwks_json: Option<Value>,
     /// Shared cache for dynamically generated auth credentials.
     pub auth_cache: AuthCache,
+    /// Optional per-user secret backend for multi-tenant deployments.
+    pub secret_backend: Option<std::sync::Arc<dyn crate::core::secret_backend::SecretBackend>>,
 }
 
 // --- Request/Response types ---
@@ -248,6 +250,46 @@ fn visible_skill_names(
         .collect()
 }
 
+/// Build a `SecretResolver` for a request. If a secret backend is configured and
+/// the caller has a `sub` claim, prefetches per-user secrets for the provider's
+/// needed keys. Otherwise returns an operator-only resolver.
+async fn build_resolver<'a>(
+    state: &'a ProxyState,
+    claims: Option<&TokenClaims>,
+    provider: Option<&Provider>,
+) -> SecretResolver<'a> {
+    if let (Some(backend), Some(claims)) = (&state.secret_backend, claims) {
+        if !claims.sub.is_empty() {
+            let keys_needed = match provider {
+                Some(p) => crate::core::secret_resolver::keys_needed(p),
+                None => Vec::new(),
+            };
+            if !keys_needed.is_empty() {
+                let key_refs: Vec<&str> = keys_needed.iter().map(|s| s.as_str()).collect();
+                match backend.resolve(&claims.sub, &key_refs).await {
+                    Ok(user_secrets) if !user_secrets.is_empty() => {
+                        tracing::debug!(
+                            sub = %claims.sub,
+                            keys = ?user_secrets.keys().collect::<Vec<_>>(),
+                            "resolved per-user secrets from backend"
+                        );
+                        return SecretResolver::with_user_secrets(&state.keyring, user_secrets);
+                    }
+                    Ok(_) => {} // no user secrets found, fall through to operator
+                    Err(err) => {
+                        tracing::warn!(
+                            sub = %claims.sub,
+                            error = %err,
+                            "secret backend error, falling back to operator keyring"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    SecretResolver::operator_only(&state.keyring)
+}
+
 async fn handle_call(
     State(state): State<Arc<ProxyState>>,
     req: HttpRequest<Body>,
@@ -394,7 +436,7 @@ async fn handle_call(
 
     // Execute tool call — dispatch based on handler type, with timing for audit
     let agent_sub = claims.as_ref().map(|c| c.sub.clone()).unwrap_or_default();
-    let resolver = SecretResolver::operator_only(&state.keyring);
+    let resolver = build_resolver(&state, claims.as_ref(), Some(provider)).await;
     let start = std::time::Instant::now();
 
     let response = match provider.handler.as_str() {
@@ -525,7 +567,6 @@ async fn handle_help(
 
     let claims = claims.map(|Extension(claims)| claims);
     let scopes = scopes_for_request(claims.as_ref(), &state);
-    let resolver = SecretResolver::operator_only(&state.keyring);
 
     let (llm_provider, llm_tool) = match state.registry.get_tool("_chat_completion") {
         Some(pt) => pt,
@@ -539,6 +580,8 @@ async fn handle_help(
             );
         }
     };
+
+    let resolver = build_resolver(&state, claims.as_ref(), Some(llm_provider)).await;
 
     let api_key = match llm_provider
         .auth_key_name
@@ -714,7 +757,7 @@ async fn handle_mcp(
 ) -> impl IntoResponse {
     let claims = claims.map(|Extension(claims)| claims);
     let scopes = scopes_for_request(claims.as_ref(), &state);
-    let resolver = SecretResolver::operator_only(&state.keyring);
+    let resolver = build_resolver(&state, claims.as_ref(), None).await;
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
 
@@ -1739,6 +1782,26 @@ pub async fn run(
             .and_then(|pem| jwt::public_key_to_jwks(pem, config.algorithm, "ati-proxy-1").ok())
     });
 
+    // Load optional per-user secret backend.
+    let secret_backend: Option<std::sync::Arc<dyn crate::core::secret_backend::SecretBackend>> = {
+        use crate::core::secret_backend;
+        secret_backend::config_from_env().and_then(|config| {
+            match secret_backend::build_backend(&config) {
+                Ok(backend) => {
+                    tracing::info!(
+                        backend = ?config,
+                        "per-user secret backend configured"
+                    );
+                    Some(std::sync::Arc::from(backend))
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to initialize secret backend, continuing without");
+                    None
+                }
+            }
+        })
+    };
+
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
@@ -1746,6 +1809,7 @@ pub async fn run(
         jwt_config,
         jwks_json,
         auth_cache: AuthCache::new(),
+        secret_backend,
     });
 
     let app = build_router(state);

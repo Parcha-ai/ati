@@ -249,6 +249,7 @@ pub fn build_test_app(registry: ManifestRegistry) -> axum::Router {
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        secret_backend: None,
     });
     build_router(state)
 }
@@ -263,6 +264,7 @@ pub fn build_test_app_with_jwt(registry: ManifestRegistry) -> axum::Router {
         jwt_config: Some(test_jwt_config()),
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        secret_backend: None,
     });
     build_router(state)
 }
@@ -281,6 +283,7 @@ pub fn build_test_app_full(
         jwt_config: if jwt { Some(test_jwt_config()) } else { None },
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        secret_backend: None,
     });
     build_router(state)
 }
