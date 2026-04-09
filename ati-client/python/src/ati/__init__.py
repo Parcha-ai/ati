@@ -14,6 +14,7 @@ from .token import (
 
 __all__ = [
     "AtiOrchestrator",
+    "build_skill_instructions",
     # Token
     "issue_token",
     "validate_token",
@@ -31,6 +32,21 @@ __all__ = [
     "ScopeError",
     "ProvisionError",
 ]
+
+
+def build_skill_instructions(skills: list[str]) -> str:
+    """Build agent instructions for fetching and reading skills.
+
+    Convenience wrapper around ``AtiOrchestrator.build_skill_instructions()``.
+    No proxy connection needed — just takes skill names and returns a prompt.
+
+    Args:
+        skills: List of skill names.
+
+    Returns:
+        Instruction string for the agent.
+    """
+    return AtiOrchestrator.build_skill_instructions(skills)
 
 __version__ = "0.7.1"
 
@@ -356,5 +372,45 @@ class AtiOrchestrator:
                 lines.append(f"Before using {provider} tools, read the relevant skill:")
                 for skill in skill_names:
                     lines.append(f"  ati skill fetch read {skill}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def build_skill_instructions(
+        skills: list[str],
+    ) -> str:
+        """Build agent instructions for fetching and reading skills.
+
+        Takes a list of skill names (e.g. from an expert config) and generates
+        instructions telling the agent what skills are available and how to
+        fetch them before starting work.
+
+        This is a static method — no proxy connection needed.
+
+        Args:
+            skills: List of skill names (e.g. ``["financial-data-research", "research-realtime-data"]``).
+
+        Returns:
+            Instruction string for the agent, or empty string if no skills provided.
+        """
+        if not skills:
+            return ""
+
+        lines = [
+            "# Available Skills",
+            "",
+            "The following skills contain methodology and detailed guidance for this task.",
+            "Read the relevant skill(s) before using the associated tools.",
+            "",
+        ]
+
+        for skill in skills:
+            lines.append(f"- **{skill}**: `ati skill fetch read {skill}`")
+
+        lines.append("")
+        lines.append(
+            "Use `ati skill fetch read <name>` to fetch and read a skill's full methodology. "
+            "Skills contain tool-specific workflows, parameter guidance, and best practices."
+        )
 
         return "\n".join(lines)
