@@ -55,7 +55,7 @@ pub struct Cli {
 pub enum Commands {
     /// Execute a tool by name
     #[command(
-        after_help = "Examples:\n  ati run web_search --query \"rust async\"\n  ati run github:search_repositories --query \"ati\" -J\n  ati run get_stock_quote --symbol AAPL --output json"
+        after_help = "Examples:\n  ati run web_search --query \"rust async\"\n  ati run github:search_repositories --query \"ati\" -J\n  ati run get_stock_quote --symbol AAPL --output json\n\nTip: run 'ati tool info <name>' to see associated skills and usage guidance."
     )]
     Run {
         /// Tool name (e.g. web_search)

@@ -8,6 +8,7 @@ cli_timeout_secs = 120
 auth_type = "none"
 category = "productivity"
 tags = ["google", "workspace", "drive", "gmail", "calendar", "sheets", "docs"]
+skills = ["google-workspace"]
 
 # gws manages its own auth natively via `gws auth setup`.
 # For headless/service-account use, ATI materializes credentials as a temp file.

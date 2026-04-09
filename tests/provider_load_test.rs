@@ -653,6 +653,7 @@ fn test_cached_provider_serialization_roundtrip() {
         auth: None,
         created_at: "2026-03-04T12:00:00Z".to_string(),
         ttl_seconds: 3600,
+        skills: Vec::new(),
     };
 
     let json = serde_json::to_string(&cached).unwrap();
@@ -690,6 +691,7 @@ fn test_cached_provider_expiry() {
         auth: None,
         created_at: "2020-01-01T00:00:00Z".to_string(),
         ttl_seconds: 3600,
+        skills: Vec::new(),
     };
 
     assert!(expired.is_expired());
@@ -717,6 +719,7 @@ fn test_cached_provider_expiry() {
         auth: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         ttl_seconds: 999999,
+        skills: Vec::new(),
     };
 
     assert!(!fresh.is_expired());
@@ -750,6 +753,7 @@ fn test_cached_provider_to_provider() {
         auth: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         ttl_seconds: 3600,
+        skills: Vec::new(),
     };
 
     let provider = cached.to_provider();

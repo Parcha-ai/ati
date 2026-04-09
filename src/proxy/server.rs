@@ -950,6 +950,7 @@ async fn handle_tools_list(
                 "provider": provider.name,
                 "method": format!("{:?}", tool.method),
                 "tags": tool.tags,
+                "skills": provider.skills,
                 "input_schema": tool.input_schema,
             })
         })
@@ -976,20 +977,36 @@ async fn handle_tool_info(
             Some(scope) => scopes.is_allowed(scope),
             None => true,
         }) {
-        Some((provider, tool)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "provider": provider.name,
-                "method": format!("{:?}", tool.method),
-                "endpoint": tool.endpoint,
-                "tags": tool.tags,
-                "hint": tool.hint,
-                "input_schema": tool.input_schema,
-                "scope": tool.scope,
-            })),
-        ),
+        Some((provider, tool)) => {
+            // Merge skills from manifest + SkillRegistry (tool binding + provider binding)
+            let mut skills: Vec<String> = provider.skills.clone();
+            for s in state.skill_registry.skills_for_tool(&tool.name) {
+                if !skills.contains(&s.name) {
+                    skills.push(s.name.clone());
+                }
+            }
+            for s in state.skill_registry.skills_for_provider(&provider.name) {
+                if !skills.contains(&s.name) {
+                    skills.push(s.name.clone());
+                }
+            }
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "provider": provider.name,
+                    "method": format!("{:?}", tool.method),
+                    "endpoint": tool.endpoint,
+                    "tags": tool.tags,
+                    "hint": tool.hint,
+                    "skills": skills,
+                    "input_schema": tool.input_schema,
+                    "scope": tool.scope,
+                })),
+            )
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("Tool '{name}' not found")})),
