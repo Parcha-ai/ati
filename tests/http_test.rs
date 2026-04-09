@@ -1,6 +1,7 @@
 use ati::core::http::{execute_tool, validate_headers, HttpError};
 use ati::core::keyring::Keyring;
 use ati::core::manifest::{AuthType, HttpMethod, Provider, Tool};
+use ati::core::secret_resolver::SecretResolver;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use wiremock::matchers::{body_string_contains, header, method, path, query_param};
@@ -200,11 +201,12 @@ async fn test_array_query_param_multi() {
     });
     let tool = mock_tool("/pets", HttpMethod::Get, schema);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let mut args = HashMap::new();
     args.insert("status".into(), json!(["available", "pending"]));
 
-    let result = execute_tool(&provider, &tool, &args, &keyring)
+    let result = execute_tool(&provider, &tool, &args, &resolver)
         .await
         .unwrap();
     assert_eq!(result["ok"], true);
@@ -239,11 +241,12 @@ async fn test_array_query_param_csv() {
     });
     let tool = mock_tool("/items", HttpMethod::Get, schema);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let mut args = HashMap::new();
     args.insert("ids".into(), json!([1, 2, 3]));
 
-    let result = execute_tool(&provider, &tool, &args, &keyring)
+    let result = execute_tool(&provider, &tool, &args, &resolver)
         .await
         .unwrap();
     assert_eq!(result["ok"], true);
@@ -283,12 +286,13 @@ async fn test_form_urlencoded_body() {
     });
     let tool = mock_tool("/token", HttpMethod::Post, schema);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let mut args = HashMap::new();
     args.insert("grant_type".into(), json!("client_credentials"));
     args.insert("client_id".into(), json!("myapp"));
 
-    let result = execute_tool(&provider, &tool, &args, &keyring)
+    let result = execute_tool(&provider, &tool, &args, &resolver)
         .await
         .unwrap();
     assert_eq!(result["access_token"], "abc123");

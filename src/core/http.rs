@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::core::auth_generator::{self, AuthCache, GenContext};
-use crate::core::keyring::Keyring;
 use crate::core::manifest::{AuthType, HttpMethod, Provider, Tool};
+use crate::core::secret_resolver::SecretResolver;
 
 #[derive(Error, Debug)]
 pub enum HttpError {
@@ -373,7 +373,7 @@ pub async fn execute_tool(
     provider: &Provider,
     tool: &Tool,
     args: &HashMap<String, Value>,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
 ) -> Result<Value, HttpError> {
     execute_tool_with_gen(provider, tool, args, keyring, None, None).await
 }
@@ -383,7 +383,7 @@ pub async fn execute_tool_with_gen(
     provider: &Provider,
     tool: &Tool,
     args: &HashMap<String, Value>,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
     gen_ctx: Option<&GenContext>,
     auth_cache: Option<&AuthCache>,
 ) -> Result<Value, HttpError> {
@@ -518,7 +518,7 @@ pub async fn execute_tool_with_gen(
 async fn inject_auth(
     request: reqwest::RequestBuilder,
     provider: &Provider,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
     gen_ctx: Option<&GenContext>,
     auth_cache: Option<&AuthCache>,
 ) -> Result<reqwest::RequestBuilder, HttpError> {
@@ -613,7 +613,10 @@ async fn inject_auth(
 }
 
 /// Fetch (or return cached) OAuth2 access token via client_credentials grant.
-async fn get_oauth2_token(provider: &Provider, keyring: &Keyring) -> Result<String, HttpError> {
+async fn get_oauth2_token(
+    provider: &Provider,
+    keyring: &SecretResolver<'_>,
+) -> Result<String, HttpError> {
     let cache_key = provider.name.clone();
 
     // Check cache

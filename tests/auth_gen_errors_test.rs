@@ -11,6 +11,7 @@ use ati::core::keyring::Keyring;
 use ati::core::manifest::{
     AuthGenType, AuthGenerator, AuthOutputFormat, AuthType, HttpMethod, InjectTarget,
 };
+use ati::core::secret_resolver::SecretResolver;
 use serde_json::json;
 use std::collections::HashMap;
 use wiremock::matchers::{method, path};
@@ -42,6 +43,7 @@ async fn test_auth_gen_timeout_through_execution() {
     };
     let tool = common::test_tool("timeout_tool", "/data", HttpMethod::Get);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
@@ -49,7 +51,7 @@ async fn test_auth_gen_timeout_through_execution() {
         &provider,
         &tool,
         &HashMap::new(),
-        &keyring,
+        &resolver,
         Some(&ctx),
         Some(&cache),
     )
@@ -86,6 +88,7 @@ async fn test_auth_gen_nonzero_exit_through_execution() {
     };
     let tool = common::test_tool("exit_tool", "/data", HttpMethod::Get);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
@@ -93,7 +96,7 @@ async fn test_auth_gen_nonzero_exit_through_execution() {
         &provider,
         &tool,
         &HashMap::new(),
-        &keyring,
+        &resolver,
         Some(&ctx),
         Some(&cache),
     )
@@ -130,6 +133,7 @@ async fn test_auth_gen_invalid_json_output() {
     };
     let tool = common::test_tool("json_err_tool", "/data", HttpMethod::Get);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
@@ -137,7 +141,7 @@ async fn test_auth_gen_invalid_json_output() {
         &provider,
         &tool,
         &HashMap::new(),
-        &keyring,
+        &resolver,
         Some(&ctx),
         Some(&cache),
     )
@@ -183,6 +187,7 @@ async fn test_auth_gen_missing_inject_path() {
     };
     let tool = common::test_tool("inject_err_tool", "/data", HttpMethod::Get);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
@@ -190,7 +195,7 @@ async fn test_auth_gen_missing_inject_path() {
         &provider,
         &tool,
         &HashMap::new(),
-        &keyring,
+        &resolver,
         Some(&ctx),
         Some(&cache),
     )
@@ -235,6 +240,7 @@ async fn test_auth_gen_script_type_through_execution() {
     };
     let tool = common::test_tool("script_tool", "/data", HttpMethod::Get);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
@@ -245,7 +251,7 @@ async fn test_auth_gen_script_type_through_execution() {
         &provider,
         &tool,
         &HashMap::new(),
-        &keyring,
+        &resolver,
         Some(&ctx),
         Some(&cache),
     )
@@ -278,6 +284,7 @@ async fn test_auth_gen_command_not_found() {
     };
     let tool = common::test_tool("notfound_tool", "/data", HttpMethod::Get);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
@@ -285,7 +292,7 @@ async fn test_auth_gen_command_not_found() {
         &provider,
         &tool,
         &HashMap::new(),
-        &keyring,
+        &resolver,
         Some(&ctx),
         Some(&cache),
     )
@@ -322,6 +329,7 @@ async fn test_auth_gen_header_auth_type() {
     };
     let tool = common::test_tool("header_gen_tool", "/data", HttpMethod::Get);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
     let cache = AuthCache::new();
     let ctx = GenContext::default();
 
@@ -329,7 +337,7 @@ async fn test_auth_gen_header_auth_type() {
         &provider,
         &tool,
         &HashMap::new(),
-        &keyring,
+        &resolver,
         Some(&ctx),
         Some(&cache),
     )

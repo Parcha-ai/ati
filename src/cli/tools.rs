@@ -2,6 +2,7 @@ use super::common;
 use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::scope::{self, ScopeConfig};
+use crate::core::secret_resolver::SecretResolver;
 use crate::output;
 use crate::{Cli, OutputFormat, ToolCommands};
 
@@ -11,7 +12,8 @@ pub(crate) async fn discover_mcp_tools(
     keyring: &Keyring,
     _verbose: bool,
 ) {
-    crate::core::mcp_client::discover_all_mcp_tools(registry, keyring).await;
+    let resolver = SecretResolver::operator_only(keyring);
+    crate::core::mcp_client::discover_all_mcp_tools(registry, &resolver).await;
 }
 
 /// Execute: ati tool <subcommand>

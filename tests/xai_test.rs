@@ -9,6 +9,7 @@ mod common;
 use ati::core::http::HttpError;
 use ati::core::keyring::Keyring;
 use ati::core::manifest::{AuthType, HttpMethod};
+use ati::core::secret_resolver::SecretResolver;
 use ati::core::xai::execute_xai_tool;
 use serde_json::json;
 use std::collections::HashMap;
@@ -42,11 +43,12 @@ async fn test_xai_request_format() {
     };
     let tool = common::test_tool("xai_web_search", "/responses", HttpMethod::Post);
     let keyring = common::test_keyring(&[("xai_key", "xai-test-key")]);
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let mut args = HashMap::new();
     args.insert("query".into(), json!("test query"));
 
-    let result = execute_xai_tool(&provider, &tool, &args, &keyring)
+    let result = execute_xai_tool(&provider, &tool, &args, &resolver)
         .await
         .unwrap();
 
@@ -100,9 +102,10 @@ async fn test_xai_complex_response_extraction() {
     };
     let tool = common::test_tool("xai_combined_search", "/responses", HttpMethod::Post);
     let keyring = common::test_keyring(&[("key", "test-key")]);
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let args: HashMap<String, serde_json::Value> = HashMap::new();
-    let result = execute_xai_tool(&provider, &tool, &args, &keyring)
+    let result = execute_xai_tool(&provider, &tool, &args, &resolver)
         .await
         .unwrap();
 
@@ -152,9 +155,10 @@ async fn test_xai_no_output_field_returns_body() {
     };
     let tool = common::test_tool("xai_web_search", "/responses", HttpMethod::Post);
     let keyring = common::test_keyring(&[("key", "k")]);
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let args = HashMap::new();
-    let result = execute_xai_tool(&provider, &tool, &args, &keyring)
+    let result = execute_xai_tool(&provider, &tool, &args, &resolver)
         .await
         .unwrap();
 
@@ -182,9 +186,10 @@ async fn test_xai_error_response() {
     };
     let tool = common::test_tool("xai_web_search", "/responses", HttpMethod::Post);
     let keyring = common::test_keyring(&[("key", "k")]);
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let args = HashMap::new();
-    let err = execute_xai_tool(&provider, &tool, &args, &keyring)
+    let err = execute_xai_tool(&provider, &tool, &args, &resolver)
         .await
         .unwrap_err();
 
@@ -208,9 +213,10 @@ async fn test_xai_missing_key() {
     };
     let tool = common::test_tool("xai_web_search", "/responses", HttpMethod::Post);
     let keyring = Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let args = HashMap::new();
-    let err = execute_xai_tool(&provider, &tool, &args, &keyring)
+    let err = execute_xai_tool(&provider, &tool, &args, &resolver)
         .await
         .unwrap_err();
 
@@ -243,11 +249,12 @@ async fn test_xai_trending_search_prompt() {
     // The tool name "xai_trending_search" triggers the trending prefix
     let tool = common::test_tool("xai_trending_search", "/responses", HttpMethod::Post);
     let keyring = common::test_keyring(&[("key", "k")]);
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let mut args = HashMap::new();
     args.insert("query".into(), json!("AI"));
 
-    let result = execute_xai_tool(&provider, &tool, &args, &keyring)
+    let result = execute_xai_tool(&provider, &tool, &args, &resolver)
         .await
         .unwrap();
 

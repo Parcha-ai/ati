@@ -16,8 +16,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::core::auth_generator::{self, AuthCache, GenContext};
-use crate::core::keyring::Keyring;
 use crate::core::manifest::Provider;
+use crate::core::secret_resolver::SecretResolver;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -161,14 +161,17 @@ impl McpClient {
     ///
     /// For stdio: spawns the subprocess with env vars resolved from keyring.
     /// For HTTP: creates an HTTP client with auth headers.
-    pub async fn connect(provider: &Provider, keyring: &Keyring) -> Result<Self, McpError> {
+    pub async fn connect(
+        provider: &Provider,
+        keyring: &SecretResolver<'_>,
+    ) -> Result<Self, McpError> {
         Self::connect_with_gen(provider, keyring, None, None).await
     }
 
     /// Connect to an MCP server, optionally using a dynamic auth generator.
     pub async fn connect_with_gen(
         provider: &Provider,
-        keyring: &Keyring,
+        keyring: &SecretResolver<'_>,
         gen_ctx: Option<&GenContext>,
         auth_cache: Option<&AuthCache>,
     ) -> Result<Self, McpError> {
@@ -790,7 +793,7 @@ fn extract_jsonrpc_result(msg: &Value, _request_id: u64) -> Result<Value, McpErr
 
 /// Resolve "${key_name}" placeholders in values from the keyring.
 /// Supports both whole-string (`${key}`) and inline (`prefix/${key}/suffix`) patterns.
-fn resolve_env_value(value: &str, keyring: &Keyring) -> String {
+fn resolve_env_value(value: &str, keyring: &SecretResolver<'_>) -> String {
     let mut result = value.to_string();
     // Find all ${...} patterns and replace them
     while let Some(start) = result.find("${") {
@@ -811,7 +814,7 @@ fn resolve_env_value(value: &str, keyring: &Keyring) -> String {
 }
 
 /// Build an Authorization header value from the provider's auth config.
-fn build_auth_header(provider: &Provider, keyring: &Keyring) -> Option<String> {
+fn build_auth_header(provider: &Provider, keyring: &SecretResolver<'_>) -> Option<String> {
     let key_name = provider.auth_key_name.as_deref()?;
     let key_value = keyring.get(key_name)?;
 
@@ -850,7 +853,7 @@ pub async fn execute(
     provider: &Provider,
     tool_name: &str,
     args: &HashMap<String, Value>,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
 ) -> Result<Value, McpError> {
     execute_with_gen(provider, tool_name, args, keyring, None, None).await
 }
@@ -860,7 +863,7 @@ pub async fn execute_with_gen(
     provider: &Provider,
     tool_name: &str,
     args: &HashMap<String, Value>,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
     gen_ctx: Option<&GenContext>,
     auth_cache: Option<&AuthCache>,
 ) -> Result<Value, McpError> {
@@ -934,7 +937,7 @@ fn mcp_result_to_value(result: &McpToolResult) -> Value {
 /// Returns the number of tools discovered.
 pub async fn discover_all_mcp_tools(
     registry: &mut crate::core::manifest::ManifestRegistry,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
 ) -> usize {
     use futures::stream::{self, StreamExt};
 
@@ -988,7 +991,7 @@ pub async fn discover_all_mcp_tools(
 async fn discover_one_provider(
     _name: &str,
     provider: &Provider,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
 ) -> Result<Vec<crate::core::manifest::McpToolDef>, McpError> {
     let client = McpClient::connect(provider, keyring).await?;
     let tools = client.list_tools().await;
@@ -1012,17 +1015,20 @@ async fn discover_one_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::keyring::Keyring;
+    use crate::core::secret_resolver::SecretResolver;
 
     #[test]
     fn test_resolve_env_value_keyring() {
         let keyring = Keyring::empty();
+        let resolver = SecretResolver::operator_only(&keyring);
         // No key in keyring — should return the raw value
         assert_eq!(
-            resolve_env_value("${missing_key}", &keyring),
+            resolve_env_value("${missing_key}", &resolver),
             "${missing_key}"
         );
         // Plain value — no resolution
-        assert_eq!(resolve_env_value("plain_value", &keyring), "plain_value");
+        assert_eq!(resolve_env_value("plain_value", &resolver), "plain_value");
     }
 
     #[test]
@@ -1032,27 +1038,28 @@ mod tests {
         let path = dir.path().join("creds");
         std::fs::write(&path, r#"{"my_key":"SECRET123"}"#).unwrap();
         let keyring = Keyring::load_credentials(&path).unwrap();
+        let resolver = SecretResolver::operator_only(&keyring);
 
         // Whole-string
-        assert_eq!(resolve_env_value("${my_key}", &keyring), "SECRET123");
+        assert_eq!(resolve_env_value("${my_key}", &resolver), "SECRET123");
         // Inline
         assert_eq!(
-            resolve_env_value("https://example.com/${my_key}/path", &keyring),
+            resolve_env_value("https://example.com/${my_key}/path", &resolver),
             "https://example.com/SECRET123/path"
         );
         // Multiple placeholders
         assert_eq!(
-            resolve_env_value("${my_key}--${my_key}", &keyring),
+            resolve_env_value("${my_key}--${my_key}", &resolver),
             "SECRET123--SECRET123"
         );
         // Missing key stays as-is
         assert_eq!(
-            resolve_env_value("https://example.com/${unknown}/path", &keyring),
+            resolve_env_value("https://example.com/${unknown}/path", &resolver),
             "https://example.com/${unknown}/path"
         );
         // No placeholder
         assert_eq!(
-            resolve_env_value("no_placeholder", &keyring),
+            resolve_env_value("no_placeholder", &resolver),
             "no_placeholder"
         );
     }
@@ -1257,6 +1264,7 @@ mod tests {
     #[test]
     fn test_resolve_env_value_unclosed_brace() {
         let keyring = Keyring::empty();
-        assert_eq!(resolve_env_value("${unclosed", &keyring), "${unclosed");
+        let resolver = SecretResolver::operator_only(&keyring);
+        assert_eq!(resolve_env_value("${unclosed", &resolver), "${unclosed");
     }
 }

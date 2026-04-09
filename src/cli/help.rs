@@ -188,6 +188,7 @@ async fn execute_local(
 
     // Discover MCP tools so assist sees them
     let keyring = crate::cli::call::load_keyring(&ati_dir);
+    let resolver = crate::core::secret_resolver::SecretResolver::operator_only(&keyring);
     crate::cli::tools::discover_mcp_tools(&mut registry, &keyring, cli.verbose).await;
 
     // Resolve scope
@@ -237,7 +238,7 @@ async fn execute_local(
     );
 
     // Call LLM and print result
-    let content = call_llm(cli, &registry, &keyring, &system_prompt, &query, local).await?;
+    let content = call_llm(cli, &registry, &resolver, &system_prompt, &query, local).await?;
 
     match cli.output {
         crate::OutputFormat::Json => {
@@ -441,7 +442,7 @@ fn build_scoped_tool_details(provider: &Provider, tool: &Tool, _verbose: bool) -
 async fn call_llm(
     cli: &Cli,
     registry: &ManifestRegistry,
-    keyring: &crate::core::keyring::Keyring,
+    keyring: &crate::core::secret_resolver::SecretResolver<'_>,
     system_prompt: &str,
     query: &str,
     local: bool,
@@ -946,6 +947,7 @@ async fn execute_plan_mode(
     let manifests_dir = ati_dir.join("manifests");
     let mut registry = ManifestRegistry::load(&manifests_dir)?;
     let keyring = crate::cli::call::load_keyring(&ati_dir);
+    let resolver = crate::core::secret_resolver::SecretResolver::operator_only(&keyring);
     crate::cli::tools::discover_mcp_tools(&mut registry, &keyring, cli.verbose).await;
 
     let (scope_name, query) = resolve_assist_scope(args, &registry);
@@ -984,7 +986,7 @@ async fn execute_plan_mode(
         crate::cli::plan::PLAN_SYSTEM_PROMPT_SUFFIX
     );
 
-    let content = call_llm(cli, &registry, &keyring, &plan_prompt, &query, local).await?;
+    let content = call_llm(cli, &registry, &resolver, &plan_prompt, &query, local).await?;
 
     // Parse the LLM response as a plan
     let plan = crate::cli::plan::parse_plan_response(&content, &query).map_err(|e| {

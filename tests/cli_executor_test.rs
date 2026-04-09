@@ -4,6 +4,7 @@ use std::path::Path;
 use ati::core::cli_executor;
 use ati::core::keyring::Keyring;
 use ati::core::manifest::{AuthType, ManifestRegistry, Provider};
+use ati::core::secret_resolver::SecretResolver;
 
 /// Build a minimal CLI provider for tests.
 fn make_cli_provider(
@@ -66,7 +67,8 @@ fn make_keyring(json: &str) -> Keyring {
 async fn test_cli_echo() {
     let provider = make_cli_provider("myecho", "echo", vec![], HashMap::new(), None);
     let keyring = Keyring::empty();
-    let result = cli_executor::execute(&provider, &["hello".into(), "world".into()], &keyring)
+    let resolver = SecretResolver::operator_only(&keyring);
+    let result = cli_executor::execute(&provider, &["hello".into(), "world".into()], &resolver)
         .await
         .unwrap();
     assert_eq!(result.as_str().unwrap(), "hello world");
@@ -76,7 +78,8 @@ async fn test_cli_echo() {
 async fn test_cli_echo_with_default_args() {
     let provider = make_cli_provider("myecho", "echo", vec!["-n".into()], HashMap::new(), None);
     let keyring = Keyring::empty();
-    let result = cli_executor::execute(&provider, &["hello".into()], &keyring)
+    let resolver = SecretResolver::operator_only(&keyring);
+    let result = cli_executor::execute(&provider, &["hello".into()], &resolver)
         .await
         .unwrap();
     assert_eq!(result.as_str().unwrap(), "hello");
@@ -86,10 +89,14 @@ async fn test_cli_echo_with_default_args() {
 async fn test_cli_json_output() {
     let provider = make_cli_provider("jsonecho", "echo", vec![], HashMap::new(), None);
     let keyring = Keyring::empty();
-    let result =
-        cli_executor::execute(&provider, &[r#"{"key":"value","num":42}"#.into()], &keyring)
-            .await
-            .unwrap();
+    let resolver = SecretResolver::operator_only(&keyring);
+    let result = cli_executor::execute(
+        &provider,
+        &[r#"{"key":"value","num":42}"#.into()],
+        &resolver,
+    )
+    .await
+    .unwrap();
     // Should be parsed as JSON, not a string
     assert!(result.is_object());
     assert_eq!(result["key"], "value");
@@ -100,7 +107,8 @@ async fn test_cli_json_output() {
 async fn test_cli_nonzero_exit() {
     let provider = make_cli_provider("failing", "false", vec![], HashMap::new(), None);
     let keyring = Keyring::empty();
-    let err = cli_executor::execute(&provider, &[], &keyring)
+    let resolver = SecretResolver::operator_only(&keyring);
+    let err = cli_executor::execute(&provider, &[], &resolver)
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -111,7 +119,8 @@ async fn test_cli_nonzero_exit() {
 async fn test_cli_timeout() {
     let provider = make_cli_provider("sleeper", "sleep", vec![], HashMap::new(), Some(1));
     let keyring = Keyring::empty();
-    let err = cli_executor::execute(&provider, &["60".into()], &keyring)
+    let resolver = SecretResolver::operator_only(&keyring);
+    let err = cli_executor::execute(&provider, &["60".into()], &resolver)
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -128,7 +137,8 @@ async fn test_cli_missing_command() {
         None,
     );
     let keyring = Keyring::empty();
-    let err = cli_executor::execute(&provider, &[], &keyring)
+    let resolver = SecretResolver::operator_only(&keyring);
+    let err = cli_executor::execute(&provider, &[], &resolver)
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -148,7 +158,8 @@ async fn test_cli_env_var_injection() {
     cli_env.insert("MY_SECRET".into(), "${test_key}".into());
     let provider = make_cli_provider("envtest", "printenv", vec![], cli_env, None);
     let keyring = make_keyring(r#"{"test_key":"secret_value_123"}"#);
-    let result = cli_executor::execute(&provider, &["MY_SECRET".into()], &keyring)
+    let resolver = SecretResolver::operator_only(&keyring);
+    let result = cli_executor::execute(&provider, &["MY_SECRET".into()], &resolver)
         .await
         .unwrap();
     assert_eq!(result.as_str().unwrap(), "secret_value_123");
@@ -160,7 +171,8 @@ async fn test_cli_env_var_missing_key() {
     cli_env.insert("FOO".into(), "${nonexistent_key}".into());
     let provider = make_cli_provider("envtest", "echo", vec![], cli_env, None);
     let keyring = Keyring::empty();
-    let err = cli_executor::execute(&provider, &[], &keyring)
+    let resolver = SecretResolver::operator_only(&keyring);
+    let err = cli_executor::execute(&provider, &[], &resolver)
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -232,6 +244,7 @@ fn test_credential_file_prod_unique_paths() {
 #[test]
 fn test_resolve_cli_env() {
     let keyring = make_keyring(r#"{"api_key":"KEY123","cred_data":"FILE_CONTENT"}"#);
+    let resolver = SecretResolver::operator_only(&keyring);
     let tmp = tempfile::tempdir().unwrap();
 
     let mut env = HashMap::new();
@@ -240,7 +253,7 @@ fn test_resolve_cli_env() {
     env.insert("PLAIN".into(), "plain_value".into());
 
     let (resolved, cred_files) =
-        cli_executor::resolve_cli_env(&env, &keyring, false, tmp.path()).unwrap();
+        cli_executor::resolve_cli_env(&env, &resolver, false, tmp.path()).unwrap();
 
     assert_eq!(resolved["API_KEY"], "KEY123");
     assert_eq!(resolved["PLAIN"], "plain_value");

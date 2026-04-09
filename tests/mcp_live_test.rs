@@ -1,3 +1,4 @@
+use ati::core::secret_resolver::SecretResolver;
 use serde_json::Value;
 /// Live MCP integration tests — tests against real MCP servers.
 ///
@@ -742,10 +743,11 @@ fn test_ati_mcp_client_against_linear() {
     // Empty keyring — the McpClient builds auth from keyring, so it won't have the key.
     // This tests that the protocol handshake code handles missing auth gracefully.
     let keyring = ati::core::keyring::Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let result = ati::core::mcp_client::McpClient::connect(&provider, &keyring).await;
+        let result = ati::core::mcp_client::McpClient::connect(&provider, &resolver).await;
 
         // With an empty keyring, the auth header won't be set.
         // Linear will likely reject with 401/403 — that's valid.
@@ -850,11 +852,12 @@ fn test_ati_mcp_client_against_github_stdio() {
 
     // For stdio, auth is via env vars (not keyring), so empty keyring is fine
     let keyring = ati::core::keyring::Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         eprintln!("  Connecting to GitHub MCP via ATI McpClient...");
-        let client = ati::core::mcp_client::McpClient::connect(&provider, &keyring)
+        let client = ati::core::mcp_client::McpClient::connect(&provider, &resolver)
             .await
             .expect("Should connect to GitHub MCP");
 
@@ -1298,10 +1301,11 @@ fn test_deepwiki_mcp_http_full_flow() {
     };
 
     let keyring = ati::core::keyring::Keyring::empty();
+    let resolver = SecretResolver::operator_only(&keyring);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let client = ati::core::mcp_client::McpClient::connect(&provider, &keyring)
+        let client = ati::core::mcp_client::McpClient::connect(&provider, &resolver)
             .await
             .expect("Should connect to DeepWiki MCP (no auth)");
 

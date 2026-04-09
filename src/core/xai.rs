@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::core::http::HttpError;
-use crate::core::keyring::Keyring;
 use crate::core::manifest::{Provider, Tool};
+use crate::core::secret_resolver::SecretResolver;
 
 const XAI_TIMEOUT_SECS: u64 = 90;
 
@@ -22,7 +22,7 @@ pub async fn execute_xai_tool(
     provider: &Provider,
     tool: &Tool,
     args: &HashMap<String, Value>,
-    keyring: &Keyring,
+    keyring: &SecretResolver<'_>,
 ) -> Result<Value, HttpError> {
     let key_name = provider
         .auth_key_name

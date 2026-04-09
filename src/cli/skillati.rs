@@ -26,7 +26,8 @@ pub async fn execute(
 
     let ati_dir = common::ati_dir();
     let keyring = crate::cli::call::load_keyring(&ati_dir);
-    let client = SkillAtiClient::from_env(&keyring)?.ok_or(SkillAtiError::NotConfigured)?;
+    let resolver = crate::core::secret_resolver::SecretResolver::operator_only(&keyring);
+    let client = SkillAtiClient::from_env(&resolver)?.ok_or(SkillAtiError::NotConfigured)?;
 
     match subcmd {
         SkillAtiCommands::Catalog { search } => {

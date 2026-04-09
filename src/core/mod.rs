@@ -14,6 +14,8 @@ pub mod openapi;
 pub mod rate;
 pub mod response;
 pub mod scope;
+pub mod secret_backend;
+pub mod secret_resolver;
 pub mod skill;
 pub mod skillati;
 pub mod xai;
