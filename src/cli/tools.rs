@@ -109,6 +109,16 @@ async fn execute_via_proxy(
                             println!("Tags:        {}", tag_strs.join(", "));
                         }
                     }
+                    if let Some(skills_arr) = info["skills"].as_array() {
+                        let skill_strs: Vec<&str> =
+                            skills_arr.iter().filter_map(|s| s.as_str()).collect();
+                        if !skill_strs.is_empty() {
+                            println!("Skills:      {}", skill_strs.join(", "));
+                            for skill in &skill_strs {
+                                println!("  Read:      ati skill fetch read {skill}");
+                            }
+                        }
+                    }
                     if let Some(schema) = info.get("input_schema") {
                         if let Some(props) = schema.get("properties") {
                             println!("\nParameters:");
@@ -280,10 +290,9 @@ fn tool_info(
             }
             if !skills.is_empty() {
                 println!("Skills:      {}", skills.join(", "));
-                println!(
-                    "  Read:      ati skill fetch read {}",
-                    skills.first().unwrap()
-                );
+                for skill in &skills {
+                    println!("  Read:      ati skill fetch read {skill}");
+                }
             }
             if let Some(schema) = &tool.input_schema {
                 println!("\nInput Schema:");
