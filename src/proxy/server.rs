@@ -393,6 +393,21 @@ async fn handle_call(
 
     // Execute tool call — dispatch based on handler type, with timing for audit
     let agent_sub = claims.as_ref().map(|c| c.sub.clone()).unwrap_or_default();
+    let job_id = claims
+        .as_ref()
+        .and_then(|c| c.job_id.clone())
+        .unwrap_or_default();
+    let sandbox_id = claims
+        .as_ref()
+        .and_then(|c| c.sandbox_id.clone())
+        .unwrap_or_default();
+    tracing::info!(
+        tool = %call_req.tool_name,
+        agent = %agent_sub,
+        job_id = %job_id,
+        sandbox_id = %sandbox_id,
+        "tool call"
+    );
     let start = std::time::Instant::now();
 
     let response = match provider.handler.as_str() {
@@ -470,7 +485,13 @@ async fn handle_call(
                 Ok(resp) => resp,
                 Err(e) => {
                     let duration = start.elapsed();
-                    write_proxy_audit(&call_req, &agent_sub, duration, Some(&e.to_string()));
+                    write_proxy_audit(
+                        &call_req,
+                        &agent_sub,
+                        claims.as_ref(),
+                        duration,
+                        Some(&e.to_string()),
+                    );
                     return (
                         StatusCode::BAD_GATEWAY,
                         Json(CallResponse {
@@ -486,7 +507,13 @@ async fn handle_call(
                 Ok(p) => p,
                 Err(e) => {
                     let duration = start.elapsed();
-                    write_proxy_audit(&call_req, &agent_sub, duration, Some(&e.to_string()));
+                    write_proxy_audit(
+                        &call_req,
+                        &agent_sub,
+                        claims.as_ref(),
+                        duration,
+                        Some(&e.to_string()),
+                    );
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(CallResponse {
@@ -509,7 +536,7 @@ async fn handle_call(
 
     let duration = start.elapsed();
     let error_msg = response.1.error.as_deref();
-    write_proxy_audit(&call_req, &agent_sub, duration, error_msg);
+    write_proxy_audit(&call_req, &agent_sub, claims.as_ref(), duration, error_msg);
 
     response
 }
@@ -714,8 +741,13 @@ async fn handle_mcp(
     let scopes = scopes_for_request(claims.as_ref(), &state);
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
-
-    tracing::debug!(%method, "POST /mcp");
+    tracing::info!(
+        %method,
+        agent = claims.as_ref().map(|c| c.sub.as_str()).unwrap_or(""),
+        job_id = claims.as_ref().and_then(|c| c.job_id.as_deref()).unwrap_or(""),
+        sandbox_id = claims.as_ref().and_then(|c| c.sandbox_id.as_deref()).unwrap_or(""),
+        "mcp call"
+    );
 
     match method {
         "initialize" => {
@@ -1784,6 +1816,7 @@ pub async fn run(
 fn write_proxy_audit(
     call_req: &CallRequest,
     agent_sub: &str,
+    claims: Option<&TokenClaims>,
     duration: std::time::Duration,
     error: Option<&str>,
 ) {
@@ -1798,6 +1831,8 @@ fn write_proxy_audit(
         },
         duration_ms: duration.as_millis() as u64,
         agent_sub: agent_sub.to_string(),
+        job_id: claims.and_then(|c| c.job_id.clone()),
+        sandbox_id: claims.and_then(|c| c.sandbox_id.clone()),
         error: error.map(|s| s.to_string()),
         exit_code: None,
     };

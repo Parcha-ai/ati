@@ -136,6 +136,8 @@ fn issue_test_token(scope: &str) -> String {
             v: 1,
             rate: std::collections::HashMap::new(),
         }),
+        job_id: None,
+        sandbox_id: None,
     };
     jwt::issue(&claims, &config).unwrap()
 }
@@ -733,6 +735,8 @@ async fn test_jwt_auth_rejects_wrong_secret() {
         jti: None,
         scope: "*".into(),
         ati: None,
+        job_id: None,
+        sandbox_id: None,
     };
     let bad_token = jwt::issue(&claims, &wrong_config).unwrap();
 
@@ -928,6 +932,8 @@ async fn test_jwt_expired_token_rejected() {
         jti: None,
         scope: "*".into(),
         ati: None,
+        job_id: None,
+        sandbox_id: None,
     };
     let expired_token = jwt::issue(&claims, &config).unwrap();
 
@@ -1324,6 +1330,8 @@ async fn test_call_underscore_scope_matches_colon_tool() {
         iss: None,
         jti: None,
         ati: None,
+        job_id: None,
+        sandbox_id: None,
     };
     let token = jwt::issue(&claims, &test_jwt_config()).unwrap();
 

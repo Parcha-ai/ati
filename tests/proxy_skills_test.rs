@@ -74,6 +74,8 @@ fn issue_test_token(scope: &str) -> String {
             v: 1,
             rate: std::collections::HashMap::new(),
         }),
+        job_id: None,
+        sandbox_id: None,
     };
     jwt::issue(&claims, &config).unwrap()
 }

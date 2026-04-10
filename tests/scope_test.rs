@@ -156,6 +156,8 @@ fn test_scope_from_jwt_claims() {
             v: 1,
             rate: std::collections::HashMap::new(),
         }),
+        job_id: None,
+        sandbox_id: None,
     };
 
     let scopes = ScopeConfig::from_jwt(&claims);
