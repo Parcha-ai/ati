@@ -88,6 +88,12 @@ pub struct TokenClaims {
     /// ATI-specific claims namespace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ati: Option<AtiNamespace>,
+    /// Job identifier (set by orchestrator provisioner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// Sandbox identifier (set by orchestrator provisioner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_id: Option<String>,
 }
 
 impl TokenClaims {
@@ -348,6 +354,8 @@ mod tests {
                 v: 1,
                 rate: HashMap::new(),
             }),
+            job_id: None,
+            sandbox_id: None,
         }
     }
 

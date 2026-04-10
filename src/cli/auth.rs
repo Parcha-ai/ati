@@ -45,6 +45,8 @@ fn show_status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "exp": claims.exp,
                 "iat": claims.iat,
                 "jti": claims.jti,
+                "job_id": claims.job_id,
+                "sandbox_id": claims.sandbox_id,
                 "time_remaining_secs": scopes.time_remaining(),
                 "expired": scopes.is_expired(),
                 "signature_verified": verified,
@@ -65,6 +67,12 @@ fn show_status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 "help disabled"
             };
+            if let Some(ref job_id) = claims.job_id {
+                println!("Job ID:   {job_id}");
+            }
+            if let Some(ref sandbox_id) = claims.sandbox_id {
+                println!("Sandbox:  {sandbox_id}");
+            }
             println!("Scopes:   {tool_count} tools, {skill_count} skills, {help}");
             if !claims.scope.is_empty() {
                 println!("  {}", claims.scope);

@@ -144,6 +144,8 @@ fn issue(
             v: 1,
             rate: rate_map,
         }),
+        job_id: None,
+        sandbox_id: None,
     };
 
     // Build config from explicit args or env
