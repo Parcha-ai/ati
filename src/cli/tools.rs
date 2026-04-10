@@ -35,9 +35,16 @@ pub async fn execute(cli: &Cli, subcmd: &ToolCommands) -> Result<(), Box<dyn std
     // Load scopes from JWT
     let scopes = common::load_local_scopes_from_env()?;
 
+    // Load skill registry for skill lookups in tool info
+    let skills_dir = ati_dir.join("skills");
+    let skill_registry =
+        crate::core::skill::SkillRegistry::load(&skills_dir).unwrap_or_else(|_| {
+            crate::core::skill::SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap()
+        });
+
     match subcmd {
         ToolCommands::List { provider } => list_tools(cli, &registry, &scopes, provider.as_deref()),
-        ToolCommands::Info { name } => tool_info(cli, &registry, &scopes, name),
+        ToolCommands::Info { name } => tool_info(cli, &registry, &scopes, &skill_registry, name),
         ToolCommands::Search { query } => search_tools(cli, &registry, &scopes, query),
     }
 }
@@ -100,6 +107,16 @@ async fn execute_via_proxy(
                         let tag_strs: Vec<&str> = tags.iter().filter_map(|t| t.as_str()).collect();
                         if !tag_strs.is_empty() {
                             println!("Tags:        {}", tag_strs.join(", "));
+                        }
+                    }
+                    if let Some(skills_arr) = info["skills"].as_array() {
+                        let skill_strs: Vec<&str> =
+                            skills_arr.iter().filter_map(|s| s.as_str()).collect();
+                        if !skill_strs.is_empty() {
+                            println!("Skills:      {}", skill_strs.join(", "));
+                            for skill in &skill_strs {
+                                println!("  Read:      ati skill fetch read {skill}");
+                            }
                         }
                     }
                     if let Some(schema) = info.get("input_schema") {
@@ -205,6 +222,7 @@ fn tool_info(
     cli: &Cli,
     registry: &ManifestRegistry,
     scopes: &ScopeConfig,
+    skill_registry: &crate::core::skill::SkillRegistry,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (provider, tool) = registry
@@ -217,6 +235,19 @@ fn tool_info(
             format!("Unknown tool: '{name}'. Run 'ati tool list' to see available tools.")
         })?;
 
+    // Merge skills from manifest + SkillRegistry
+    let mut skills: Vec<String> = provider.skills.clone();
+    for s in skill_registry.skills_for_tool(&tool.name) {
+        if !skills.contains(&s.name) {
+            skills.push(s.name.clone());
+        }
+    }
+    for s in skill_registry.skills_for_provider(&provider.name) {
+        if !skills.contains(&s.name) {
+            skills.push(s.name.clone());
+        }
+    }
+
     match cli.output {
         OutputFormat::Json => {
             let info = serde_json::json!({
@@ -227,6 +258,7 @@ fn tool_info(
                 "method": tool.method.to_string(),
                 "endpoint": tool.endpoint,
                 "scope": tool.scope,
+                "skills": skills,
                 "input_schema": tool.input_schema,
             });
             println!("{}", serde_json::to_string_pretty(&info)?);
@@ -255,6 +287,12 @@ fn tool_info(
             }
             if let Some(hint) = &tool.hint {
                 println!("Hint:        {hint}");
+            }
+            if !skills.is_empty() {
+                println!("Skills:      {}", skills.join(", "));
+                for skill in &skills {
+                    println!("  Read:      ati skill fetch read {skill}");
+                }
             }
             if let Some(schema) = &tool.input_schema {
                 println!("\nInput Schema:");

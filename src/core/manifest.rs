@@ -138,8 +138,8 @@ pub struct Provider {
     #[serde(default)]
     pub category: Option<String>,
 
-    /// Associated skill URLs (git repos) that teach agents how to use this provider's tools.
-    /// Each entry is a git URL, optionally with a #fragment for subdirectory.
+    /// Associated skill names that teach agents how to use this provider's tools.
+    /// Resolved from the SkillRegistry (installed skills or GCS registry).
     #[serde(default)]
     pub skills: Vec<String>,
 }
@@ -362,6 +362,9 @@ pub struct CachedProvider {
     // MCP/HTTP auth
     #[serde(default)]
     pub auth: Option<String>,
+    // Skills
+    #[serde(default)]
+    pub skills: Vec<String>,
     // Cache metadata
     pub created_at: String,
     pub ttl_seconds: u64,
@@ -447,7 +450,7 @@ impl CachedProvider {
             cli_timeout_secs: self.cli_timeout_secs,
             auth_generator: None,
             category: None,
-            skills: Vec::new(),
+            skills: self.skills.clone(),
         }
     }
 }

@@ -1105,6 +1105,7 @@ async fn load_openapi_provider(
         auth: None,
         created_at: now.to_rfc3339(),
         ttl_seconds: ttl,
+        skills: Vec::new(),
     };
 
     let cache_dir = ati_dir.join("cache").join("providers");
@@ -1296,6 +1297,7 @@ async fn load_mcp_provider(
         auth: Some(auth_type.to_string()),
         created_at: now.to_rfc3339(),
         ttl_seconds: ttl,
+        skills: Vec::new(),
     };
 
     let cache_dir = ati_dir.join("cache").join("providers");
