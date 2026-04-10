@@ -340,6 +340,8 @@ async fn execute_local(
         status,
         duration_ms: duration.as_millis() as u64,
         agent_sub: scopes.sub.clone(),
+        job_id: None,
+        sandbox_id: None,
         error: error_msg,
         exit_code: None,
     };
@@ -390,6 +392,8 @@ async fn execute_via_proxy(
         status,
         duration_ms: duration.as_millis() as u64,
         agent_sub: scopes.sub.clone(),
+        job_id: None,
+        sandbox_id: None,
         error: error_msg,
         exit_code: None,
     };

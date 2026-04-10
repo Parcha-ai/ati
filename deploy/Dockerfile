@@ -1,7 +1,7 @@
 # ATI Proxy — Agent Tools Interface
 # Downloads pre-built binary from GitHub releases. No compilation needed.
 
-ARG ATI_VERSION=v0.7.1
+ARG ATI_VERSION=v0.7.2
 
 FROM debian:bookworm-slim
 
@@ -17,12 +17,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Download pre-built static binary from GitHub releases (multi-arch)
+# Download pre-built static binary with Sentry support from GitHub releases (multi-arch)
 ARG TARGETARCH
 RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
-    curl -fSL "https://github.com/Parcha-ai/ati/releases/download/${ATI_VERSION}/ati-${ARCH}-unknown-linux-musl" \
+    curl -fSL "https://github.com/Parcha-ai/ati/releases/download/${ATI_VERSION}/ati-${ARCH}-unknown-linux-musl-sentry" \
     -o /usr/local/bin/ati && \
-    curl -fSL "https://github.com/Parcha-ai/ati/releases/download/${ATI_VERSION}/ati-${ARCH}-unknown-linux-musl.sha256" \
+    curl -fSL "https://github.com/Parcha-ai/ati/releases/download/${ATI_VERSION}/ati-${ARCH}-unknown-linux-musl-sentry.sha256" \
     -o /tmp/ati.sha256 && \
     EXPECTED=$(awk '{print $1}' /tmp/ati.sha256) && \
     echo "${EXPECTED}  /usr/local/bin/ati" | sha256sum -c - && \

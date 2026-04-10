@@ -16,6 +16,8 @@ fn make_entry(tool: &str, status: AuditStatus, error: Option<&str>) -> AuditEntr
         status,
         duration_ms: 42,
         agent_sub: "test-agent".to_string(),
+        job_id: None,
+        sandbox_id: None,
         error: error.map(|s| s.to_string()),
         exit_code: None,
     }
