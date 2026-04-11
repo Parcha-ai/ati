@@ -18,6 +18,18 @@ use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
 use ati::proxy::server::{build_router, ProxyState};
 
+/// Single global lock held by every test that mutates process-wide env vars
+/// (e.g. `ATI_SKILL_REGISTRY`, `ATI_PROXY_URL`). Cargo runs tests in parallel
+/// threads of a single process, so env mutation leaks across tests unless
+/// serialized.
+///
+/// Uses `tokio::sync::Mutex` so the guard can be held across `.await` points
+/// without tripping clippy's `await_holding_lock` lint.
+fn env_mutex() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 struct EnvGuard {
     key: &'static str,
     original: Option<String>,
@@ -1358,7 +1370,9 @@ async fn test_call_underscore_scope_matches_colon_tool() {
 
 #[tokio::test]
 async fn skillati_catalog_without_registry_returns_503() {
-    let _env = EnvGuard::set("ATI_SKILL_REGISTRY", None);
+    let _lock = env_mutex().lock().await;
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", None);
+    let _url = EnvGuard::set("ATI_PROXY_URL", None);
     let app = build_test_app("http://unused.test");
 
     let req = Request::builder()
@@ -1373,7 +1387,9 @@ async fn skillati_catalog_without_registry_returns_503() {
 
 #[tokio::test]
 async fn skillati_resources_without_registry_returns_503() {
-    let _env = EnvGuard::set("ATI_SKILL_REGISTRY", None);
+    let _lock = env_mutex().lock().await;
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", None);
+    let _url = EnvGuard::set("ATI_PROXY_URL", None);
     let app = build_test_app("http://unused.test");
 
     let req = Request::builder()
@@ -1388,7 +1404,9 @@ async fn skillati_resources_without_registry_returns_503() {
 
 #[tokio::test]
 async fn skillati_file_without_registry_returns_503() {
-    let _env = EnvGuard::set("ATI_SKILL_REGISTRY", None);
+    let _lock = env_mutex().lock().await;
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", None);
+    let _url = EnvGuard::set("ATI_PROXY_URL", None);
     let app = build_test_app("http://unused.test");
 
     let req = Request::builder()
@@ -1492,5 +1510,220 @@ async fn test_mcp_tools_call_legacy_underscore_scope_matches_colon_tool() {
     assert!(
         json["result"].is_object(),
         "expected MCP result object after auth passes: {json}"
+    );
+}
+
+// --- Regression tests for issue #59 ---
+//
+// Before the fix, proxies running with `ATI_SKILL_REGISTRY=gcs://...` and an
+// empty local `~/.ati/skills/` directory returned 404 for every remote skill,
+// because `visible_skill_names` only consulted the (empty) local registry.
+// These tests exercise all 6 /skillati/* handlers with a wiremock "upstream
+// proxy" standing in for the remote catalog, and assert that:
+//
+//   (a) an explicit `skill:X` scope makes remote skill X visible
+//   (b) a `tool:Y` scope makes remote skills that cover tool Y visible
+//   (c) a `*` wildcard scope makes every remote skill visible
+//   (d) a scope that grants nothing still 404s (scope enforcement preserved)
+//
+// The empty local `skill_registry` is the whole point — it reproduces the
+// production deployment shape where skills live only in GCS.
+
+/// Stand up a wiremock server acting as an upstream SkillATI proxy. Serves
+/// `/skillati/catalog` with the given entries, plus a generic
+/// `/skillati/:name/resources` → `{"resources": []}` so read_skill's
+/// list_resources call doesn't 502.
+async fn serve_remote_catalog_mock(entries: Vec<serde_json::Value>) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/skillati/catalog"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "skills": entries,
+        })))
+        .mount(&server)
+        .await;
+    // Resources endpoint is hit by read_skill → list_resources → list_all_resources.
+    // Match via regex on the path prefix.
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"^/skillati/[^/]+/resources$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "",
+            "prefix": null,
+            "resources": [],
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn skillati_read_remote_skill_visible_via_explicit_skill_scope() {
+    let _lock = env_mutex().lock().await;
+    // Upstream "real" registry exposes one remote skill.
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "slidedeck-production",
+        "description": "Remote skill",
+        "skill_directory": "slidedeck-production",
+    })])
+    .await;
+    // Serve the skill activation payload so the handler's read_skill path
+    // completes. proxy_read_skill_md expects a JSON body with a `content`
+    // field (the SKILL.md text).
+    Mock::given(method("GET"))
+        .and(path("/skillati/slidedeck-production"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "slidedeck-production",
+            "skill_directory": "slidedeck-production",
+            "content": "---\nname: slidedeck-production\ndescription: Remote skill\n---\nhello",
+            "resources": [],
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("skill:slidedeck-production");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/slidedeck-production")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "remote skill with explicit skill: scope must be visible even when local skill registry is empty"
+    );
+}
+
+#[tokio::test]
+async fn skillati_catalog_includes_remote_skills_under_wildcard_scope() {
+    let _lock = env_mutex().lock().await;
+    let upstream = serve_remote_catalog_mock(vec![
+        serde_json::json!({
+            "name": "slidedeck-production",
+            "description": "",
+            "skill_directory": "slidedeck-production",
+        }),
+        serde_json::json!({
+            "name": "html-app-architecture",
+            "description": "",
+            "skill_directory": "html-app-architecture",
+        }),
+    ])
+    .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("*");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/catalog")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = body_json(resp.into_body()).await;
+    let skills = body
+        .get("skills")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        skills.len(),
+        2,
+        "wildcard scope must surface every remote skill, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn skillati_read_remote_skill_denied_when_scope_lacks_access() {
+    let _lock = env_mutex().lock().await;
+    // Catalog has the skill, but the caller's scope does not grant it.
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "slidedeck-production",
+        "description": "",
+        "skill_directory": "slidedeck-production",
+    })])
+    .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    // `help` scope alone grants no skills.
+    let token = issue_test_token("help");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/slidedeck-production")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "scope without access to a remote skill must still 404 (scope enforcement preserved)"
+    );
+}
+
+#[tokio::test]
+async fn skillati_read_remote_skill_visible_via_tool_scope_cascade() {
+    let _lock = env_mutex().lock().await;
+    // Remote skill `slidedeck-production` binds tool `test_search`; a token
+    // with `tool:test_search` should make the skill visible via the cascade.
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "slidedeck-production",
+        "description": "",
+        "skill_directory": "slidedeck-production",
+        "tools": ["test_search"],
+    })])
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/skillati/slidedeck-production"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "slidedeck-production",
+            "skill_directory": "slidedeck-production",
+            "content": "---\nname: slidedeck-production\n---\nhello",
+            "resources": [],
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("tool:test_search");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/slidedeck-production")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "tool: scope should cascade to remote skills that cover that tool — body: {body}"
     );
 }

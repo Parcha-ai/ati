@@ -247,6 +247,101 @@ fn visible_skill_names(
         .collect()
 }
 
+/// Compute the set of remote (SkillATI-registry) skill names that the caller's
+/// scopes grant access to.
+///
+/// Mirrors the scope cascade in `skill::resolve_skills` — explicit `skill:X`
+/// scopes, `tool:Y` scopes resolved to the tool's covering skills (including
+/// provider/category bindings) — but against a remote catalog whose skills
+/// are **not** present in the local filesystem `SkillRegistry`.
+///
+/// Without this, proxies running `ATI_SKILL_REGISTRY=gcs://...` with an empty
+/// local skills directory return 404 for every remote skill, because the
+/// visibility gate only consults `state.skill_registry` (see issue #59).
+fn visible_remote_skill_names(
+    state: &ProxyState,
+    scopes: &ScopeConfig,
+    catalog: &[RemoteSkillMeta],
+) -> std::collections::HashSet<String> {
+    let mut visible: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if catalog.is_empty() {
+        return visible;
+    }
+    if scopes.is_wildcard() {
+        for entry in catalog {
+            visible.insert(entry.name.clone());
+        }
+        return visible;
+    }
+
+    // Collect allowed tool/provider/category identifiers from the caller's scopes.
+    // 1. Direct `tool:X` scopes (including wildcards) → walk against the public
+    //    tool registry to collect concrete (provider, tool) pairs.
+    let allowed_tool_pairs: Vec<(String, String)> =
+        crate::core::scope::filter_tools_by_scope(state.registry.list_public_tools(), scopes)
+            .into_iter()
+            .map(|(p, t)| (p.name.clone(), t.name.clone()))
+            .collect();
+    let allowed_tool_names: std::collections::HashSet<&str> =
+        allowed_tool_pairs.iter().map(|(_, t)| t.as_str()).collect();
+    let allowed_provider_names: std::collections::HashSet<&str> =
+        allowed_tool_pairs.iter().map(|(p, _)| p.as_str()).collect();
+    let allowed_categories: std::collections::HashSet<String> = state
+        .registry
+        .list_providers()
+        .into_iter()
+        .filter(|p| allowed_provider_names.contains(p.name.as_str()))
+        .filter_map(|p| p.category.clone())
+        .collect();
+
+    // Explicit `skill:X` scopes → include X if present in the remote catalog.
+    for scope in &scopes.scopes {
+        if let Some(skill_name) = scope.strip_prefix("skill:") {
+            if catalog.iter().any(|e| e.name == skill_name) {
+                visible.insert(skill_name.to_string());
+            }
+        }
+    }
+
+    // Tool/provider/category cascade → include a remote skill if any of its
+    // `tools`, `providers`, or `categories` bindings match a scope-allowed
+    // tool/provider/category.
+    for entry in catalog {
+        if entry
+            .tools
+            .iter()
+            .any(|t| allowed_tool_names.contains(t.as_str()))
+            || entry
+                .providers
+                .iter()
+                .any(|p| allowed_provider_names.contains(p.as_str()))
+            || entry
+                .categories
+                .iter()
+                .any(|c| allowed_categories.contains(c))
+        {
+            visible.insert(entry.name.clone());
+        }
+    }
+
+    visible
+}
+
+/// Union of local + remote visible skill names, computed on demand. The
+/// remote catalog is fetched lazily (and is cached inside `SkillAtiClient`
+/// after the first call on the hot path).
+async fn visible_skill_names_with_remote(
+    state: &ProxyState,
+    scopes: &ScopeConfig,
+    client: &SkillAtiClient,
+) -> Result<std::collections::HashSet<String>, SkillAtiError> {
+    let mut names = visible_skill_names(state, scopes);
+    let catalog = client.catalog().await?;
+    let remote = visible_remote_skill_names(state, scopes, &catalog);
+    names.extend(remote);
+    Ok(names)
+}
+
 async fn handle_call(
     State(state): State<Arc<ProxyState>>,
     req: HttpRequest<Body>,
@@ -1383,10 +1478,15 @@ async fn handle_skillati_catalog(
 
     let claims = claims.map(|Extension(c)| c);
     let scopes = scopes_for_request(claims.as_ref(), &state);
-    let visible_names = visible_skill_names(&state, &scopes);
 
     match client.catalog().await {
         Ok(catalog) => {
+            // Union of local + remote visibility. Merging here (instead of
+            // calling visible_skill_names_with_remote, which would re-fetch)
+            // avoids a redundant catalog request on the hot path.
+            let mut visible_names = visible_skill_names(&state, &scopes);
+            visible_names.extend(visible_remote_skill_names(&state, &scopes, &catalog));
+
             let mut skills: Vec<_> = catalog
                 .into_iter()
                 .filter(|s| visible_names.contains(&s.name))
@@ -1419,7 +1519,10 @@ async fn handle_skillati_read(
 
     let claims = claims.map(|Extension(c)| c);
     let scopes = scopes_for_request(claims.as_ref(), &state);
-    let visible_names = visible_skill_names(&state, &scopes);
+    let visible_names = match visible_skill_names_with_remote(&state, &scopes, &client).await {
+        Ok(v) => v,
+        Err(err) => return skillati_error_response(err),
+    };
     if !visible_names.contains(&name) {
         return skillati_error_response(SkillAtiError::SkillNotFound(name));
     }
@@ -1445,7 +1548,10 @@ async fn handle_skillati_resources(
 
     let claims = claims.map(|Extension(c)| c);
     let scopes = scopes_for_request(claims.as_ref(), &state);
-    let visible_names = visible_skill_names(&state, &scopes);
+    let visible_names = match visible_skill_names_with_remote(&state, &scopes, &client).await {
+        Ok(v) => v,
+        Err(err) => return skillati_error_response(err),
+    };
     if !visible_names.contains(&name) {
         return skillati_error_response(SkillAtiError::SkillNotFound(name));
     }
@@ -1478,7 +1584,10 @@ async fn handle_skillati_file(
 
     let claims = claims.map(|Extension(c)| c);
     let scopes = scopes_for_request(claims.as_ref(), &state);
-    let visible_names = visible_skill_names(&state, &scopes);
+    let visible_names = match visible_skill_names_with_remote(&state, &scopes, &client).await {
+        Ok(v) => v,
+        Err(err) => return skillati_error_response(err),
+    };
     if !visible_names.contains(&name) {
         return skillati_error_response(SkillAtiError::SkillNotFound(name));
     }
@@ -1503,7 +1612,10 @@ async fn handle_skillati_refs(
 
     let claims = claims.map(|Extension(c)| c);
     let scopes = scopes_for_request(claims.as_ref(), &state);
-    let visible_names = visible_skill_names(&state, &scopes);
+    let visible_names = match visible_skill_names_with_remote(&state, &scopes, &client).await {
+        Ok(v) => v,
+        Err(err) => return skillati_error_response(err),
+    };
     if !visible_names.contains(&name) {
         return skillati_error_response(SkillAtiError::SkillNotFound(name));
     }
@@ -1534,7 +1646,10 @@ async fn handle_skillati_ref(
 
     let claims = claims.map(|Extension(c)| c);
     let scopes = scopes_for_request(claims.as_ref(), &state);
-    let visible_names = visible_skill_names(&state, &scopes);
+    let visible_names = match visible_skill_names_with_remote(&state, &scopes, &client).await {
+        Ok(v) => v,
+        Err(err) => return skillati_error_response(err),
+    };
     if !visible_names.contains(&name) {
         return skillati_error_response(SkillAtiError::SkillNotFound(name));
     }
