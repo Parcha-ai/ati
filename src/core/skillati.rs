@@ -459,19 +459,30 @@ impl SkillAtiClient {
     pub async fn read_skill(&self, name: &str) -> Result<SkillAtiActivation, SkillAtiError> {
         let raw = self.read_text(name, "SKILL.md").await?;
 
-        // Look up the catalog entry for description. Catalog is cached per
-        // client after first call, so this is free on the hot path.
-        let description = match self.catalog_entries().await {
-            Ok(catalog) => catalog
-                .into_iter()
-                .find(|entry| entry.meta.name == name)
-                .map(|entry| entry.meta.description.clone())
-                .unwrap_or_default(),
-            Err(_) => String::new(),
+        // Look up the catalog entry for description AND build the set of
+        // known skill names in the same pass. Catalog is cached per client
+        // after first call, so both lookups are free on the hot path.
+        //
+        // The catalog names set powers the third substitution rule: bare
+        // `<other-skill>/(references|scripts|assets)/…` references in the
+        // body get rewritten to `skillati://<other-skill>/…` when
+        // `<other-skill>` is a real catalog entry.
+        let (description, catalog_names) = match self.catalog_entries().await {
+            Ok(catalog) => {
+                let description = catalog
+                    .iter()
+                    .find(|entry| entry.meta.name == name)
+                    .map(|entry| entry.meta.description.clone())
+                    .unwrap_or_default();
+                let names: HashSet<String> =
+                    catalog.into_iter().map(|entry| entry.meta.name).collect();
+                (description, Some(names))
+            }
+            Err(_) => (String::new(), None),
         };
 
         let body = strip_frontmatter(&raw);
-        let content = substitute_skill_refs(body, name);
+        let content = substitute_skill_refs(body, name, catalog_names.as_ref());
 
         Ok(SkillAtiActivation {
             name: name.to_string(),
@@ -992,7 +1003,7 @@ fn skill_directory(name: &str) -> String {
 /// in a SKILL.md body so the agent's subsequent file fetches resolve
 /// against the ATI runtime instead of the local filesystem.
 ///
-/// Two transformations:
+/// Three transformations, in order:
 ///
 /// 1. **Variable substitution.** `${ATI_SKILL_DIR}` and `${CLAUDE_SKILL_DIR}`
 ///    both become `skillati://<name>`. Supporting both names means skill
@@ -1000,7 +1011,7 @@ fn skill_directory(name: &str) -> String {
 ///    versa. This mirrors Claude Code's `${CLAUDE_SKILL_DIR}` substitution
 ///    at `~/cc/src/skills/loadSkillsDir.ts:362`.
 ///
-/// 2. **Cross-skill reference rewrite.** Any `.claude/skills/<other>/`
+/// 2. **`.claude/skills/` anchored rewrite.** Any `.claude/skills/<other>/`
 ///    prefix in the body (as long as `<other>` is a plausible skill name
 ///    per `is_anthropic_valid_name`) is rewritten to `skillati://<other>/`.
 ///    This handles the common authoring mistake where a skill body says
@@ -1009,12 +1020,29 @@ fn skill_directory(name: &str) -> String {
 ///    rewriting, the agent naturally resolves the reference via
 ///    `ati skill fetch read anti-slop-design`.
 ///
+/// 3. **Bare cross-skill reference rewrite** *(only when `catalog_names`
+///    is provided)*. Any occurrence of
+///    `<catalog-skill-name>/(references|scripts|assets)/<path>` is
+///    rewritten to `skillati://<catalog-skill-name>/…`. Narrowly scoped:
+///    the first segment must be in the caller's catalog, and the second
+///    segment must be one of the conventional Anthropic Agent Skills
+///    subdirectories. Catches real-world cases like
+///    `html-app-architecture` saying "load your font pair from
+///    anti-slop-design/references/font-pairs.md" without the
+///    `.claude/skills/` anchor or a `${CLAUDE_SKILL_DIR}` prefix. The
+///    catalog-membership check rules out false positives like
+///    `2024/references/report.md`.
+///
 /// Footgun note: substitution is a literal string pass, so a skill body
 /// containing `${CLAUDE_SKILL_DIR}` inside a code-fence example ("don't do
 /// this: `${CLAUDE_SKILL_DIR}`") would also be rewritten. Claude Code has
 /// the same behavior at the same callsite — acceptable for now, document
 /// if it becomes a real problem.
-fn substitute_skill_refs(body: &str, skill_name: &str) -> String {
+fn substitute_skill_refs(
+    body: &str,
+    skill_name: &str,
+    catalog_names: Option<&HashSet<String>>,
+) -> String {
     let skill_uri = skill_directory(skill_name);
 
     // Step 1: variable substitution (literal string replace, cheap).
@@ -1065,6 +1093,102 @@ fn substitute_skill_refs(body: &str, skill_name: &str) -> String {
     rewritten.push_str(&out[cursor..]);
     out = rewritten;
 
+    // Step 3: bare cross-skill reference rewrite — only when we have a
+    // catalog to check against. Match tokens of the form
+    // `<word>/(references|scripts|assets)/...` where `<word>` is in
+    // `catalog_names` and `<word>` != `skill_name` (a self-reference
+    // would be a local path; leave it alone).
+    if let Some(catalog) = catalog_names {
+        out = rewrite_bare_cross_skill_refs(&out, skill_name, catalog);
+    }
+
+    out
+}
+
+/// Scan `body` for bare cross-skill references of the form
+/// `<catalog-name>/(references|scripts|assets)/<rest>` and rewrite them
+/// to `skillati://<catalog-name>/(references|scripts|assets)/<rest>`.
+///
+/// Only called from `substitute_skill_refs` when a catalog is available.
+/// Strict about what counts as a "plausible" token: the first segment
+/// must pass `is_anthropic_valid_name` AND be in `catalog`; the second
+/// segment must be exactly `references`, `scripts`, or `assets`. Keeps
+/// the false-positive rate near zero while catching the common pattern
+/// in production content (e.g., `anti-slop-design/references/...` in
+/// `html-app-architecture`'s SKILL.md body).
+fn rewrite_bare_cross_skill_refs(
+    body: &str,
+    current_skill: &str,
+    catalog: &HashSet<String>,
+) -> String {
+    const SUBDIRS: &[&str] = &["references", "scripts", "assets"];
+
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut cursor = 0;
+
+    // Walk the body looking for the start of each token. A token can
+    // start at the beginning of the body OR after a character that
+    // is not part of a valid name (whitespace, punctuation, etc.).
+    //
+    // We only care about positions where a name char follows a non-name
+    // char (or position 0). At each such boundary, check whether the
+    // next segment is a valid rewrite target.
+    let mut i = 0;
+    while i < bytes.len() {
+        let is_boundary = i == 0
+            || !bytes[i - 1].is_ascii_alphanumeric()
+                && bytes[i - 1] != b'-'
+                && bytes[i - 1] != b'_'
+                && bytes[i - 1] != b'/';
+        if !is_boundary {
+            i += 1;
+            continue;
+        }
+
+        // Try to parse `<name>/<subdir>/` starting at `i`.
+        let name_end = i + bytes[i..]
+            .iter()
+            .take_while(|b| b.is_ascii_alphanumeric() || **b == b'-')
+            .count();
+        if name_end == i || name_end >= bytes.len() || bytes[name_end] != b'/' {
+            i += 1;
+            continue;
+        }
+        let candidate = &body[i..name_end];
+        if !is_anthropic_valid_name(candidate)
+            || candidate == current_skill
+            || !catalog.contains(candidate)
+        {
+            i += 1;
+            continue;
+        }
+
+        // After the `/`, parse the subdir name.
+        let subdir_start = name_end + 1;
+        let subdir_end = subdir_start
+            + bytes[subdir_start..]
+                .iter()
+                .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
+                .count();
+        if subdir_end == subdir_start || subdir_end >= bytes.len() || bytes[subdir_end] != b'/' {
+            i += 1;
+            continue;
+        }
+        let subdir = &body[subdir_start..subdir_end];
+        if !SUBDIRS.contains(&subdir) {
+            i += 1;
+            continue;
+        }
+
+        // Confirmed: rewrite `<candidate>/<subdir>/` → `skillati://<candidate>/<subdir>/`.
+        out.push_str(&body[cursor..i]);
+        out.push_str("skillati://");
+        out.push_str(&body[i..subdir_end + 1]); // includes trailing '/'
+        cursor = subdir_end + 1;
+        i = cursor;
+    }
+    out.push_str(&body[cursor..]);
     out
 }
 

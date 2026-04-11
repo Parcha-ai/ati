@@ -1936,3 +1936,339 @@ async fn skillati_read_rewrites_cross_skill_filesystem_refs() {
         "prose mention of `.claude/skills/ directory` must not be rewritten: {content}"
     );
 }
+
+/// `read_skill` does NOT substitute `${CLAUDE_SESSION_ID}` even though
+/// Claude Code does (`~/cc/src/skills/loadSkillsDir.ts:366-369`). Session
+/// identifiers are a CC-runtime concept with no analogue in our remote-
+/// fetch model. Test pins this intentional deviation so nobody
+/// accidentally "fixes" it by adding session-ID handling without a real
+/// design discussion.
+#[tokio::test]
+async fn skillati_read_does_not_substitute_session_id_variable() {
+    let _lock = env_mutex().lock().await;
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "session-probe",
+        "description": "",
+        "skill_directory": "session-probe",
+    })])
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/skillati/session-probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "session-probe",
+            "skill_directory": "session-probe",
+            "content": "---\nname: session-probe\n---\n\
+                Log to ${CLAUDE_SESSION_ID}/probe.log\n",
+            "resources": [],
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("skill:session-probe");
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/session-probe")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    let content = body["content"].as_str().unwrap_or_default().to_string();
+
+    assert!(
+        content.contains("${CLAUDE_SESSION_ID}"),
+        "${{CLAUDE_SESSION_ID}} should pass through unchanged — ATI has no \
+         session-ID concept, substituting it would leak a CC-specific \
+         runtime assumption into skill content. Body: {content}"
+    );
+}
+
+/// Substitution must not rewrite Windows-style backslash paths. Skill
+/// authors occasionally include example paths in their bodies using
+/// `.claude\skills\other-skill\SKILL.md` notation. We only handle the
+/// forward-slash directory form — matches the `/` literal we search for
+/// in `substitute_skill_refs`. This test pins that behavior so a future
+/// refactor doesn't accidentally add backslash rewriting (which would
+/// almost certainly mangle code examples in skill bodies).
+#[tokio::test]
+async fn skillati_read_preserves_windows_style_path_separators() {
+    let _lock = env_mutex().lock().await;
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "winpath-probe",
+        "description": "",
+        "skill_directory": "winpath-probe",
+    })])
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/skillati/winpath-probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "winpath-probe",
+            "skill_directory": "winpath-probe",
+            "content": "---\nname: winpath-probe\n---\n\
+                On Windows, skills live at .claude\\skills\\other\\SKILL.md\n",
+            "resources": [],
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("skill:winpath-probe");
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/winpath-probe")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    let content = body["content"].as_str().unwrap_or_default().to_string();
+
+    assert!(
+        content.contains(".claude\\skills\\other\\SKILL.md"),
+        "Windows-style backslash paths must not be rewritten — our \
+         substitution only handles forward-slash directory form. Body: {content}"
+    );
+    assert!(
+        !content.contains("skillati://other"),
+        "backslash path should not produce a skillati:// rewrite: {content}"
+    );
+}
+
+/// Cross-skill rewrite works on a skill whose body references multiple
+/// sibling skills. Pins that `substitute_skill_refs` walks through
+/// multiple matches correctly without overlapping rewrites.
+#[tokio::test]
+async fn skillati_read_rewrites_multiple_cross_skill_refs_in_one_body() {
+    let _lock = env_mutex().lock().await;
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "multi-ref",
+        "description": "",
+        "skill_directory": "multi-ref",
+    })])
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/skillati/multi-ref"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "multi-ref",
+            "skill_directory": "multi-ref",
+            "content": "---\nname: multi-ref\n---\n\
+                Before starting, read .claude/skills/first-skill/SKILL.md.\n\
+                Then apply .claude/skills/second-skill/SKILL.md rules.\n\
+                Finally consult .claude/skills/third-skill/references/guide.md.\n",
+            "resources": [],
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("skill:multi-ref");
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/multi-ref")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    let content = body["content"].as_str().unwrap_or_default().to_string();
+
+    for skill in ["first-skill", "second-skill", "third-skill"] {
+        let orig = format!(".claude/skills/{skill}/");
+        let rewritten = format!("skillati://{skill}/");
+        assert!(
+            !content.contains(&orig),
+            "'{orig}' should have been rewritten to 'skillati://{skill}/': {content}"
+        );
+        assert!(
+            content.contains(&rewritten),
+            "'{rewritten}' should be in the rewritten body: {content}"
+        );
+    }
+    // Confirm the deep reference is rewritten too (references/guide.md).
+    assert!(
+        content.contains("skillati://third-skill/references/guide.md"),
+        "deep file references inside a .claude/skills/ path must keep \
+         the trailing subpath: {content}"
+    );
+}
+
+/// If the catalog lookup fails or the skill is missing from the catalog,
+/// `read_skill` must still return an activation with an empty
+/// description rather than error out. The SKILL.md fetch is the
+/// source of truth for existence; catalog is best-effort metadata.
+#[tokio::test]
+async fn skillati_read_returns_empty_description_when_not_in_catalog() {
+    let _lock = env_mutex().lock().await;
+    // Catalog has skill A but not skill B. Both skill bodies are served.
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "in-catalog",
+        "description": "This one has a description",
+        "skill_directory": "in-catalog",
+    })])
+    .await;
+    // Serve a body for `ghost-skill` which is NOT in the catalog.
+    Mock::given(method("GET"))
+        .and(path("/skillati/ghost-skill"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "ghost-skill",
+            "skill_directory": "ghost-skill",
+            "content": "---\nname: ghost-skill\n---\nbody text\n",
+            "resources": [],
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    // Mint a wildcard token so visibility cannot gate `ghost-skill` out
+    // via its missing catalog entry (which would change the test to a
+    // 404 instead of the activation-shape scenario we want to cover).
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("*");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/ghost-skill")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    // We expect either 200 with empty description (preferred behavior)
+    // OR 404 (if the visibility gate refuses a not-in-catalog skill even
+    // under wildcard — documents current semantics either way).
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NOT_FOUND,
+        "unexpected status {status} for not-in-catalog skill: {body}"
+    );
+    if status == StatusCode::OK {
+        assert_eq!(
+            body["description"].as_str(),
+            Some(""),
+            "description should default to empty string when skill is \
+             absent from the catalog: {body}"
+        );
+        assert!(
+            body["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("body text"),
+            "body content should still be returned from read_text: {body}"
+        );
+    }
+}
+
+/// Bare `<catalog-name>/(references|scripts|assets)/<path>` references
+/// in a SKILL.md body get rewritten to `skillati://<catalog-name>/…`
+/// when the first segment is in the caller's catalog. Real production
+/// case: `html-app-architecture` body references
+/// `anti-slop-design/references/font-pairs.md` without a
+/// `.claude/skills/` anchor. The substitution helper uses the catalog
+/// as a whitelist so random paths like `2024/references/report.md` stay
+/// untouched.
+#[tokio::test]
+async fn skillati_read_rewrites_bare_cross_skill_subdir_refs_via_catalog() {
+    let _lock = env_mutex().lock().await;
+    // Two real catalog entries — the one being read AND the one being
+    // referenced from its body. `fake-year-2024` is NOT in the catalog;
+    // its matching path-looking token in prose must NOT be rewritten.
+    let upstream = serve_remote_catalog_mock(vec![
+        serde_json::json!({
+            "name": "html-app-architecture",
+            "description": "HTML app patterns",
+            "skill_directory": "html-app-architecture",
+        }),
+        serde_json::json!({
+            "name": "anti-slop-design",
+            "description": "Design variety guide",
+            "skill_directory": "anti-slop-design",
+        }),
+    ])
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/skillati/html-app-architecture"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "html-app-architecture",
+            "skill_directory": "html-app-architecture",
+            "content": "---\nname: html-app-architecture\n---\n\
+                Replace with your selected font pair from anti-slop-design/references/font-pairs.md\n\
+                Apply your palette from anti-slop-design/references/color-palettes.md\n\
+                For scripts see anti-slop-design/scripts/gen.sh\n\
+                See also fake-year-2024/references/fake-report.md — should NOT rewrite.\n\
+                Also anti-slop-design/something-weird/file.md — subdir not in allowlist, NOT rewritten.\n",
+            "resources": [],
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("skill:html-app-architecture");
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/html-app-architecture")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    let content = body["content"].as_str().unwrap_or_default().to_string();
+
+    // Positive: bare references to a catalog skill's references/scripts
+    // subdirs are rewritten.
+    assert!(
+        content.contains("skillati://anti-slop-design/references/font-pairs.md"),
+        "bare `anti-slop-design/references/...` must be rewritten: {content}"
+    );
+    assert!(
+        content.contains("skillati://anti-slop-design/references/color-palettes.md"),
+        "second bare reference must also be rewritten: {content}"
+    );
+    assert!(
+        content.contains("skillati://anti-slop-design/scripts/gen.sh"),
+        "bare `anti-slop-design/scripts/...` must be rewritten: {content}"
+    );
+
+    // Negative: first segment not in the catalog → leave alone.
+    assert!(
+        content.contains("fake-year-2024/references/fake-report.md"),
+        "first segment not in catalog must not be rewritten: {content}"
+    );
+    assert!(
+        !content.contains("skillati://fake-year-2024"),
+        "must not produce a skillati:// rewrite for non-catalog names: {content}"
+    );
+
+    // Negative: second segment not in the allowlist → leave alone.
+    assert!(
+        content.contains("anti-slop-design/something-weird/file.md"),
+        "unknown subdir name must not trigger rewrite: {content}"
+    );
+    assert!(
+        !content.contains("skillati://anti-slop-design/something-weird"),
+        "must not produce a skillati:// rewrite for unknown subdirs: {content}"
+    );
+}

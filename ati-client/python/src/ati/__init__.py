@@ -85,30 +85,96 @@ def _build_skill_instructions_legacy(skills: list[str]) -> str:
 
 
 # --- Claude-Code-shaped skill listing (0.7.5+) -----------------------------
+#
+# Formatter structure mirrors Claude Code's `formatCommandsWithinBudget`
+# at `~/cc/src/tools/SkillTool/prompt.ts:70-171`. We match CC's behavior
+# byte-for-byte on:
+#
+#   - Per-entry 250-char cap applied to the *description* only, not the
+#     full bullet line (CC `getCommandDescription` / line 43-50).
+#   - Ellipsis character is `\u2026` (single codepoint), not `...`.
+#   - Truncation uses `desc[:249] + '\u2026'` with no whitespace trim.
+#   - Bullet format `- name: description - when_to_use` (CC line 65 +
+#     `getCommandDescription` line 44-46).
+#   - Three-pass fallback cascade:
+#       Pass 1: full descriptions, return if fits.
+#       Pass 2: per-entry descriptions trimmed to an equal share of the
+#               remaining budget (min 20 chars per description — CC's
+#               `MIN_DESC_LENGTH` at line 68).
+#       Pass 3: names-only under extreme pressure.
+#
+# We deliberately diverge from CC in two places:
+#   - Preamble wording: points at `ati skill fetch read <name>` instead
+#     of CC's "Skill tool" since our runtime doesn't expose a native
+#     Skill tool — agents invoke via Bash.
+#   - We add a `+N more` overflow footer (Pass 3') when names-only still
+#     doesn't fit. CC never hits this case because built-in skill counts
+#     are small (<30). The Parcha GCS catalog carries ~286 skills and
+#     wildcard scopes blow through the 8000-char budget in name-only
+#     mode (~4300 chars), but still at ~200 chars per bullet overflow
+#     cases exist for future catalogs.
 
-# Per-entry character budget for a single skill line in the listing.
-# Matches `MAX_LISTING_DESC_CHARS` in
-# `~/cc/src/tools/SkillTool/prompt.ts:29`.
+# Matches `MAX_LISTING_DESC_CHARS` in `~/cc/src/tools/SkillTool/prompt.ts:29`.
 _MAX_LISTING_DESC_CHARS = 250
 
-# Total budget for the whole <system-reminder> block. Matches Claude
-# Code's default at `~/cc/src/tools/SkillTool/prompt.ts:31-41`.
-_MAX_LISTING_BLOCK_CHARS = 8000
+# Matches `DEFAULT_CHAR_BUDGET` in `~/cc/src/tools/SkillTool/prompt.ts:23`.
+# CC computes this dynamically via `getCharBudget(contextWindowTokens)`
+# (line 31-41) as `contextWindowTokens * 4 * 0.01`, defaulting to 8000
+# for a 200k-token model. We hardcode the default because the Python
+# client doesn't know the downstream agent's model at listing time.
+_DEFAULT_LISTING_BUDGET = 8000
+
+# Matches `MIN_DESC_LENGTH` in `~/cc/src/tools/SkillTool/prompt.ts:68`.
+# Under budget pressure, if the per-skill description share would drop
+# below this, we fall back to names-only instead.
+_MIN_DESC_LENGTH = 20
 
 
-def _truncate_with_ellipsis(text: str, max_chars: int) -> str:
-    """Clip `text` to at most `max_chars` characters, adding a trailing
-    ellipsis glyph when we actually removed content. Matches the
-    single-character ellipsis (`\u2026`) Claude Code uses in its listing
-    truncation path so downstream byte comparisons match."""
-    if max_chars <= 0 or len(text) <= max_chars:
+def _truncate_description(text: str, max_chars: int) -> str:
+    """Apply CC's per-entry description truncation rule verbatim.
+
+    `~/cc/src/tools/SkillTool/prompt.ts:43-50`:
+
+        return desc.length > MAX_LISTING_DESC_CHARS
+          ? desc.slice(0, MAX_LISTING_DESC_CHARS - 1) + '\u2026'
+          : desc
+
+    No whitespace trim, single-codepoint ellipsis. Applied to the
+    description portion only — the bullet prefix (`- name: `) is not
+    part of the character budget.
+    """
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
         return text
-    if max_chars <= 1:
+    if max_chars == 1:
         return "\u2026"
-    return text[: max_chars - 1].rstrip() + "\u2026"
+    return text[: max_chars - 1] + "\u2026"
 
 
-def _format_skill_listing(entries: list[dict]) -> str:
+def _build_description(description: str, when_to_use: str | None) -> str:
+    """Render the description portion of a bullet, matching CC's
+    `getCommandDescription` at `prompt.ts:43-50`:
+
+        const desc = cmd.whenToUse
+          ? `${cmd.description} - ${cmd.whenToUse}`
+          : cmd.description
+    """
+    if when_to_use and description:
+        return f"{description} - {when_to_use}"
+    if when_to_use:
+        return when_to_use
+    return description
+
+
+def _bullet(name: str, description: str) -> str:
+    """Render one bullet, matching `formatCommandDescription` at
+    `prompt.ts:52-66`: `- ${name}: ${description}` (or just `- ${name}`
+    when description is empty)."""
+    return f"- {name}: {description}" if description else f"- {name}"
+
+
+def _format_skill_listing(entries: list) -> str:
     """Render a list of remote skill metadata dicts as a
     ``<system-reminder>`` block mirroring Claude Code's
     ``getSkillListingAttachments`` output
@@ -116,29 +182,39 @@ def _format_skill_listing(entries: list[dict]) -> str:
 
     Each entry is a dict with at least ``name`` and ``description``;
     ``when_to_use`` is optional. Non-dict entries (plain strings) are
-    coerced to ``{"name": <string>, "description": ""}`` for
-    backwards compatibility with the legacy call shape.
-
-    Layout:
-
-    ```
-    <system-reminder>
-    The following skills are available. To load one, run
-    `ati skill fetch read <name>` via the Bash tool — the skill's body will
-    be returned. Follow the skill's instructions literally. Files referenced
-    inside a skill body live at `skillati://<name>/<path>` — fetch them via
-    `ati skill fetch cat <name> <path>`.
-
-    - skill-name: description - when_to_use
-    - other-skill: description
-    </system-reminder>
-    ```
-
-    Under extreme budget pressure the function falls back to
-    name-only entries (``- skill-name``), matching
-    ``~/cc/src/tools/SkillTool/prompt.ts:125-142``.
+    coerced to ``{"name": <string>, "description": ""}`` for backwards
+    compatibility with the legacy `build_skill_instructions` call shape.
     """
     if not entries:
+        return ""
+
+    # --- Normalize entries to (name, description) tuples, with per-entry
+    # description truncation applied at this stage (matches CC's
+    # `getCommandDescription` which truncates at fetch time, not at
+    # render time).
+    def _normalize(entry) -> tuple[str, str, str | None]:
+        if isinstance(entry, dict):
+            return (
+                str(entry.get("name", "")).strip(),
+                str(entry.get("description", "")).strip(),
+                (
+                    str(entry.get("when_to_use")).strip()
+                    if entry.get("when_to_use") is not None
+                    else None
+                ),
+            )
+        return str(entry).strip(), "", None
+
+    normalized: list[tuple[str, str]] = []
+    for entry in entries:
+        name, description, when_to_use = _normalize(entry)
+        if not name:
+            continue
+        raw_desc = _build_description(description, when_to_use)
+        capped = _truncate_description(raw_desc, _MAX_LISTING_DESC_CHARS)
+        normalized.append((name, capped))
+
+    if not normalized:
         return ""
 
     header = (
@@ -150,71 +226,73 @@ def _format_skill_listing(entries: list[dict]) -> str:
         "fetch them via `ati skill fetch cat <name> <path>`.\n\n"
     )
     footer = "\n</system-reminder>"
-    overhead = len(header) + len(footer)
-    budget = max(0, _MAX_LISTING_BLOCK_CHARS - overhead)
+    budget = _DEFAULT_LISTING_BUDGET
 
-    def _normalize(entry) -> tuple[str, str, str | None]:
-        if isinstance(entry, dict):
-            name = str(entry.get("name", "")).strip()
-            description = str(entry.get("description", "")).strip()
-            when_to_use_raw = entry.get("when_to_use")
-            when_to_use = (
-                str(when_to_use_raw).strip()
-                if when_to_use_raw is not None
-                else None
-            )
-            return name, description, when_to_use
-        # Legacy list[str] path — coerce to a bare name.
-        return str(entry).strip(), "", None
+    # --- Pass 1: full descriptions, matches CC `prompt.ts:78-90`.
+    full_lines = [_bullet(name, desc) for name, desc in normalized]
+    # CC's fullTotal = sum(stringWidth) + (N-1) — same as len("\n".join(...))
+    # because each newline is one char. len() and stringWidth() agree for
+    # ASCII; skill names are ASCII in practice.
+    full_body = "\n".join(full_lines)
+    if len(full_body) <= budget:
+        return header + full_body + footer
 
-    # Pass 1 — render with descriptions, truncate per-entry.
-    rich_lines: list[str] = []
-    for entry in entries:
-        name, description, when_to_use = _normalize(entry)
-        if not name:
-            continue
-        suffix = description
-        if when_to_use:
-            suffix = f"{description} - {when_to_use}" if description else when_to_use
-        line = f"- {name}: {suffix}" if suffix else f"- {name}"
-        rich_lines.append(_truncate_with_ellipsis(line, _MAX_LISTING_DESC_CHARS))
+    # --- Pass 2: compute a per-description share of the remaining budget,
+    # truncate each description to fit. Matches CC `prompt.ts:117-170`
+    # simplified to our no-bundled-skills case (all entries are
+    # "non-bundled" in our runtime).
+    name_overhead = sum(len(name) + len("- : ") for name, _ in normalized) + (
+        len(normalized) - 1
+    )  # N-1 newlines
+    available_for_descs = budget - name_overhead
+    max_desc_len = (
+        available_for_descs // len(normalized) if len(normalized) else 0
+    )
 
-    if not rich_lines:
-        return ""
+    if max_desc_len >= _MIN_DESC_LENGTH:
+        trimmed_lines = [
+            _bullet(name, _truncate_description(desc, max_desc_len))
+            for name, desc in normalized
+        ]
+        body = "\n".join(trimmed_lines)
+        if len(body) <= budget:
+            return header + body + footer
 
-    body = "\n".join(rich_lines)
-    if len(body) <= budget:
-        return header + body + footer
+    # --- Pass 3: names only, matches CC `prompt.ts:137-142` (names-only
+    # branch triggered when `maxDescLen < MIN_DESC_LENGTH`). We get here
+    # when either per-description budget is too small or Pass 2 still
+    # overflows (shouldn't happen in practice, but we defensively check).
+    name_lines = [f"- {name}" for name, _ in normalized]
+    names_body = "\n".join(name_lines)
+    if len(names_body) <= budget:
+        return header + names_body + footer
 
-    # Pass 2 — names only, same budget check.
-    name_lines: list[str] = []
-    for entry in entries:
-        name, _, _ = _normalize(entry)
-        if name:
-            name_lines.append(f"- {name}")
-    body = "\n".join(name_lines)
-    if len(body) <= budget:
-        return header + body + footer
-
-    # Pass 3 — hard cap: take as many names as fit, append a "+N more"
-    # footer so the agent knows something was dropped.
-    truncated: list[str] = []
+    # --- Pass 3': ATI extension — even names-only overflows the budget.
+    # CC never hits this path because its listings max out around ~30
+    # entries. The Parcha GCS catalog carries 286+ skills and a wildcard
+    # scope (current behavior at provisioning time) can still push past
+    # the 8000-char budget in exotic cases. Take as many names as fit,
+    # append a `+N more` footer so the agent knows to run
+    # `ati skill fetch catalog` for the rest.
+    overflow_template = (
+        "\n- ... (+{count} more — run `ati skill fetch catalog` to list all)"
+    )
+    overflow_reserve = len(overflow_template.format(count=99_999))
+    included: list[str] = []
     running = 0
-    more_note_template = "\n- ... (+{count} more — run `ati skill fetch catalog` to list all)"
-    more_note_reserve = len(more_note_template.format(count=99999))
     for line in name_lines:
-        needed = running + len(line) + (1 if truncated else 0)
-        if needed > budget - more_note_reserve:
+        # Budget for this line: its own length + separator newline.
+        needed = running + len(line) + (1 if included else 0)
+        if needed > budget - overflow_reserve:
             break
-        if truncated:
+        if included:
             running += 1
         running += len(line)
-        truncated.append(line)
-
-    remaining = len(name_lines) - len(truncated)
-    body = "\n".join(truncated)
+        included.append(line)
+    remaining = len(name_lines) - len(included)
+    body = "\n".join(included)
     if remaining > 0:
-        body += more_note_template.format(count=remaining)
+        body += overflow_template.format(count=remaining)
     return header + body + footer
 
 

@@ -178,9 +178,15 @@ class TestBuildSkillListing:
             "https://ati-proxy.example.com/skillati/catalog?search=html"
         )
 
-    def test_respects_total_budget_across_many_skills(self):
-        # 400 skills * ~80 chars each > 8000 char budget, forces pass-2
-        # (names only) or pass-3 (truncated) fallback.
+    def test_respects_body_budget_across_many_skills(self):
+        """CC's 8000-char budget applies to the bullet-content body, not
+        the wrapped output. The `<system-reminder>` envelope adds
+        header/footer overhead on top. 400 skills * ~80 chars forces
+        the pass-2/pass-3 cascade; the body (excluding the wrap) must
+        stay under 8000 chars — matching CC's
+        ``formatCommandsWithinBudget`` which returns just the body
+        string and lets ``wrapInSystemReminder`` add its own overhead
+        later (``~/cc/src/utils/messages.ts:3098``)."""
         many = [
             {
                 "name": f"skill-{i:03}",
@@ -192,10 +198,25 @@ class TestBuildSkillListing:
         captured, urlopen = _fake_urlopen(payload)
         with patch("urllib.request.urlopen", urlopen):
             listing = self.orch.build_skill_listing(token="tok")
-        assert len(listing) <= 8000, f"listing {len(listing)} chars exceeds 8000 budget"
         assert "<system-reminder>" in listing
+        # Extract the body (everything between the preamble blank line
+        # and the closing tag).
+        preamble_end = listing.find("\n\n")
+        closing = listing.find("\n</system-reminder>")
+        assert preamble_end >= 0 and closing >= 0, f"malformed listing: {listing[:200]}"
+        body = listing[preamble_end + 2 : closing]
+        assert len(body) <= 8000, (
+            f"body {len(body)} chars exceeds 8000 budget (total listing: "
+            f"{len(listing)} chars)"
+        )
 
-    def test_truncates_per_entry_over_250_chars(self):
+    def test_truncates_description_at_250_chars_not_full_line(self):
+        """CC's 250-char cap applies to the description portion only,
+        not the whole bullet line. A skill with a 2000-char description
+        should have its description clipped to 249 chars + `\\u2026`,
+        then the `- name: ` prefix is added on top. Matches
+        ``~/cc/src/tools/SkillTool/prompt.ts:43-50``
+        (`getCommandDescription`)."""
         long_desc = "x" * 2000
         payload = json.dumps(
             {
@@ -210,14 +231,108 @@ class TestBuildSkillListing:
         _, urlopen = _fake_urlopen(payload)
         with patch("urllib.request.urlopen", urlopen):
             listing = self.orch.build_skill_listing(token="tok")
-        # Find the skill's bullet line. The per-entry budget is 250 chars
-        # including the leading "- " and the trailing ellipsis.
         for line in listing.splitlines():
             if line.startswith("- bloated-skill"):
-                assert len(line) <= 250, f"entry line is {len(line)} chars: {line}"
-                assert line.endswith("\u2026"), "truncated line should end with ellipsis"
+                # Description portion = the "x...x\u2026" after "- name: ".
+                prefix = "- bloated-skill: "
+                assert line.startswith(prefix)
+                description_part = line[len(prefix):]
+                assert len(description_part) == 250, (
+                    f"description portion is {len(description_part)} chars, "
+                    f"expected 250 (249 x's + 1 ellipsis): {description_part[:50]}..."
+                )
+                assert description_part.endswith("\u2026")
+                # Make sure CC's rule applies: 249 content chars + 1 ellipsis.
+                assert description_part[:-1] == "x" * 249
                 return
         raise AssertionError(f"bloated-skill line not found in listing:\n{listing}")
+
+    def test_long_skill_name_does_not_force_description_truncation(self):
+        """A skill with a moderate description and a very long name
+        should NOT have its description truncated — the 250-char cap
+        applies to the description, not `- name: description` as a
+        whole. This is the regression the previous test was hiding."""
+        payload = json.dumps(
+            {
+                "skills": [
+                    {
+                        "name": "a" * 200,  # 200-char skill name
+                        "description": "b" * 100,  # 100-char description
+                    }
+                ]
+            }
+        ).encode()
+        _, urlopen = _fake_urlopen(payload)
+        with patch("urllib.request.urlopen", urlopen):
+            listing = self.orch.build_skill_listing(token="tok")
+        # Description should be intact — no ellipsis anywhere in the body.
+        for line in listing.splitlines():
+            if line.startswith("- " + "a" * 10):
+                assert "\u2026" not in line, (
+                    f"description must not be truncated when the bullet's "
+                    f"total length exceeds 250 chars due to a long name: {line}"
+                )
+                assert line.endswith("b" * 100)
+                return
+        raise AssertionError(f"skill line not found in listing:\n{listing}")
+
+    def test_ellipsis_uses_single_codepoint_not_three_dots(self):
+        """CC uses the U+2026 ellipsis codepoint (`\\u2026`), not three
+        ASCII periods. Assert our truncation matches byte-for-byte."""
+        long_desc = "z" * 500
+        payload = json.dumps(
+            {"skills": [{"name": "ellipsis-check", "description": long_desc}]}
+        ).encode()
+        _, urlopen = _fake_urlopen(payload)
+        with patch("urllib.request.urlopen", urlopen):
+            listing = self.orch.build_skill_listing(token="tok")
+        for line in listing.splitlines():
+            if line.startswith("- ellipsis-check:"):
+                assert "..." not in line, (
+                    f"three-dot ellipsis leaked into output: {line[:80]}"
+                )
+                assert line.endswith("\u2026")
+                return
+        raise AssertionError("ellipsis-check skill not found in listing")
+
+    def test_middle_pass_truncates_descriptions_before_dropping_to_names(self):
+        """When full descriptions don't fit but there's still room for
+        moderately-sized per-description budgets (>=20 chars per entry),
+        CC trims descriptions via the middle pass rather than dropping
+        straight to names-only. Matches
+        ``~/cc/src/tools/SkillTool/prompt.ts:117-170``."""
+        # 100 skills * 150-char descriptions = 15000+ chars in full mode
+        # (overflows 8000). Per-description budget after overhead should
+        # still be well above MIN_DESC_LENGTH (20), so we expect Pass 2.
+        skills = [
+            {
+                "name": f"skill-{i:03}",
+                "description": "Detailed methodology for handling scenario " + ("x" * 100),
+            }
+            for i in range(100)
+        ]
+        payload = json.dumps({"skills": skills}).encode()
+        _, urlopen = _fake_urlopen(payload)
+        with patch("urllib.request.urlopen", urlopen):
+            listing = self.orch.build_skill_listing(token="tok")
+
+        # Pass 2 signature: every bullet still has a description (colon +
+        # space + text), and at least one of them ends with the ellipsis
+        # marker because it got trimmed.
+        lines = [
+            ln for ln in listing.splitlines() if ln.startswith("- skill-")
+        ]
+        assert len(lines) == 100, f"all 100 skills should be listed, got {len(lines)}"
+        with_desc = [ln for ln in lines if ": " in ln]
+        assert len(with_desc) == 100, (
+            f"middle pass must preserve descriptions, got "
+            f"{len(with_desc)} / 100 with descriptions"
+        )
+        truncated = [ln for ln in lines if ln.endswith("\u2026")]
+        assert truncated, (
+            "at least one description should be trimmed in the middle pass"
+        )
+        assert len(listing) <= 8000 + 500  # header+footer overhead
 
     def test_empty_catalog_returns_empty_string(self):
         _, urlopen = _fake_urlopen(b'{"skills": []}')
