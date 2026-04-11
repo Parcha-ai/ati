@@ -40,6 +40,12 @@ pub struct AnthropicFrontmatter {
     pub description: Option<String>,
     pub license: Option<String>,
     pub compatibility: Option<String>,
+    /// Optional "when to use" guidance. Claude Code reads this as
+    /// `when_to_use` (snake_case, see `~/cc/src/skills/loadSkillsDir.ts`),
+    /// so we match that name and also accept the kebab-case variant via
+    /// `#[serde(alias = "when-to-use")]`.
+    #[serde(default, alias = "when-to-use")]
+    pub when_to_use: Option<String>,
     #[serde(default)]
     pub metadata: HashMap<String, String>,
     /// Space-delimited allowed tools string, e.g. "Bash(git:*) Read"
@@ -188,6 +194,11 @@ pub struct SkillMeta {
     /// Compatibility notes (from frontmatter, max 500 chars)
     #[serde(default)]
     pub compatibility: Option<String>,
+    /// "When to use" guidance (from frontmatter `when_to_use` /
+    /// `when-to-use`). Surfaced in the `<system-reminder>` skill listing
+    /// via `AtiOrchestrator.build_skill_listing` on the Python side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_to_use: Option<String>,
     /// Arbitrary metadata key-value pairs (from frontmatter `metadata:` block)
     #[serde(default)]
     pub extra_metadata: HashMap<String, String>,
@@ -234,6 +245,7 @@ impl Default for SkillMeta {
             suggests: Vec::new(),
             license: None,
             compatibility: None,
+            when_to_use: None,
             extra_metadata: HashMap::new(),
             allowed_tools: None,
             has_frontmatter: false,
@@ -898,6 +910,7 @@ fn load_skill_from_dir(dir: &Path) -> Result<SkillMeta, SkillError> {
             description: fm.description.unwrap_or_default(),
             license: fm.license,
             compatibility: fm.compatibility,
+            when_to_use: fm.when_to_use,
             extra_metadata: fm.metadata,
             allowed_tools: fm.allowed_tools,
             has_frontmatter: true,
@@ -993,6 +1006,7 @@ pub fn parse_skill_metadata(
             description: fm.description.unwrap_or_default(),
             license: fm.license,
             compatibility: fm.compatibility,
+            when_to_use: fm.when_to_use,
             extra_metadata: fm.metadata,
             allowed_tools: fm.allowed_tools,
             has_frontmatter: true,

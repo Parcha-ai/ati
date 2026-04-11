@@ -78,13 +78,31 @@ Other commands:
 | `Tool` | `core/manifest.rs` | One `[[tools]]` entry. Name, endpoint, method, input schema, response config, tags, hints. |
 | `McpClient` | `core/mcp_client.rs` | Connects to MCP server via stdio (subprocess, newline-delimited JSON-RPC) or Streamable HTTP (POST with SSE parsing). Manages `Mcp-Session-Id` for HTTP transport. Caches discovered tools. |
 | `ClassifiedParams` | `core/http.rs` | Splits args into path/query/header/body based on `x-ati-param-location` metadata injected by the OpenAPI parser. Falls back to legacy mode (GET→query, POST→body) for hand-written tools. |
-| `SkillMeta` | `core/skill.rs` | Parsed `skill.toml` — name, version, author, description, tool/provider/category bindings, keywords, depends_on, suggests. |
+| `SkillMeta` | `core/skill.rs` | Parsed `skill.toml` and/or SKILL.md frontmatter — name, version, author, description, `when_to_use`, tool/provider/category bindings, keywords, depends_on, suggests. Fields match Anthropic's Agent Skills frontmatter plus our ATI-specific extensions. |
 | `SkillRegistry` | `core/skill.rs` | Loads `~/.ati/skills/*/`, indexes by tool/provider/category for fast lookup. Resolves skills transitively from scopes. |
+| `SkillAtiActivation` | `core/skillati.rs` | Level-2 activation payload (`{name, description, skill_directory, content}`) returned by `ati skill fetch read <name>`. Mirrors Claude Code's `createSkillCommand.getPromptForCommand` text block. Intentionally **no** resources field — Level-3 files (scripts, references) are pulled on demand via `ati skill fetch resources` / `cat` / `ref`. |
+| `RemoteSkillMeta` | `core/skillati.rs` | Catalog entry for a remote (GCS-backed) skill: `name`, `description`, `when_to_use`, `skill_directory`, and `tools/providers/categories/keywords` bindings used by `visible_skill_names_with_remote` to scope-filter the catalog. |
 | `Keyring` | `core/keyring.rs` | AES-256-GCM encrypted key-value store. Session key read once from `/run/ati/.key` then unlinked. Memory mlock'd and zeroized on drop. |
 | `JwtConfig` | `core/jwt.rs` | JWT validation/issuance config: algorithm (ES256/HS256), keys, required issuer/audience, leeway. |
 | `TokenClaims` | `core/jwt.rs` | JWT claims: sub, aud, scope (space-delimited), exp, iat, jti, ati namespace. |
 | `ScopeConfig` | `core/scope.rs` | Per-tool allowlist with expiry timestamps. Supports wildcards (`tool:github:*`). Built from JWT claims. |
 | `ProxyState` | `proxy/server.rs` | Axum shared state: registry + skill_registry + keyring + jwt_config + verbose flag. |
+
+### Skills model (progressive disclosure)
+
+Skill fetching mirrors Anthropic's Agent Skills three-level progressive-disclosure model, verified against Claude Code's implementation at `~/cc/src/skills/loadSkillsDir.ts`, `~/cc/src/tools/SkillTool/SkillTool.ts`, and `~/cc/src/utils/attachments.ts`:
+
+| Level | What's loaded | When | Our implementation |
+|---|---|---|---|
+| 1. Metadata | `name` + `description` (and `when_to_use` if present) for every in-scope skill | At agent provisioning time | `ati-client.AtiOrchestrator.build_skill_listing(token)` fetches `GET /skillati/catalog` and renders a `<system-reminder>` block with 250 chars/entry and 8000 chars/block budgets. Mirrors CC's `getSkillListingAttachments` + `formatCommandsWithinBudget`. |
+| 2. Instructions | SKILL.md body (frontmatter stripped) | When the agent runs `ati skill fetch read <name>` | `SkillAtiClient::read_skill` returns `SkillAtiActivation { name, description, skill_directory, content }`. Mirrors CC's `createSkillCommand.getPromptForCommand` return shape (text block with a `Base directory for this skill: ...` preamble). |
+| 3. Resources | `scripts/`, `references/`, `assets/` files | On demand, per-file, when the SKILL.md body tells the agent to | `ati skill fetch resources <name>` / `cat <name> <path>` / `ref <name> <ref>`. Never eagerly fetched during Level 2. |
+
+**Skill directory variables.** `${ATI_SKILL_DIR}` and `${CLAUDE_SKILL_DIR}` are both substituted to `skillati://<name>` inside SKILL.md bodies during Level 2 activation. Skill content authored for Claude Code works unchanged through our runtime, and vice versa. Substitution lives in `core/skillati.rs::substitute_skill_refs`.
+
+**Cross-skill references.** `.claude/skills/<other-skill>/<path>` directory-form references in SKILL.md bodies are rewritten to `skillati://<other-skill>/<path>` at Level 2 time. Agents then resolve them via a normal `ati skill fetch read <other-skill>` or `ati skill fetch cat <other-skill> <path>` call, with the visibility gate running on each fetch. Guarded by `is_anthropic_valid_name` so prose mentions like "the `.claude/skills/` directory" pass through unchanged.
+
+**Scope enforcement.** All `/skillati/*` handlers gate visibility through `visible_skill_names_with_remote` (`proxy/server.rs`), which unions local `SkillRegistry` visibility with the remote catalog's scope cascade (`visible_remote_skill_names`). A token with only `skill:X` sees only X in the listing and can only `fetch read X`.
 
 ### MCP Tool Naming
 
