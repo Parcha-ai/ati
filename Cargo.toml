@@ -1,6 +1,6 @@
 [package]
 name = "agent-tools-interface"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 description = "Agent Tools Interface — secure CLI for AI agent tool execution"
 license = "Apache-2.0"
@@ -40,7 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Optional Sentry integration (off by default, enable with --features sentry)
 # Includes errors, traces, AND Sentry Logs (structured log forwarding).
-sentry = { version = "0.47", features = ["tracing", "logs"], default-features = false, optional = true }
+sentry = { version = "0.47", features = ["tracing", "logs", "reqwest", "rustls"], default-features = false, optional = true }
 sentry-tracing = { version = "0.47", optional = true }
 
 # Serialization

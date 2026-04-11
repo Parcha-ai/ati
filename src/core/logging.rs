@@ -85,6 +85,18 @@ pub fn init(mode: LogMode, verbose: bool) -> Option<SentryGuard> {
     sentry_guard
 }
 
+/// Flush the Sentry transport queue before a non-returning exit
+/// (e.g. `process::exit`, which bypasses destructors). No-op when the
+/// `sentry` feature is disabled.
+#[cfg(feature = "sentry")]
+pub fn shutdown(guard: Option<SentryGuard>) {
+    drop(guard);
+}
+
+#[cfg(not(feature = "sentry"))]
+#[inline]
+pub fn shutdown(_guard: Option<SentryGuard>) {}
+
 /// Initialize Sentry if a DSN is configured. Returns `None` when Sentry is
 /// disabled (no DSN, or feature not compiled in).
 fn init_sentry() -> Option<SentryGuard> {
@@ -114,6 +126,10 @@ fn init_sentry() -> Option<SentryGuard> {
             _ => 1.0,
         };
 
+        let sentry_debug = std::env::var("ATI_SENTRY_DEBUG")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         let guard = sentry::init((
             dsn,
             sentry::ClientOptions {
@@ -123,6 +139,7 @@ fn init_sentry() -> Option<SentryGuard> {
                 traces_sample_rate: sample_rate,
                 attach_stacktrace: true,
                 send_default_pii: false,
+                debug: sentry_debug,
                 ..Default::default()
             },
         ));

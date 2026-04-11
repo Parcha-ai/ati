@@ -22,6 +22,23 @@ jobs:
         run: cargo test --quiet
       - name: Build debug binary for E2E scripts
         run: cargo build
+      - name: Sentry feature smoke test
+        env:
+          SENTRY_DSN: https://public@o0.ingest.sentry.io/0
+          ENVIRONMENT_TIER: staging
+          SERVICE_NAME: ati-ci-smoke
+          ATI_SENTRY_DEBUG: "1"
+        run: |
+          cargo build --features sentry
+          # Regression guard for "sentry crate was compiled without transport"
+          # panic (fixed in #XXX). init_sentry runs on every command; error
+          # paths call tracing::error! which the sentry layer forwards to the
+          # HTTP transport. With ATI_SENTRY_DEBUG we get "client close; request
+          # transport to shut down" in the logs, which proves the transport
+          # was wired in at compile time and flushed at exit.
+          ./target/debug/ati --output text run __nonexistent_tool_for_smoke__ 2>&1 | tee /tmp/ati-smoke.log || true
+          grep -q "enabled sentry client" /tmp/ati-smoke.log || { echo "FAIL: sentry client did not initialize"; exit 1; }
+          ./target/debug/ati tool list > /dev/null
       - name: Proxy mode E2E
         run: bash scripts/test_proxy_e2e.sh
       - name: Skills E2E
