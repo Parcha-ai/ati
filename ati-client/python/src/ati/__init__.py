@@ -48,7 +48,7 @@ def build_skill_instructions(skills: list[str]) -> str:
     """
     return AtiOrchestrator.build_skill_instructions(skills)
 
-__version__ = "0.7.2"
+__version__ = "0.7.4"
 
 
 class AtiOrchestrator:
