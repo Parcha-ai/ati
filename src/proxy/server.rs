@@ -30,7 +30,6 @@ use crate::core::response;
 use crate::core::scope::ScopeConfig;
 use crate::core::skill::{self, SkillRegistry};
 use crate::core::skillati::{RemoteSkillMeta, SkillAtiClient, SkillAtiError};
-use crate::core::xai;
 
 /// Shared state for the proxy server.
 pub struct ProxyState {
@@ -563,20 +562,16 @@ async fn handle_call(
         }
         _ => {
             let args_map = call_req.args_as_map();
-            let raw_response = match match provider.handler.as_str() {
-                "xai" => xai::execute_xai_tool(provider, tool, &args_map, &state.keyring).await,
-                _ => {
-                    http::execute_tool_with_gen(
-                        provider,
-                        tool,
-                        &args_map,
-                        &state.keyring,
-                        Some(&gen_ctx),
-                        Some(&state.auth_cache),
-                    )
-                    .await
-                }
-            } {
+            let raw_response = match http::execute_tool_with_gen(
+                provider,
+                tool,
+                &args_map,
+                &state.keyring,
+                Some(&gen_ctx),
+                Some(&state.auth_cache),
+            )
+            .await
+            {
                 Ok(resp) => resp,
                 Err(e) => {
                     let duration = start.elapsed();
@@ -959,22 +954,16 @@ async fn handle_mcp(
                 .await
                 .map_err(|e| mcp_client::McpError::Transport(e.to_string()))
             } else {
-                match match provider.handler.as_str() {
-                    "xai" => {
-                        xai::execute_xai_tool(provider, _tool, &arguments, &state.keyring).await
-                    }
-                    _ => {
-                        http::execute_tool_with_gen(
-                            provider,
-                            _tool,
-                            &arguments,
-                            &state.keyring,
-                            Some(&mcp_gen_ctx),
-                            Some(&state.auth_cache),
-                        )
-                        .await
-                    }
-                } {
+                match http::execute_tool_with_gen(
+                    provider,
+                    _tool,
+                    &arguments,
+                    &state.keyring,
+                    Some(&mcp_gen_ctx),
+                    Some(&state.auth_cache),
+                )
+                .await
+                {
                     Ok(val) => Ok(val),
                     Err(e) => Err(mcp_client::McpError::Transport(e.to_string())),
                 }

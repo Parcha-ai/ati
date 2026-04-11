@@ -45,7 +45,6 @@ main.rs (clap)
          ManifestRegistry::load(manifests/) → get_tool(name) → check scopes → load keyring
          dispatch on provider.handler:
            "mcp"     → core/mcp_client.rs  (stdio subprocess or HTTP+SSE)
-           "xai"     → core/xai.rs         (agentic endpoint, custom response extraction)
            _         → core/http.rs        (generic HTTP with classified params)
 ```
 
@@ -61,7 +60,7 @@ Other commands:
 ### Module Map
 
 **Public API** (exposed via `lib.rs` for integration tests and embedding):
-- `core` — manifest registry, openapi parser, skill system, mcp client, http executor, keyring, scopes, response processing, xai handler
+- `core` — manifest registry, openapi parser, skill system, mcp client, http executor, keyring, scopes, response processing
 - `proxy` — client (forwards to proxy) and server (axum, holds keys)
 - `security` — mlock/madvise/zeroize wrappers, sealed one-shot key file
 
