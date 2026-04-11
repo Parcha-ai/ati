@@ -8,6 +8,16 @@
 # Unmaintained crates are warnings (won't block CI).
 unmaintained = "none"
 yanked = "warn"
+ignore = [
+    # RUSTSEC-2026-0097: rand 0.8 unsound *only* when a custom log::Log
+    # implementation calls `rand::rng()` with thread_rng + log features
+    # enabled. ATI uses tracing_subscriber::fmt::layer() which is a
+    # tracing Layer, not a log::Log implementation, so the trigger path
+    # is not reachable. The rand 0.8 line has no backport fix; moving
+    # to rand 0.9 is a separate ecosystem-wide migration tracked apart
+    # from this PR.
+    "RUSTSEC-2026-0097",
+]
 
 [licenses]
 allow = [
