@@ -1601,6 +1601,20 @@ async fn skillati_read_remote_skill_visible_via_explicit_skill_scope() {
         StatusCode::OK,
         "remote skill with explicit skill: scope must be visible even when local skill registry is empty"
     );
+
+    let body = body_json(resp.into_body()).await;
+    // Level-2 shape (post-0.7.5): description is surfaced, resource
+    // manifest is dropped so agents have to pull files on demand.
+    assert_eq!(
+        body["description"].as_str(),
+        Some("Remote skill"),
+        "activation must include description sourced from the catalog entry: {body}"
+    );
+    assert!(
+        body.get("resources").is_none(),
+        "activation must NOT include a resources manifest \
+         (Level-3 is pulled on demand via `ati skill fetch resources`): {body}"
+    );
 }
 
 #[tokio::test]
@@ -1795,4 +1809,130 @@ async fn skillati_remaining_handlers_visible_for_remote_only_skill() {
             "handler `{label}` at {uri} must return 200 for a remote-only skill with the correct scope — body: {body}"
         );
     }
+}
+
+/// `read_skill` substitutes `${ATI_SKILL_DIR}` and `${CLAUDE_SKILL_DIR}` in
+/// SKILL.md bodies to the skill's `skillati://<name>` URI. Mirrors Claude
+/// Code's `${CLAUDE_SKILL_DIR}` substitution at
+/// `~/cc/src/skills/loadSkillsDir.ts:362`. Supporting both variable names
+/// means skill content authored for Claude Code works unchanged here, and
+/// vice versa.
+#[tokio::test]
+async fn skillati_read_substitutes_skill_dir_variables() {
+    let _lock = env_mutex().lock().await;
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "slidedeck-production",
+        "description": "Zero-dep HTML presentations",
+        "skill_directory": "slidedeck-production",
+    })])
+    .await;
+    // SKILL.md body contains both variable forms in a single content block.
+    Mock::given(method("GET"))
+        .and(path("/skillati/slidedeck-production"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "slidedeck-production",
+            "skill_directory": "slidedeck-production",
+            "content": "---\nname: slidedeck-production\n---\n\
+                Run ${ATI_SKILL_DIR}/scripts/generate.sh before building.\n\
+                Also see ${CLAUDE_SKILL_DIR}/references/theme-guide.md.\n",
+            "resources": [],
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("skill:slidedeck-production");
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/slidedeck-production")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    let content = body["content"].as_str().unwrap_or_default().to_string();
+
+    assert!(
+        !content.contains("${ATI_SKILL_DIR}"),
+        "${{ATI_SKILL_DIR}} should have been substituted away: {content}"
+    );
+    assert!(
+        !content.contains("${CLAUDE_SKILL_DIR}"),
+        "${{CLAUDE_SKILL_DIR}} should have been substituted away: {content}"
+    );
+    assert!(
+        content.contains("skillati://slidedeck-production/scripts/generate.sh"),
+        "ATI_SKILL_DIR should resolve to skillati://<name>: {content}"
+    );
+    assert!(
+        content.contains("skillati://slidedeck-production/references/theme-guide.md"),
+        "CLAUDE_SKILL_DIR should resolve to the same skillati://<name>: {content}"
+    );
+}
+
+/// `read_skill` rewrites `.claude/skills/<other-skill>/…` directory
+/// references to `skillati://<other-skill>/…` so skill bodies authored
+/// against Claude Code's filesystem layout resolve correctly through the
+/// ATI runtime. Guarded by `is_anthropic_valid_name` — prose mentions
+/// like "the .claude/skills/ directory" are left unchanged.
+#[tokio::test]
+async fn skillati_read_rewrites_cross_skill_filesystem_refs() {
+    let _lock = env_mutex().lock().await;
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "html-app-architecture",
+        "description": "HTML app patterns",
+        "skill_directory": "html-app-architecture",
+    })])
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/skillati/html-app-architecture"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "html-app-architecture",
+            "skill_directory": "html-app-architecture",
+            // Real-world body: explicit path reference + a prose mention.
+            // Only the explicit directory-form reference should be rewritten.
+            "content": "---\nname: html-app-architecture\n---\n\
+                Before building, read `.claude/skills/anti-slop-design/SKILL.md`\n\
+                and follow the Selection Protocol. Skills live under the\n\
+                .claude/skills/ directory on Claude Code.\n",
+            "resources": [],
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("skill:html-app-architecture");
+    let req = Request::builder()
+        .method("GET")
+        .uri("/skillati/html-app-architecture")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    let content = body["content"].as_str().unwrap_or_default().to_string();
+
+    assert!(
+        content.contains("skillati://anti-slop-design/SKILL.md"),
+        "directory-form `.claude/skills/<name>/…` must be rewritten to skillati://<name>/…: {content}"
+    );
+    assert!(
+        !content.contains(".claude/skills/anti-slop-design"),
+        "original filesystem path must be fully replaced: {content}"
+    );
+    // Prose mention with non-name-char after the anchor is preserved.
+    assert!(
+        content.contains(".claude/skills/ directory"),
+        "prose mention of `.claude/skills/ directory` must not be rewritten: {content}"
+    );
 }

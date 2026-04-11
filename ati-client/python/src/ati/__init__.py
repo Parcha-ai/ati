@@ -35,20 +35,190 @@ __all__ = [
 
 
 def build_skill_instructions(skills: list[str]) -> str:
-    """Build agent instructions for fetching and reading skills.
+    """Deprecated: use ``AtiOrchestrator.build_skill_listing`` instead.
 
-    Convenience wrapper around ``AtiOrchestrator.build_skill_instructions()``.
-    No proxy connection needed — just takes skill names and returns a prompt.
+    Emits a DeprecationWarning and delegates to the legacy generator.
+    The new canonical path fetches a scope-filtered catalog from the
+    proxy and formats it as a Claude-Code-shaped ``<system-reminder>``
+    block with per-entry and total-budget truncation, matching
+    ``~/cc/src/utils/attachments.ts::getSkillListingAttachments``.
 
     Args:
         skills: List of skill names.
 
     Returns:
-        Instruction string for the agent.
+        Legacy instruction string for the agent.
     """
-    return AtiOrchestrator.build_skill_instructions(skills)
+    import warnings
 
-__version__ = "0.7.4"
+    warnings.warn(
+        "ati.build_skill_instructions is deprecated and will be removed in a "
+        "future release; use AtiOrchestrator.build_skill_listing(token=...) "
+        "to get a Claude-Code-shaped <system-reminder> block populated from "
+        "the proxy's scope-filtered catalog.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _build_skill_instructions_legacy(skills)
+
+
+def _build_skill_instructions_legacy(skills: list[str]) -> str:
+    """Pre-0.7.5 listing format — kept so existing callsites don't break."""
+    if not skills:
+        return ""
+
+    lines = [
+        "# Available Skills",
+        "",
+        "The following skills contain methodology and detailed guidance for this task.",
+        "Read the relevant skill(s) before using the associated tools.",
+        "",
+    ]
+    for skill in skills:
+        lines.append(f"- **{skill}**: `ati skill fetch read {skill}`")
+    lines.append("")
+    lines.append(
+        "Use `ati skill fetch read <name>` to fetch and read a skill's full methodology. "
+        "Skills contain tool-specific workflows, parameter guidance, and best practices."
+    )
+    return "\n".join(lines)
+
+
+# --- Claude-Code-shaped skill listing (0.7.5+) -----------------------------
+
+# Per-entry character budget for a single skill line in the listing.
+# Matches `MAX_LISTING_DESC_CHARS` in
+# `~/cc/src/tools/SkillTool/prompt.ts:29`.
+_MAX_LISTING_DESC_CHARS = 250
+
+# Total budget for the whole <system-reminder> block. Matches Claude
+# Code's default at `~/cc/src/tools/SkillTool/prompt.ts:31-41`.
+_MAX_LISTING_BLOCK_CHARS = 8000
+
+
+def _truncate_with_ellipsis(text: str, max_chars: int) -> str:
+    """Clip `text` to at most `max_chars` characters, adding a trailing
+    ellipsis glyph when we actually removed content. Matches the
+    single-character ellipsis (`\u2026`) Claude Code uses in its listing
+    truncation path so downstream byte comparisons match."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    if max_chars <= 1:
+        return "\u2026"
+    return text[: max_chars - 1].rstrip() + "\u2026"
+
+
+def _format_skill_listing(entries: list[dict]) -> str:
+    """Render a list of remote skill metadata dicts as a
+    ``<system-reminder>`` block mirroring Claude Code's
+    ``getSkillListingAttachments`` output
+    (``~/cc/src/utils/attachments.ts:2661``).
+
+    Each entry is a dict with at least ``name`` and ``description``;
+    ``when_to_use`` is optional. Non-dict entries (plain strings) are
+    coerced to ``{"name": <string>, "description": ""}`` for
+    backwards compatibility with the legacy call shape.
+
+    Layout:
+
+    ```
+    <system-reminder>
+    The following skills are available. To load one, run
+    `ati skill fetch read <name>` via the Bash tool — the skill's body will
+    be returned. Follow the skill's instructions literally. Files referenced
+    inside a skill body live at `skillati://<name>/<path>` — fetch them via
+    `ati skill fetch cat <name> <path>`.
+
+    - skill-name: description - when_to_use
+    - other-skill: description
+    </system-reminder>
+    ```
+
+    Under extreme budget pressure the function falls back to
+    name-only entries (``- skill-name``), matching
+    ``~/cc/src/tools/SkillTool/prompt.ts:125-142``.
+    """
+    if not entries:
+        return ""
+
+    header = (
+        "<system-reminder>\n"
+        "The following skills are available. To load one, run "
+        "`ati skill fetch read <name>` via the Bash tool — the skill's body "
+        "will be returned. Follow the skill's instructions literally. Files "
+        "referenced inside a skill body live at `skillati://<name>/<path>` — "
+        "fetch them via `ati skill fetch cat <name> <path>`.\n\n"
+    )
+    footer = "\n</system-reminder>"
+    overhead = len(header) + len(footer)
+    budget = max(0, _MAX_LISTING_BLOCK_CHARS - overhead)
+
+    def _normalize(entry) -> tuple[str, str, str | None]:
+        if isinstance(entry, dict):
+            name = str(entry.get("name", "")).strip()
+            description = str(entry.get("description", "")).strip()
+            when_to_use_raw = entry.get("when_to_use")
+            when_to_use = (
+                str(when_to_use_raw).strip()
+                if when_to_use_raw is not None
+                else None
+            )
+            return name, description, when_to_use
+        # Legacy list[str] path — coerce to a bare name.
+        return str(entry).strip(), "", None
+
+    # Pass 1 — render with descriptions, truncate per-entry.
+    rich_lines: list[str] = []
+    for entry in entries:
+        name, description, when_to_use = _normalize(entry)
+        if not name:
+            continue
+        suffix = description
+        if when_to_use:
+            suffix = f"{description} - {when_to_use}" if description else when_to_use
+        line = f"- {name}: {suffix}" if suffix else f"- {name}"
+        rich_lines.append(_truncate_with_ellipsis(line, _MAX_LISTING_DESC_CHARS))
+
+    if not rich_lines:
+        return ""
+
+    body = "\n".join(rich_lines)
+    if len(body) <= budget:
+        return header + body + footer
+
+    # Pass 2 — names only, same budget check.
+    name_lines: list[str] = []
+    for entry in entries:
+        name, _, _ = _normalize(entry)
+        if name:
+            name_lines.append(f"- {name}")
+    body = "\n".join(name_lines)
+    if len(body) <= budget:
+        return header + body + footer
+
+    # Pass 3 — hard cap: take as many names as fit, append a "+N more"
+    # footer so the agent knows something was dropped.
+    truncated: list[str] = []
+    running = 0
+    more_note_template = "\n- ... (+{count} more — run `ati skill fetch catalog` to list all)"
+    more_note_reserve = len(more_note_template.format(count=99999))
+    for line in name_lines:
+        needed = running + len(line) + (1 if truncated else 0)
+        if needed > budget - more_note_reserve:
+            break
+        if truncated:
+            running += 1
+        running += len(line)
+        truncated.append(line)
+
+    remaining = len(name_lines) - len(truncated)
+    body = "\n".join(truncated)
+    if remaining > 0:
+        body += more_note_template.format(count=remaining)
+    return header + body + footer
+
+
+__version__ = "0.7.5"
 
 
 class AtiOrchestrator:
@@ -379,38 +549,70 @@ class AtiOrchestrator:
     def build_skill_instructions(
         skills: list[str],
     ) -> str:
-        """Build agent instructions for fetching and reading skills.
+        """Deprecated: use :meth:`build_skill_listing` instead.
 
-        Takes a list of skill names (e.g. from an expert config) and generates
-        instructions telling the agent what skills are available and how to
-        fetch them before starting work.
+        Emits a ``DeprecationWarning`` and delegates to the legacy
+        generator. The new path fetches a scope-filtered catalog from
+        the proxy and emits a Claude-Code-shaped ``<system-reminder>``
+        listing block, matching
+        ``~/cc/src/utils/attachments.ts::getSkillListingAttachments``.
+        """
+        import warnings
 
-        This is a static method — no proxy connection needed.
+        warnings.warn(
+            "AtiOrchestrator.build_skill_instructions is deprecated and "
+            "will be removed in a future release; use "
+            "AtiOrchestrator.build_skill_listing(token=...) to get a "
+            "Claude-Code-shaped <system-reminder> block populated from "
+            "the proxy's scope-filtered catalog.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _build_skill_instructions_legacy(skills)
+
+    def build_skill_listing(
+        self,
+        *,
+        token: str,
+        search: str | None = None,
+    ) -> str:
+        """Fetch the scope-filtered skill catalog from the proxy and
+        render it as a Claude-Code-shaped ``<system-reminder>`` block
+        suitable for direct injection into an agent's system prompt.
+
+        Mirrors Claude Code's
+        ``getSkillListingAttachments`` +
+        ``formatCommandsWithinBudget`` pipeline
+        (``~/cc/src/utils/attachments.ts:2661`` +
+        ``~/cc/src/tools/SkillTool/prompt.ts:70``), pointed at the
+        ``ati skill fetch read`` CLI entry point instead of Claude Code's
+        ``Skill`` tool. Scope filtering happens server-side — the
+        listing you get back contains exactly the skills the token's
+        JWT scopes grant.
 
         Args:
-            skills: List of skill names (e.g. ``["financial-data-research", "research-realtime-data"]``).
+            token: JWT Bearer token (e.g. the ``ATI_SESSION_TOKEN`` from
+                :meth:`provision_sandbox`). The proxy's
+                ``visible_skill_names_with_remote`` gate uses this to
+                filter the catalog before returning it.
+            search: Optional keyword query forwarded to
+                ``GET /skillati/catalog?search=…``. When unset, the
+                full scope-visible catalog is returned.
 
         Returns:
-            Instruction string for the agent, or empty string if no skills provided.
+            A ``<system-reminder>``-wrapped listing string, or an empty
+            string if no skills are visible.
         """
-        if not skills:
-            return ""
+        import json
+        import urllib.parse
+        import urllib.request
 
-        lines = [
-            "# Available Skills",
-            "",
-            "The following skills contain methodology and detailed guidance for this task.",
-            "Read the relevant skill(s) before using the associated tools.",
-            "",
-        ]
-
-        for skill in skills:
-            lines.append(f"- **{skill}**: `ati skill fetch read {skill}`")
-
-        lines.append("")
-        lines.append(
-            "Use `ati skill fetch read <name>` to fetch and read a skill's full methodology. "
-            "Skills contain tool-specific workflows, parameter guidance, and best practices."
-        )
-
-        return "\n".join(lines)
+        url = f"{self.proxy_url}/skillati/catalog"
+        if search:
+            url = f"{url}?{urllib.parse.urlencode({'search': search})}"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read())
+        entries = payload.get("skills", []) if isinstance(payload, dict) else []
+        return _format_skill_listing(entries)

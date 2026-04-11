@@ -66,6 +66,13 @@ pub struct RemoteSkillMeta {
     pub description: String,
     #[serde(default)]
     pub skill_directory: String,
+    /// Optional "when to use" guidance — sourced from SKILL.md YAML
+    /// frontmatter (`when_to_use` field, synonymous with Anthropic's
+    /// `when-to-use`). Used by `ati-client.build_skill_listing` to emit a
+    /// richer `<system-reminder>` block matching Claude Code's shape.
+    /// Serde-optional so older catalog manifests deserialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_to_use: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -95,12 +102,28 @@ pub struct SkillAtiCatalogManifest {
     pub skills: Vec<SkillAtiCatalogEntry>,
 }
 
+/// Level-2 skill activation payload — mirrors Claude Code's
+/// `createSkillCommand.getPromptForCommand` return shape
+/// (`~/cc/src/skills/loadSkillsDir.ts:344`).
+///
+/// Intentionally omits any resource manifest: per Agent Skills'
+/// progressive-disclosure model, Level-3 files (scripts, references) are
+/// pulled *on demand* when the SKILL.md body directs the agent to, not
+/// eagerly returned alongside the body. Agents that want a resource list
+/// call `ati skill fetch resources <name>` explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillAtiActivation {
     pub name: String,
+    /// One-line skill description sourced from the catalog entry. Surfaced
+    /// in the Level-2 preamble so the agent can confirm the skill matches
+    /// the task without having to re-query the catalog.
+    pub description: String,
     pub skill_directory: String,
+    /// SKILL.md body with frontmatter stripped and skill-directory
+    /// variables (`${ATI_SKILL_DIR}` / `${CLAUDE_SKILL_DIR}`) + cross-skill
+    /// filesystem references (`.claude/skills/<other>/…`) rewritten to
+    /// `skillati://<name>/...` URIs.
     pub content: String,
-    pub resources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -423,14 +446,38 @@ impl SkillAtiClient {
             .collect()
     }
 
+    /// Level-2 skill activation. Returns SKILL.md body with frontmatter
+    /// stripped, skill-dir variables substituted, and cross-skill filesystem
+    /// references rewritten to `skillati://` URIs. Mirrors Claude Code's
+    /// `createSkillCommand.getPromptForCommand`
+    /// (`~/cc/src/skills/loadSkillsDir.ts:344`) but without the
+    /// `${CLAUDE_SESSION_ID}` and `!`shell-exec binding, which are
+    /// CC-runtime-specific.
+    ///
+    /// Does NOT eagerly fetch the resource list — that's Level-3 and the
+    /// agent pulls it on demand via `ati skill fetch resources <name>`.
     pub async fn read_skill(&self, name: &str) -> Result<SkillAtiActivation, SkillAtiError> {
         let raw = self.read_text(name, "SKILL.md").await?;
-        let resources = self.list_resources(name, None).await?;
+
+        // Look up the catalog entry for description. Catalog is cached per
+        // client after first call, so this is free on the hot path.
+        let description = match self.catalog_entries().await {
+            Ok(catalog) => catalog
+                .into_iter()
+                .find(|entry| entry.meta.name == name)
+                .map(|entry| entry.meta.description.clone())
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+
+        let body = strip_frontmatter(&raw);
+        let content = substitute_skill_refs(body, name);
+
         Ok(SkillAtiActivation {
             name: name.to_string(),
+            description,
             skill_directory: skill_directory(name),
-            content: strip_frontmatter(&raw).to_string(),
-            resources,
+            content,
         })
     }
 
@@ -583,6 +630,7 @@ impl SkillAtiClient {
                     meta: remote_skill_meta_from_parts(
                         &name,
                         parsed.description,
+                        parsed.when_to_use,
                         parsed.keywords,
                         parsed.tools,
                         parsed.providers,
@@ -786,6 +834,7 @@ fn build_catalog_entry_from_dir(
         meta: remote_skill_meta_from_parts(
             &dir_name,
             parsed.description,
+            parsed.when_to_use,
             parsed.keywords,
             parsed.tools,
             parsed.providers,
@@ -858,6 +907,7 @@ fn collect_visible_resources(
 fn remote_skill_meta_from_parts(
     name: &str,
     description: String,
+    when_to_use: Option<String>,
     mut keywords: Vec<String>,
     mut tools: Vec<String>,
     mut providers: Vec<String>,
@@ -872,6 +922,9 @@ fn remote_skill_meta_from_parts(
         name: name.to_string(),
         description,
         skill_directory: skill_directory(name),
+        when_to_use: when_to_use
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         keywords,
         tools,
         providers,
@@ -933,6 +986,86 @@ fn map_gcs_error(skill: &str, relative_path: &str, error: GcsError) -> SkillAtiE
 
 fn skill_directory(name: &str) -> String {
     format!("skillati://{name}")
+}
+
+/// Rewrite skill-directory variables and cross-skill filesystem references
+/// in a SKILL.md body so the agent's subsequent file fetches resolve
+/// against the ATI runtime instead of the local filesystem.
+///
+/// Two transformations:
+///
+/// 1. **Variable substitution.** `${ATI_SKILL_DIR}` and `${CLAUDE_SKILL_DIR}`
+///    both become `skillati://<name>`. Supporting both names means skill
+///    content authored for Claude Code works unchanged here, and vice
+///    versa. This mirrors Claude Code's `${CLAUDE_SKILL_DIR}` substitution
+///    at `~/cc/src/skills/loadSkillsDir.ts:362`.
+///
+/// 2. **Cross-skill reference rewrite.** Any `.claude/skills/<other>/`
+///    prefix in the body (as long as `<other>` is a plausible skill name
+///    per `is_anthropic_valid_name`) is rewritten to `skillati://<other>/`.
+///    This handles the common authoring mistake where a skill body says
+///    "read `.claude/skills/anti-slop-design/SKILL.md`" — a filesystem
+///    path that doesn't exist in remote-catalog sandboxes. After
+///    rewriting, the agent naturally resolves the reference via
+///    `ati skill fetch read anti-slop-design`.
+///
+/// Footgun note: substitution is a literal string pass, so a skill body
+/// containing `${CLAUDE_SKILL_DIR}` inside a code-fence example ("don't do
+/// this: `${CLAUDE_SKILL_DIR}`") would also be rewritten. Claude Code has
+/// the same behavior at the same callsite — acceptable for now, document
+/// if it becomes a real problem.
+fn substitute_skill_refs(body: &str, skill_name: &str) -> String {
+    let skill_uri = skill_directory(skill_name);
+
+    // Step 1: variable substitution (literal string replace, cheap).
+    let mut out = body
+        .replace("${ATI_SKILL_DIR}", &skill_uri)
+        .replace("${CLAUDE_SKILL_DIR}", &skill_uri);
+
+    // Step 2: rewrite `.claude/skills/<other>/` prefixes to
+    // `skillati://<other>/`. We need to parse the segment between the
+    // `.claude/skills/` anchor and the next `/` to check whether it's a
+    // valid skill name before rewriting — rejects prose mentions like
+    // ".claude/skills/ directory" while catching real path references.
+    let needle = ".claude/skills/";
+    let mut rewritten = String::with_capacity(out.len());
+    let mut cursor = 0;
+    while let Some(rel) = out[cursor..].find(needle) {
+        let hit = cursor + rel;
+        rewritten.push_str(&out[cursor..hit]);
+        let after = hit + needle.len();
+        // Read until the next `/` or a non-name char — this is the
+        // candidate skill name.
+        let tail = &out[after..];
+        let name_len = tail
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-')
+            .count();
+        if name_len == 0 {
+            // `.claude/skills/` followed by non-name char — not a path
+            // reference, pass through verbatim.
+            rewritten.push_str(needle);
+            cursor = after;
+            continue;
+        }
+        let candidate = &tail[..name_len];
+        // Only rewrite if the next char is `/` OR we're at end-of-string
+        // (directory-form references, not prose).
+        let next_char = tail.as_bytes().get(name_len).copied();
+        let is_dir_form = matches!(next_char, Some(b'/') | None);
+        if is_dir_form && is_anthropic_valid_name(candidate) {
+            rewritten.push_str("skillati://");
+            rewritten.push_str(candidate);
+            cursor = after + name_len;
+        } else {
+            rewritten.push_str(needle);
+            cursor = after;
+        }
+    }
+    rewritten.push_str(&out[cursor..]);
+    out = rewritten;
+
+    out
 }
 
 fn is_visible_resource(path: &str) -> bool {
@@ -1126,6 +1259,7 @@ mod tests {
         let meta = remote_skill_meta_from_parts(
             "demo-skill",
             "Great for UI panels".to_string(),
+            None,
             vec!["dashboard".into()],
             vec!["render_panel".into()],
             vec!["frontend".into()],
@@ -1204,6 +1338,7 @@ mod tests {
             meta: remote_skill_meta_from_parts(
                 "demo-skill",
                 "".into(),
+                None,
                 vec!["b".into(), "a".into(), "A".into()],
                 vec![],
                 vec![],

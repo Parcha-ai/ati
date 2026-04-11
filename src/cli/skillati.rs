@@ -195,23 +195,31 @@ fn print_activation(
     Ok(())
 }
 
+/// Level-2 preamble — mirrors Claude Code's `getPromptForCommand` text
+/// shape (`~/cc/src/skills/loadSkillsDir.ts:345-347`):
+///
+/// ```text
+/// Base directory for this skill: <skill_directory>
+///
+/// <description, if any>
+///
+/// <SKILL.md body>
+/// ```
+///
+/// Omits the resource manifest (Level-3 is pulled on demand) and the old
+/// `<skill_content>` XML wrapper (Parcha-custom, not in the Anthropic
+/// Agent Skills spec).
 fn render_activation_text(activation: &SkillAtiActivation) -> String {
     let mut out = format!(
-        "<skill_content name=\"{}\">\n{}\n\nSkill directory: {}\n\nBundled resources:\n",
-        activation.name,
-        activation.content.trim_end(),
+        "Base directory for this skill: {}\n\n",
         activation.skill_directory
     );
-
-    if activation.resources.is_empty() {
-        out.push_str("- (none)\n");
-    } else {
-        for resource in &activation.resources {
-            out.push_str(&format!("- {resource}\n"));
-        }
+    if !activation.description.trim().is_empty() {
+        out.push_str(activation.description.trim());
+        out.push_str("\n\n");
     }
-
-    out.push_str("</skill_content>");
+    out.push_str(activation.content.trim_end());
+    out.push('\n');
     out
 }
 
