@@ -178,12 +178,23 @@ class TestBuildSkillListing:
             "https://ati-proxy.example.com/skillati/catalog?search=html"
         )
 
+    @staticmethod
+    def _extract_body(listing: str) -> str:
+        """Pluck the bullet-content body out of a wrapped listing so
+        tests can assert against the 8000-char CC budget directly."""
+        preamble_end = listing.find("\n\n")
+        closing = listing.find("\n</system-reminder>")
+        assert preamble_end >= 0 and closing >= 0, (
+            f"malformed listing: {listing[:200]}"
+        )
+        return listing[preamble_end + 2 : closing]
+
     def test_respects_body_budget_across_many_skills(self):
         """CC's 8000-char budget applies to the bullet-content body, not
         the wrapped output. The `<system-reminder>` envelope adds
-        header/footer overhead on top. 400 skills * ~80 chars forces
-        the pass-2/pass-3 cascade; the body (excluding the wrap) must
-        stay under 8000 chars — matching CC's
+        header/footer overhead on top. 400 skills * ~160 chars forces
+        the pass-2 (truncated descriptions) cascade; the body
+        (excluding the wrap) must stay under 8000 chars — matching CC's
         ``formatCommandsWithinBudget`` which returns just the body
         string and lets ``wrapInSystemReminder`` add its own overhead
         later (``~/cc/src/utils/messages.ts:3098``)."""
@@ -195,20 +206,70 @@ class TestBuildSkillListing:
             for i in range(400)
         ]
         payload = json.dumps({"skills": many}).encode()
-        captured, urlopen = _fake_urlopen(payload)
+        _, urlopen = _fake_urlopen(payload)
         with patch("urllib.request.urlopen", urlopen):
             listing = self.orch.build_skill_listing(token="tok")
         assert "<system-reminder>" in listing
-        # Extract the body (everything between the preamble blank line
-        # and the closing tag).
-        preamble_end = listing.find("\n\n")
-        closing = listing.find("\n</system-reminder>")
-        assert preamble_end >= 0 and closing >= 0, f"malformed listing: {listing[:200]}"
-        body = listing[preamble_end + 2 : closing]
+        body = self._extract_body(listing)
         assert len(body) <= 8000, (
             f"body {len(body)} chars exceeds 8000 budget (total listing: "
             f"{len(listing)} chars)"
         )
+
+    def test_pass_three_overflow_footer_appends_plus_n_more(self):
+        """Pass 3' — the ATI-specific overflow footer — must fire when
+        even names-only entries exceed the 8000-char body budget. CC
+        never exercises this path (built-in skill counts are <30); our
+        Parcha GCS catalog carries 286+ skills and agents provisioned
+        with a narrow custom catalog of 700+ long-named skills will
+        legitimately hit it. Assert the footer says "+N more" with the
+        correct drop count."""
+        # Each bare bullet line is `- <name>` (len 2 + len(name)).
+        # With 700 skills × 25-char names (`- a-verbose-skill-name-{i:04}`
+        # = `- ` + 22 chars = 24 chars), the names-only body is
+        # ~700 × 24 + 699 newlines ≈ 17500 chars, well over the 8000
+        # budget. Forces the Pass 3' cascade.
+        many = [
+            {
+                "name": f"a-verbose-skill-name-{i:04}",
+                "description": "x" * 300,
+            }
+            for i in range(700)
+        ]
+        payload = json.dumps({"skills": many}).encode()
+        _, urlopen = _fake_urlopen(payload)
+        with patch("urllib.request.urlopen", urlopen):
+            listing = self.orch.build_skill_listing(token="tok")
+        assert "<system-reminder>" in listing
+        body = self._extract_body(listing)
+        assert len(body) <= 8000, (
+            f"body {len(body)} chars exceeds 8000 budget in pass 3' — "
+            f"overflow reservation should have prevented this"
+        )
+        # The footer line must appear exactly once.
+        footer_marker = "+{count} more".format(count="")  # unused — just for grep
+        assert "+ " not in body, body  # belt-and-suspenders: no blank counts
+        assert " more — run `ati skill fetch catalog`" in body, (
+            f"pass 3' must emit the '+N more' footer: {body[-300:]}"
+        )
+        # Parse the count out of the footer and verify it equals
+        # (700 - number-of-included-bullets).
+        import re
+
+        match = re.search(r"\+(\d+) more — run `ati skill fetch catalog`", body)
+        assert match, f"footer format changed: {body[-300:]}"
+        reported_missing = int(match.group(1))
+        # Count actual bullets that survived (skip the overflow line).
+        bullet_lines = [
+            ln for ln in body.splitlines()
+            if ln.startswith("- ") and "more — run" not in ln
+        ]
+        assert len(bullet_lines) + reported_missing == 700, (
+            f"overflow math mismatch: {len(bullet_lines)} bullets + "
+            f"{reported_missing} reported as missing = "
+            f"{len(bullet_lines) + reported_missing}, expected 700"
+        )
+        assert reported_missing > 0, "pass 3' must drop at least one skill"
 
     def test_truncates_description_at_250_chars_not_full_line(self):
         """CC's 250-char cap applies to the description portion only,

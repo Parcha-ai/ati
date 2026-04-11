@@ -15,15 +15,23 @@
 #
 # Exits 0 if every response matches the new shape, non-zero otherwise.
 #
-# Dependencies: jq, curl, an ati binary at ./target/debug/ati (or the
-# first arg), and a ~/.ati/credentials file containing a `gcp_credentials`
-# entry. Safe to run locally — does not mutate the GCS bucket or the
-# running LOCAL GREP proxy (binds to 127.0.0.1:<random free port>).
+# Dependencies: jq, curl, python3 (for the ephemeral port helper), an
+# ati binary at ./target/debug/ati (or the first arg), and a
+# ~/.ati/credentials file containing a `gcp_credentials` entry. Safe
+# to run locally — does not mutate the GCS bucket or the running LOCAL
+# GREP proxy; by default it binds to 127.0.0.1 on an ephemeral port
+# (picked by asking the kernel for a free socket), so concurrent runs
+# and pre-occupied ports don't collide. Set `ATI_E2E_PORT` to force a
+# specific port if you need to curl the proxy from outside the script.
 
 set -euo pipefail
 
 ATI_BIN="${1:-./target/debug/ati}"
-PROXY_PORT="${ATI_E2E_PORT:-18903}"
+# Default to an ephemeral port chosen by the kernel — `bind((\"\",0))` gives
+# us a free high port, so two concurrent runs of this harness don't
+# collide on the same socket. Override with ATI_E2E_PORT for manual
+# debugging.
+PROXY_PORT="${ATI_E2E_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')}"
 BUCKET="${ATI_E2E_BUCKET:-gcs://parcha-ati-skills}"
 SKILLS=(
   slidedeck-production
