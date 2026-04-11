@@ -22,6 +22,31 @@ jobs:
         run: cargo test --quiet
       - name: Build debug binary for E2E scripts
         run: cargo build
+      - name: Sentry feature smoke test
+        env:
+          SENTRY_DSN: https://public@o0.ingest.sentry.io/0
+          ENVIRONMENT_TIER: staging
+          SERVICE_NAME: ati-ci-smoke
+          ATI_SENTRY_DEBUG: "1"
+        run: |
+          # Build into a separate target dir so the sentry-feature binary
+          # does not overwrite the default-features ./target/debug/ati that
+          # the subsequent E2E scripts run against.
+          cargo build --features sentry --target-dir target/sentry
+          # Regression guard for two separate failure modes in one run:
+          #  1. "sentry crate was compiled without transport" panic — caught
+          #     by asserting "enabled sentry client" (sentry-0.47/src/init.rs)
+          #     which only logs when ClientOptions::debug is on AND
+          #     sentry::init returned a working client.
+          #  2. Transport queue lost on process::exit — caught by asserting
+          #     "client close; request transport to shut down"
+          #     (sentry-core-0.47/src/client.rs:444), which only logs when
+          #     the Drop path flushed a real transport. Without the explicit
+          #     shutdown call in src/main.rs this line never appears.
+          ./target/sentry/debug/ati --output text run __nonexistent_tool_for_smoke__ 2>&1 | tee /tmp/ati-smoke.log || true
+          grep -q "enabled sentry client" /tmp/ati-smoke.log || { echo "FAIL: sentry client did not initialize"; exit 1; }
+          grep -q "client close; request transport to shut down" /tmp/ati-smoke.log || { echo "FAIL: sentry transport did not flush on exit (guard::drop skipped?)"; exit 1; }
+          ./target/sentry/debug/ati tool list > /dev/null
       - name: Proxy mode E2E
         run: bash scripts/test_proxy_e2e.sh
       - name: Skills E2E

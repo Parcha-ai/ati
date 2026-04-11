@@ -670,21 +670,26 @@ async fn main() {
     };
 
     if let Err(e) = result {
+        // Always route errors through tracing so they reach Sentry when the
+        // sentry feature is enabled. Structured JSON output is rendered
+        // separately to stderr for machine consumers.
+        tracing::error!(error = %e, "ati command failed");
         let is_json = matches!(cli.output, OutputFormat::Json);
         if is_json {
             let error_json = core::error::format_structured_error(e.as_ref(), cli.verbose);
             eprintln!("{error_json}");
-        } else {
-            tracing::error!("{e}");
-            if cli.verbose {
-                let mut source = std::error::Error::source(e.as_ref());
-                while let Some(cause) = source {
-                    tracing::debug!("  caused by: {cause}");
-                    source = std::error::Error::source(cause);
-                }
+        } else if cli.verbose {
+            let mut source = std::error::Error::source(e.as_ref());
+            while let Some(cause) = source {
+                tracing::debug!("  caused by: {cause}");
+                source = std::error::Error::source(cause);
             }
         }
         let exit_code = core::error::exit_code_for_error(e.as_ref());
+        // Flush the sentry transport queue before process::exit (which
+        // bypasses destructors). Without this, queued error events are
+        // lost on CLI exit.
+        core::logging::shutdown(_sentry_guard);
         process::exit(exit_code);
     }
 }
