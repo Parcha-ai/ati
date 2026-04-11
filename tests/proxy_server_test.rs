@@ -1727,3 +1727,72 @@ async fn skillati_read_remote_skill_visible_via_tool_scope_cascade() {
         "tool: scope should cascade to remote skills that cover that tool — body: {body}"
     );
 }
+
+/// The other four skillati handlers (resources, file, refs, ref) all use
+/// the same `visible_skill_names_with_remote` helper and are therefore
+/// structurally fixed by this PR, but left untested by the per-handler tests
+/// above, only `read` and `catalog` had direct coverage.
+///
+/// This test fires a request at each of the four remaining handlers against
+/// a proxy with an empty local SkillRegistry and a remote catalog that only
+/// grants visibility through the scope gate. Before the fix all four returned
+/// 404; after the fix all four return 200.
+#[tokio::test]
+async fn skillati_remaining_handlers_visible_for_remote_only_skill() {
+    let _lock = env_mutex().lock().await;
+    let upstream = serve_remote_catalog_mock(vec![serde_json::json!({
+        "name": "slidedeck-production",
+        "description": "",
+        "skill_directory": "slidedeck-production",
+    })])
+    .await;
+    // /skillati/:name/file → FileDataResp (tagged enum, `kind: "text"`).
+    // Same endpoint also serves read_reference(name, ref) calls, which hit
+    // ?path=references/<ref>.
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/skillati/[^/]+/file$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "kind": "text",
+            "content": "file body",
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _reg = EnvGuard::set("ATI_SKILL_REGISTRY", Some("proxy"));
+    let _url = EnvGuard::set("ATI_PROXY_URL", Some(&upstream.uri()));
+
+    let app = build_test_app_with_jwt("http://unused.test");
+    let token = issue_test_token("skill:slidedeck-production");
+
+    // Exercise each of the four remaining /skillati/* handlers. Any of them
+    // returning 404 is a regression of the fix — they all share the same
+    // visibility helper.
+    // Use a non-SKILL.md path for file since SKILL.md triggers the read_skill_md
+    // path which has different error handling.
+    let endpoints: &[(&str, &str)] = &[
+        ("resources", "/skillati/slidedeck-production/resources"),
+        (
+            "file",
+            "/skillati/slidedeck-production/file?path=assets/foo.txt",
+        ),
+        ("refs", "/skillati/slidedeck-production/refs"),
+        ("ref", "/skillati/slidedeck-production/ref/example"),
+    ];
+
+    for (label, uri) in endpoints {
+        let req = Request::builder()
+            .method("GET")
+            .uri(*uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.expect("oneshot");
+        let status = resp.status();
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "handler `{label}` at {uri} must return 200 for a remote-only skill with the correct scope — body: {body}"
+        );
+    }
+}
