@@ -104,9 +104,6 @@ fn resolve_assist_scope(args: &[String], registry: &ManifestRegistry) -> (Option
     (None, args.join(" "))
 }
 
-/// Capture CLI help text by running `<command> --help` with fallback to `<command> help`.
-///
-/// Returns None if the command fails, is not found, or times out.
 /// Capture a CLI provider's `--help` output (tries `--help`, then `help`).
 /// Returns the text truncated to `CLI_HELP_MAX_CHARS`, or `None` if the
 /// command isn't found / times out / produces no output.

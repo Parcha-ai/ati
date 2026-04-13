@@ -114,9 +114,6 @@ async fn execute_via_proxy(
                             skills_arr.iter().filter_map(|s| s.as_str()).collect();
                         if !skill_strs.is_empty() {
                             println!("Skills:      {}", skill_strs.join(", "));
-                            for skill in &skill_strs {
-                                println!("  Read:      ati skill fetch read {skill}");
-                            }
                         }
                     }
                     if let Some(schema) = info.get("input_schema") {
@@ -260,7 +257,7 @@ fn tool_info(
 
     match cli.output {
         OutputFormat::Json => {
-            let info = serde_json::json!({
+            let mut info = serde_json::json!({
                 "name": tool.name,
                 "description": tool.description,
                 "provider": provider.name,
@@ -270,8 +267,12 @@ fn tool_info(
                 "scope": tool.scope,
                 "skills": skills,
                 "input_schema": tool.input_schema,
-                "help_text": help_text,
             });
+            // Only include help_text for CLI tools — avoids an undocumented
+            // schema change for HTTP/MCP/OpenAPI consumers.
+            if provider.is_cli() {
+                info["help_text"] = serde_json::json!(help_text);
+            }
             println!("{}", serde_json::to_string_pretty(&info)?);
         }
         OutputFormat::Table | OutputFormat::Text => {
