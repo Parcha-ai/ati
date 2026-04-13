@@ -55,6 +55,11 @@ pub struct Cli {
 pub enum Commands {
     /// Execute a tool by name
     #[command(
+        // disable_help_flag so `ati run bb --help` passes --help through to
+        // the CLI tool instead of showing ATI's own help. Without this, clap
+        // intercepts --help before trailing_var_arg gets a chance. Use
+        // `ati help run` or `ati run -h` for ATI's own run help.
+        disable_help_flag = true,
         after_help = "Examples:\n  ati run web_search --query \"rust async\"\n  ati run github:search_repositories --query \"ati\" -J\n  ati run get_stock_quote --symbol AAPL --output json\n\nTip: run 'ati tool info <name>' to see associated skills and usage guidance."
     )]
     Run {

@@ -1974,7 +1974,7 @@ Answer the agent's question naturally, like a knowledgeable colleague would. Kee
 - Explain which tools to use and why, with `ati run` commands showing realistic parameter values
 - If multiple steps are needed, walk through them briefly in order
 - Mention important gotchas or parameter choices that matter
-- If skills are relevant, suggest `ati skill show <name>` for the full methodology
+- If skills are relevant, tell the agent to load them using the Skill tool (e.g., `skill: "research-financial-data"`)
 
 Keep your answer concise — a few short paragraphs with embedded code blocks. Only recommend tools from the list above."#;
 
@@ -2007,7 +2007,7 @@ async fn build_remote_skillati_section(keyring: &Keyring, query: &str, limit: us
 fn render_remote_skillati_section(skills: &[RemoteSkillMeta], total_catalog: usize) -> String {
     let mut section = String::from("## Remote Skills Available Via SkillATI\n\n");
     section.push_str(
-        "These skills are available remotely from the SkillATI registry. They are not installed locally. Activate one on demand with `ati skillati read <name>`, inspect bundled paths with `ati skillati resources <name>`, and fetch specific files with `ati skillati cat <name> <path>`.\n\n",
+        "These skills are available. Load them using the Skill tool (e.g., `skill: \"skill-name\"`).\n\n",
     );
 
     for skill in skills {

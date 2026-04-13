@@ -28,6 +28,12 @@ pub struct ProxyCallRequest {
     pub tool_name: String,
     /// Tool arguments — JSON object for HTTP/MCP tools, or JSON array for CLI tools.
     pub args: Value,
+    /// Raw positional args for CLI tools. When present, the proxy's
+    /// `args_as_positional()` uses these instead of parsing `args`.
+    /// This preserves bare positional words like `browse status` that
+    /// don't survive the `--key value` parse into the args map.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_args: Option<Vec<String>>,
 }
 
 /// Response payload from the proxy server.
@@ -90,18 +96,18 @@ pub async fn call_tool(
 
     let url = format!("{}/call", proxy_url.trim_end_matches('/'));
 
-    // If raw_args are provided (CLI tool), send them as a JSON array in `args`.
-    // Otherwise send the key-value map.
-    let args_value = match raw_args {
-        Some(raw) if !raw.is_empty() => {
-            Value::Array(raw.iter().map(|s| Value::String(s.clone())).collect())
-        }
-        _ => serde_json::to_value(args).unwrap_or(Value::Object(serde_json::Map::new())),
-    };
+    // Send both the parsed args map (for HTTP/MCP/OpenAPI tools) AND the raw
+    // positional args (for CLI tools). The proxy's CallRequest handler uses
+    // args_as_map() for HTTP tools and args_as_positional() for CLI tools.
+    // args_as_positional() checks `raw_args` first, so CLI tools always get
+    // their original positional args even when the map is empty.
+    let args_value = serde_json::to_value(args).unwrap_or(Value::Object(serde_json::Map::new()));
+    let raw_args_vec = raw_args.filter(|r| !r.is_empty()).map(|r| r.to_vec());
 
     let payload = ProxyCallRequest {
         tool_name: tool_name.to_string(),
         args: args_value,
+        raw_args: raw_args_vec,
     };
 
     let response = build_proxy_request(&client, reqwest::Method::POST, &url)
