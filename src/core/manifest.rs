@@ -30,6 +30,11 @@ pub enum AuthType {
     #[default]
     None,
     Oauth2,
+    /// API key is embedded in the URL path via `${key_name}` placeholder.
+    /// No auth header is sent — the key is resolved from the keyring and
+    /// interpolated into the URL at connection time by `resolve_env_value`.
+    /// Example: `mcp_url = "https://mcp.serpapi.com/${serpapi_api_key}/mcp"`
+    Url,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -609,6 +609,12 @@ async fn inject_auth(
             let access_token = get_oauth2_token(provider, keyring).await?;
             Ok(request.bearer_auth(access_token))
         }
+        AuthType::Url => {
+            // Auth key is already interpolated into the URL via
+            // ${key_name} placeholders resolved at connection time.
+            // No header or query param injection needed.
+            Ok(request)
+        }
     }
 }
 
