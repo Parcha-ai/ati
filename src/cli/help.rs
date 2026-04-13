@@ -104,10 +104,10 @@ fn resolve_assist_scope(args: &[String], registry: &ManifestRegistry) -> (Option
     (None, args.join(" "))
 }
 
-/// Capture CLI help text by running `<command> --help` with fallback to `<command> help`.
-///
-/// Returns None if the command fails, is not found, or times out.
-fn capture_cli_help(provider: &Provider) -> Option<String> {
+/// Capture a CLI provider's `--help` output (tries `--help`, then `help`).
+/// Returns the text truncated to `CLI_HELP_MAX_CHARS`, or `None` if the
+/// command isn't found / times out / produces no output.
+pub fn capture_cli_help(provider: &Provider) -> Option<String> {
     let command = provider.cli_command.as_deref()?;
 
     // Try --help first

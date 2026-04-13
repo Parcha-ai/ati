@@ -114,9 +114,6 @@ async fn execute_via_proxy(
                             skills_arr.iter().filter_map(|s| s.as_str()).collect();
                         if !skill_strs.is_empty() {
                             println!("Skills:      {}", skill_strs.join(", "));
-                            for skill in &skill_strs {
-                                println!("  Read:      ati skill fetch read {skill}");
-                            }
                         }
                     }
                     if let Some(schema) = info.get("input_schema") {
@@ -248,9 +245,19 @@ fn tool_info(
         }
     }
 
+    // For CLI tools without an input_schema, capture --help output so the
+    // agent (or human) can see what arguments the tool accepts. This is the
+    // fix for issue #71 — without this, `ati tool info <cli_tool>` returned
+    // nothing useful and agents had to guess parameters.
+    let help_text = if tool.input_schema.is_none() && provider.is_cli() {
+        super::help::capture_cli_help(provider)
+    } else {
+        None
+    };
+
     match cli.output {
         OutputFormat::Json => {
-            let info = serde_json::json!({
+            let mut info = serde_json::json!({
                 "name": tool.name,
                 "description": tool.description,
                 "provider": provider.name,
@@ -261,6 +268,11 @@ fn tool_info(
                 "skills": skills,
                 "input_schema": tool.input_schema,
             });
+            // Only include help_text for CLI tools — avoids an undocumented
+            // schema change for HTTP/MCP/OpenAPI consumers.
+            if provider.is_cli() {
+                info["help_text"] = serde_json::json!(help_text);
+            }
             println!("{}", serde_json::to_string_pretty(&info)?);
         }
         OutputFormat::Table | OutputFormat::Text => {
@@ -269,6 +281,9 @@ fn tool_info(
             println!("Handler:     {}", provider.handler);
             if provider.is_mcp() {
                 println!("Transport:   MCP ({})", provider.mcp_transport_type());
+            } else if provider.is_cli() {
+                let cmd = provider.cli_command.as_deref().unwrap_or(&tool.name);
+                println!("Command:     {cmd}");
             } else {
                 println!(
                     "Endpoint:    {} {}{}",
@@ -290,13 +305,13 @@ fn tool_info(
             }
             if !skills.is_empty() {
                 println!("Skills:      {}", skills.join(", "));
-                for skill in &skills {
-                    println!("  Read:      ati skill fetch read {skill}");
-                }
             }
             if let Some(schema) = &tool.input_schema {
                 println!("\nInput Schema:");
                 println!("{}", serde_json::to_string_pretty(schema)?);
+            } else if let Some(ref help) = help_text {
+                println!("\nCLI Usage (from --help):");
+                println!("{help}");
             }
             if !tool.examples.is_empty() {
                 println!("\nExamples:");
@@ -306,22 +321,30 @@ fn tool_info(
             }
             // Show example usage
             println!("\nUsage:");
-            print!("  ati run {}", tool.name);
-            if let Some(schema) = &tool.input_schema {
-                if let Some(props) = schema.get("properties") {
-                    if let Some(obj) = props.as_object() {
-                        for (k, v) in obj {
-                            let example = v
-                                .get("default")
-                                .or_else(|| v.get("example"))
-                                .map(|e| e.to_string())
-                                .unwrap_or_else(|| format!("<{k}>"));
-                            print!(" --{k} {example}");
+            if provider.is_cli() {
+                let cmd = provider.cli_command.as_deref().unwrap_or(&tool.name);
+                println!(
+                    "  ati run {} -- <args>  (passthrough to `{cmd}`)",
+                    tool.name
+                );
+            } else {
+                print!("  ati run {}", tool.name);
+                if let Some(schema) = &tool.input_schema {
+                    if let Some(props) = schema.get("properties") {
+                        if let Some(obj) = props.as_object() {
+                            for (k, v) in obj {
+                                let example = v
+                                    .get("default")
+                                    .or_else(|| v.get("example"))
+                                    .map(|e| e.to_string())
+                                    .unwrap_or_else(|| format!("<{k}>"));
+                                print!(" --{k} {example}");
+                            }
                         }
                     }
                 }
+                println!();
             }
-            println!();
         }
     }
 
