@@ -373,12 +373,14 @@ async fn execute_via_proxy(
         _ => crate::core::scope::ScopeConfig::unrestricted(),
     };
     let start = std::time::Instant::now();
-    // Always send the parsed args map to the proxy, not raw CLI args.
-    // The proxy uses args_as_map() for HTTP/MCP/OpenAPI tools — sending raw_args
-    // as an array would produce an empty map, causing tools like finnhub to get
-    // no parameters (and return zeros). Raw args are only needed for CLI handler
-    // tools, but the proxy converts map args to CLI flags automatically.
-    let exec_result = proxy_client::call_tool(proxy_url, tool_name, args, None).await;
+    // Always send both the parsed args map AND the raw positional args.
+    // - HTTP/MCP/OpenAPI tools: proxy uses args_as_map() → reads the map
+    // - CLI tools: proxy uses args_as_positional() → reads raw_args first
+    //
+    // Without raw_args, CLI positional args like `ati run bb browse status`
+    // lose "browse" and "status" because parse_tool_args only captures
+    // --key value pairs into the map, dropping bare positional words.
+    let exec_result = proxy_client::call_tool(proxy_url, tool_name, args, Some(raw_args)).await;
     let duration = start.elapsed();
 
     let (status, error_msg) = match &exec_result {
