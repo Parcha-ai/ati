@@ -12,6 +12,24 @@ pub async fn execute(
     cli: &Cli,
     subcmd: &SkillAtiCommands,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // When ATI_SKILL_FETCH_DISABLED is set (e.g., in sandboxes where skills
+    // are pre-installed and loaded via Claude Code's native Skill tool),
+    // block fetch commands with a friendly error guiding the agent to use
+    // the Skill tool instead. build-index is exempt (offline tooling).
+    if !matches!(subcmd, SkillAtiCommands::BuildIndex { .. })
+        && std::env::var("ATI_SKILL_FETCH_DISABLED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    {
+        eprintln!(
+            "Skills are pre-installed in this environment. \
+             Use the Skill tool to load them (e.g., skill: \"<name>\") \
+             instead of `ati skill fetch`. \
+             Run `ati skill list` to see installed skills."
+        );
+        std::process::exit(1);
+    }
+
     if let SkillAtiCommands::BuildIndex {
         source_dir,
         output_file,
