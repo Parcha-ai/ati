@@ -1,6 +1,6 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Parcha-ai/ati/ci.yml?branch=main&label=CI)](https://github.com/Parcha-ai/ati/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/Parcha-ai/ati)](LICENSE)
-[![767 tests](https://img.shields.io/badge/tests-767-brightgreen)](#building)
+[![791 tests](https://img.shields.io/badge/tests-791-brightgreen)](#building)
 [![PyPI](https://img.shields.io/pypi/v/ati-client)](https://pypi.org/project/ati-client/)
 [![crates.io](https://img.shields.io/crates/v/agent-tools-interface)](https://crates.io/crates/agent-tools-interface)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-blue)](#building)
@@ -393,6 +393,8 @@ The `${key}` syntax injects a keyring secret as an env var. The `@{key}` syntax 
 
 CLI providers get a curated environment (only `PATH`, `HOME`, `TMPDIR`, `LANG`, `USER`, `TERM` from the host). The subprocess can't see your shell's full environment.
 
+For CLIs that produce **binary outputs** (screenshots, downloads, PDFs, generated media) — see the [CLI handler binary output capture](#cli-handler--capture-binary-outputs-from-wrapped-commands) section below. Without it, those bytes get stranded on the proxy filesystem in proxy mode.
+
 **Example: Google Workspace — 25 APIs, one CLI.** ATI ships a pre-built manifest for [`gws`](https://github.com/googleworkspace/cli) (Google Workspace CLI). It covers Drive, Gmail, Calendar, Sheets, Docs, Slides, Chat, Admin, and 18 more services — all auto-discovered from Google's Discovery Service.
 
 ```bash
@@ -474,12 +476,12 @@ Auth types: `bearer`, `header`, `query`, `basic`, `oauth2`, `none`.
 
 ### File Manager — Built-in `download` and `upload`
 
-ATI ships with a virtual `file_manager` provider that exposes two tools without any manifest. It exists so agents in hardened sandboxes (which can only reach the ATI proxy) can still pull bytes from arbitrary URLs and push files to object storage.
+ATI ships with a virtual `file_manager` provider that exposes two tools without any manifest by default. It exists so agents in hardened sandboxes (which can only reach the ATI proxy) can still pull bytes from arbitrary URLs and push files to operator-allowlisted destinations.
 
 ```bash
-# "I have a URL, give me the bytes." Writes to the local path.
+# "I have a URL, give me the bytes." Writes to the sandbox's local path.
 ati run file_manager:download \
-  --url "https://example.com/output.mp4" \
+  --url "https://v3b.fal.media/files/b/.../output.mp4" \
   --out /tmp/clip.mp4
 # → {"success": true, "path": "/tmp/clip.mp4", "size_bytes": 8655798,
 #    "content_type": "video/mp4", "source_url": "..."}
@@ -487,26 +489,131 @@ ati run file_manager:download \
 # Or return base64 inline (small files / data pipelines)
 ati run file_manager:download --url "https://example.com/report.csv" --inline true
 
-# Push a local file back out — returns a public URL
-ati run file_manager:upload --path /tmp/narration.mp3
-# → {"success": true, "url": "https://storage.googleapis.com/.../narration.mp3",
-#    "size_bytes": 818826, "content_type": "audio/mpeg"}
+# Push a local file to a manifest-declared destination, get a public URL.
+ati run file_manager:upload --path /tmp/example.png --destination fal
+# → {"success": true,
+#    "url": "https://v3b.fal.media/files/b/.../example.png",
+#    "size_bytes": 15236, "content_type": "image/png", "destination": "fal"}
 ```
 
 Download parameters: `--out <path>`, `--inline true`, `--max-bytes <n>` (default 500 MB), `--timeout <seconds>` (default 120), `--headers <json>`, `--follow-redirects true|false`.
 
-**Security model — required for production:**
+Upload parameters: `--path <local-file>`, `--destination <key>` (one of the operator's allowlist keys; omit to use the default), `--content-type <mime>` (override extension-based inference), `--object-name <name>` (override generated object key for GCS-style sinks).
+
+In proxy mode the proxy performs the network fetch / upload and returns base64 to the sandbox, which writes it to disk. In local mode ATI does the work directly. Both modes share the same JSON contract.
+
+#### Configuring upload destinations (operator manifest)
+
+Uploads are gated by an explicit allowlist: agents can only write to destinations the operator declares in `~/.ati/manifests/file_manager.toml`. **Without this manifest, uploads return `UploadNotConfigured`.** This closes the egress hole — a compromised agent cannot pick its own upload target.
+
+Drop a single manifest:
+
+```toml
+# ~/.ati/manifests/file_manager.toml
+[provider]
+name = "file_manager"
+description = "Generic binary download/upload"
+handler = "file_manager"
+upload_default_destination = "fal"   # used when --destination is omitted
+
+# fal.ai CDN — for inputs to fal models (images, video, audio)
+[provider.upload_destinations.fal]
+kind = "fal_storage"
+key_ref = "fal_api_key"              # keyring key holding the fal API key
+
+# Google Cloud Storage bucket — for general workspace artifacts
+[provider.upload_destinations.gcs]
+kind = "gcs"
+bucket = "my-uploads"
+prefix = "ati-uploads"               # optional, default "ati-uploads"
+key_ref = "gcp_credentials"          # optional, default "gcp_credentials"
+```
+
+Then set the keyring keys:
+
+```bash
+ati key set fal_api_key "your-fal-key"
+ati key set gcp_credentials "@file:/path/to/gcp-sa.json"
+```
+
+Now agents call `file_manager:upload --destination fal` (or `--destination gcs`); anything else returns `UnknownDestination` with HTTP 403. Add a destination by adding another `[provider.upload_destinations.<name>]` block — no code changes needed.
+
+The manifest validator refuses inconsistent configs (e.g. an `upload_default_destination` that isn't in the destinations map) at load time.
+
+**Supported sink kinds:**
+
+| `kind` | Required fields | What it does |
+|---|---|---|
+| `gcs` | `bucket`, `key_ref` (default `gcp_credentials`), `prefix` (default `ati-uploads`) | Uploads to `<bucket>/<prefix>/<utc-date>/<uuid>-<filename>` via the GCS JSON API. Returns `https://storage.googleapis.com/<bucket>/<obj>`. |
+| `fal_storage` | `key_ref` (default `fal_api_key`), `endpoint` (optional, default `https://rest.alpha.fal.ai`) | Mints a signed CDN token via fal's `/storage/auth/token` endpoint, then uploads via `POST /files/upload` with `X-Fal-File-Name`. Returns the `access_url` fal hands back. |
+
+#### Download security (required for production)
 
 - `ATI_SSRF_PROTECTION=1` — blocks downloads to private/internal addresses (loopback, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, etc.).
-- `ATI_DOWNLOAD_ALLOWLIST=v3b.fal.media,*.googleapis.com,raw.githubusercontent.com` — comma-separated host patterns the proxy is allowed to fetch from. Supports `*.example.com` subdomain wildcards. **When unset, downloads are unrestricted** — only acceptable in local-mode dev. Always set this on production proxies, otherwise an agent can use the proxy to exfiltrate to attacker-controlled hosts or probe internal infrastructure.
+- `ATI_DOWNLOAD_ALLOWLIST=v3b.fal.media,*.googleapis.com,raw.githubusercontent.com` — comma-separated host patterns the proxy is allowed to fetch from. Supports `*.example.com` subdomain wildcards. **When unset, downloads are unrestricted** — only acceptable in local-mode dev. Always set this on production proxies, otherwise an agent can use the proxy to exfiltrate to attacker-controlled hosts or probe internal infrastructure. Suffix-collision tricks like `evilfal.media` against `*.fal.media` are correctly rejected (only true subdomain matches pass).
 
-Upload backend defaults to GCS. The proxy uploads to a single operator-controlled bucket — agents cannot choose the destination. Configure on the proxy via:
+---
 
-- `ATI_UPLOAD_BUCKET=<bucket>` — required, the only allowed upload destination.
-- `ATI_UPLOAD_PREFIX=<prefix>` — optional (default `ati-uploads`).
-- keyring key `gcp_credentials` — service account JSON.
+### CLI handler — capture binary outputs from wrapped commands
 
-In proxy mode the proxy performs the network fetch / GCS upload and returns base64 to the sandbox, which writes it to disk. In local mode ATI fetches directly. Both modes share the same JSON contract.
+CLI providers (`handler = "cli"`) wrap an external binary and ship its stdout back to the agent. That works fine for tools that print JSON — but most CLIs that produce binary output (screenshots, PDFs, downloaded assets, generated media) write to a file instead. Without help, those bytes land on the **proxy** filesystem, unreachable to the sandbox agent that called the tool.
+
+The fix: declare which args designate output files. The proxy substitutes proxy-side temp paths, runs the subprocess, reads the resulting bytes, and ships them back to the sandbox where the CLI writes them to the path the agent originally asked for.
+
+Two manifest fields:
+
+```toml
+# manifests/parcha-tools-mcp.toml (excerpt — works on any CLI provider)
+[provider]
+name = "bb"
+handler = "cli"
+cli_command = "bb"
+# Named flags whose value is an output path (--output, -o, --out, ...).
+cli_output_args = ["--output", "-o"]
+
+# Subcommand prefix → 0-based positional arg index that's an output path.
+# Example: `bb browse screenshot /tmp/x.png` — arg 0 of args after the prefix.
+[provider.cli_output_positional]
+"browse screenshot" = 0
+"browse pdf" = 0
+```
+
+What this enables:
+
+```bash
+# Agent inside a sandbox calls bb through the proxy.
+ATI_PROXY_URL=http://proxy.greppy3.parcha.dev ati run bb browse screenshot /tmp/shot.png
+# Behind the scenes:
+# 1. Sandbox CLI sends raw_args verbatim to proxy
+# 2. Proxy detects "browse screenshot" matches → arg 0 is an output path
+# 3. Proxy rewrites /tmp/shot.png → /tmp/.ati-cli-out-<pid>-<rand>.png
+# 4. Proxy runs `bb browse screenshot /tmp/.ati-cli-out-<pid>-<rand>.png`
+# 5. Proxy reads the resulting PNG, base64s it into the response
+# 6. Sandbox CLI decodes and writes to /tmp/shot.png inside the sandbox
+
+# Response shape:
+# {
+#   "stdout": "<whatever bb printed>",
+#   "outputs": {
+#     "/tmp/shot.png": {
+#       "path": "/tmp/shot.png",
+#       "size_bytes": 15236,
+#       "content_type": "image/png"
+#     }
+#   }
+# }
+# (content_base64 is stripped from the final response — file is already on disk.)
+```
+
+**Backward compatible.** CLI manifests without `cli_output_args` / `cli_output_positional` produce the existing flat string/JSON response unchanged. Both forms — `--output <path>` and `--output=<path>` — are recognized. Multiple output args in one invocation are all captured.
+
+**Safety:**
+- Failed subprocess (non-zero exit, timeout, spawn failure) cleans up temp files unconditionally.
+- `ATI_CLI_MAX_OUTPUT_BYTES` (default 500 MB) caps each captured file. Exceeding returns a typed `OutputTooLarge` error, never a panic.
+- Missing output file (subprocess succeeded but didn't write what we expected) returns a typed `OutputMissing` error rather than silently dropping the call.
+- Temp file extension is preserved from the agent's original path so CLIs that key behavior off file extension still work.
+
+**Combine with file_manager.** Common pattern for media agents: `bb browse screenshot /tmp/shot.png` → `file_manager:upload --path /tmp/shot.png --destination fal` → `https://v3b.fal.media/.../shot.png` URL ready to feed into a fal model.
 
 ---
 
