@@ -28,6 +28,7 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::net::ToSocketAddrs;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -641,7 +642,74 @@ async fn upload_to_gcs(
     })
 }
 
+/// Always-on SSRF guard for URLs that came from a remote server's response.
+///
+/// Applies to URLs derived from a third-party response rather than from agent
+/// input or operator config. Refuses non-HTTPS URLs and any host that
+/// resolves to a private/internal address.
+///
+/// Ignores the `ATI_SSRF_PROTECTION` env knob — that's for the
+/// agent-controlled-URL path where the operator might want unrestricted dev
+/// mode. Here we have no reason to ever trust a server-supplied internal
+/// address.
+fn require_public_https_url(url: &str) -> Result<(), FileManagerError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| FileManagerError::Upload(format!("server returned malformed URL: {e}")))?;
+    if parsed.scheme() != "https" {
+        return Err(FileManagerError::Upload(format!(
+            "refusing non-HTTPS URL from server: {url}"
+        )));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| FileManagerError::Upload(format!("server URL has no host: {url}")))?;
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost"
+        || host_lower == "metadata.google.internal"
+        || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".local")
+    {
+        return Err(FileManagerError::Upload(format!(
+            "server URL targets a private hostname: {url}"
+        )));
+    }
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let ip_host = host.trim_matches(['[', ']']);
+    let is_private = if let Ok(ip) = ip_host.parse::<std::net::IpAddr>() {
+        is_private_ip_addr(ip)
+    } else if let Ok(addrs) = (ip_host, port).to_socket_addrs() {
+        addrs.into_iter().any(|addr| is_private_ip_addr(addr.ip()))
+    } else {
+        false
+    };
+    if is_private {
+        return Err(FileManagerError::Upload(format!(
+            "server URL resolves to a private address: {url}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_private_ip_addr(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127)
+        }
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+    }
+}
+
 /// Upload to fal.ai's CDN via their two-step signed-token flow.
+///
 /// 1. POST `<rest>/storage/auth/token?storage_type=fal-cdn-v3` with
 ///    `Authorization: Key <api_key>` → `{token, token_type, base_url, expires_at}`
 /// 2. POST `<base_url or v3.fal.media>/files/upload` with the signed token,
@@ -705,6 +773,16 @@ async fn upload_to_fal(
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let size_bytes = args.bytes.len() as u64;
     let upload_url = format!("{}/files/upload", token.base_url.trim_end_matches('/'));
+
+    // SSRF guard: the `base_url` came from fal's token response. A compromised
+    // or DNS-hijacked fal endpoint returning e.g. `base_url =
+    // "http://169.254.169.254/"` would otherwise cause the proxy to POST the
+    // file payload + signed token to that internal address. Always enforce —
+    // the env-gated `ATI_SSRF_PROTECTION` is for agent-supplied URLs where the
+    // operator might want unrestricted dev access; this is a server-supplied
+    // URL we can't trust unconditionally.
+    require_public_https_url(&upload_url)?;
+
     let upload_resp = http
         .post(&upload_url)
         .header(
@@ -970,5 +1048,56 @@ mod tests {
         let m = make_destinations();
         let err = resolve_destination(&m, None, None).unwrap_err();
         assert!(matches!(err, FileManagerError::UploadNotConfigured));
+    }
+
+    // Always-on SSRF guard for server-supplied URLs (e.g. fal's base_url).
+    #[test]
+    fn require_public_https_accepts_public_https() {
+        assert!(require_public_https_url("https://v3b.fal.media/files/upload").is_ok());
+    }
+
+    #[test]
+    fn require_public_https_rejects_http_scheme() {
+        let err = require_public_https_url("http://v3b.fal.media/files/upload").unwrap_err();
+        assert!(
+            matches!(&err, FileManagerError::Upload(m) if m.contains("non-HTTPS")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn require_public_https_rejects_loopback_hostname() {
+        let err = require_public_https_url("https://localhost/files/upload").unwrap_err();
+        assert!(matches!(&err, FileManagerError::Upload(m) if m.contains("private")));
+    }
+
+    #[test]
+    fn require_public_https_rejects_metadata_ip() {
+        // GCP metadata service
+        let err = require_public_https_url("https://169.254.169.254/").unwrap_err();
+        assert!(matches!(&err, FileManagerError::Upload(m) if m.contains("private")));
+    }
+
+    #[test]
+    fn require_public_https_rejects_rfc1918() {
+        assert!(require_public_https_url("https://10.0.0.1/x").is_err());
+        assert!(require_public_https_url("https://192.168.1.1/x").is_err());
+        assert!(require_public_https_url("https://172.16.0.1/x").is_err());
+    }
+
+    #[test]
+    fn require_public_https_rejects_link_local_ipv6() {
+        assert!(require_public_https_url("https://[fe80::1]/x").is_err());
+    }
+
+    #[test]
+    fn require_public_https_rejects_dotinternal_hostname() {
+        assert!(require_public_https_url("https://storage.internal/x").is_err());
+        assert!(require_public_https_url("https://api.local/x").is_err());
+    }
+
+    #[test]
+    fn require_public_https_rejects_malformed_url() {
+        assert!(require_public_https_url("not a url").is_err());
     }
 }

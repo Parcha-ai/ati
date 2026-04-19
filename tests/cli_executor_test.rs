@@ -642,3 +642,71 @@ fn test_apply_output_captures_equals_form() {
     assert!(rewritten[0].starts_with("--output="));
     assert_ne!(rewritten[0], "--output=/tmp/real.bin");
 }
+
+/// Regression: when both cli_output_args and cli_output_positional are
+/// configured (as the bb manifest does), step 1's named-flag rewrite must
+/// consume the slot so step 2's positional rewrite doesn't pick up the
+/// already-substituted temp path as a new "output."
+#[test]
+fn test_apply_output_captures_no_double_rewrite_when_both_configured() {
+    use ati::core::cli_executor::apply_output_captures;
+    let mut provider = make_cli_provider("bb_clone", "true", vec![], HashMap::new(), None);
+    provider.cli_output_args = vec!["--output".to_string(), "-o".to_string()];
+    provider
+        .cli_output_positional
+        .insert("browse screenshot".to_string(), 0);
+
+    // Named-flag form on a subcommand that ALSO has a positional output rule.
+    let raw_args = vec![
+        "browse".to_string(),
+        "screenshot".to_string(),
+        "--output".to_string(),
+        "/tmp/shot.png".to_string(),
+    ];
+    let (rewritten, captures) = apply_output_captures(&provider, &raw_args).unwrap();
+
+    // Exactly one capture, pointing at the agent's original path.
+    assert_eq!(
+        captures.len(),
+        1,
+        "expected single capture, got {captures:?}"
+    );
+    assert_eq!(captures[0].original_path, "/tmp/shot.png");
+
+    // The arg following --output is the rewritten temp path.
+    assert_eq!(rewritten[0], "browse");
+    assert_eq!(rewritten[1], "screenshot");
+    assert_eq!(rewritten[2], "--output");
+    assert_ne!(
+        rewritten[3], "/tmp/shot.png",
+        "named-flag value should have been rewritten to a temp path"
+    );
+    assert!(
+        rewritten[3].contains(".ati-cli-out-"),
+        "rewritten value should be a temp path: {}",
+        rewritten[3]
+    );
+}
+
+/// Variant: positional form on the same provider config — the positional
+/// rewrite still kicks in (no --output flag → step 1 finds nothing → step 2
+/// handles the bare path).
+#[test]
+fn test_apply_output_captures_positional_still_works_when_both_configured() {
+    use ati::core::cli_executor::apply_output_captures;
+    let mut provider = make_cli_provider("bb_clone", "true", vec![], HashMap::new(), None);
+    provider.cli_output_args = vec!["--output".to_string(), "-o".to_string()];
+    provider
+        .cli_output_positional
+        .insert("browse screenshot".to_string(), 0);
+
+    let raw_args = vec![
+        "browse".to_string(),
+        "screenshot".to_string(),
+        "/tmp/positional.png".to_string(),
+    ];
+    let (rewritten, captures) = apply_output_captures(&provider, &raw_args).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].original_path, "/tmp/positional.png");
+    assert_ne!(rewritten[2], "/tmp/positional.png");
+}

@@ -143,7 +143,9 @@ async fn run_upload(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let bytes = std::fs::read(&path).map_err(|e| format!("failed to read {path}: {e}"))?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("failed to read {path}: {e}"))?;
 
     let filename = Path::new(&path)
         .file_name()

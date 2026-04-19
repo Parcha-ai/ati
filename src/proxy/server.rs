@@ -1979,7 +1979,6 @@ pub async fn run(
     Ok(())
 }
 
-/// Write an audit entry from the proxy server. Failures are silently ignored.
 /// Dispatch a `file_manager:*` tool call. Returns either a JSON payload or an
 /// (HTTP status, message) error for the caller to forward.
 async fn dispatch_file_manager(

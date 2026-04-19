@@ -220,6 +220,13 @@ pub fn apply_output_captures(
 ) -> Result<(Vec<String>, Vec<CapturedOutput>), CliError> {
     let mut rewritten: Vec<String> = raw_args.to_vec();
     let mut captures: Vec<CapturedOutput> = Vec::new();
+    // Indices of `rewritten` that step 1 substituted with temp paths. Step 2
+    // must never touch these — otherwise an invocation that matches BOTH a
+    // named-flag rule AND a positional rule (e.g. `bb browse screenshot
+    // --output /tmp/x.png` against a manifest with both `cli_output_args`
+    // and `cli_output_positional`) would double-rewrite the same slot,
+    // capturing the temp path as a "second" output the subprocess never wrote.
+    let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     // 1. Named flag rewriting
     if !provider.cli_output_args.is_empty() {
@@ -241,6 +248,7 @@ pub fn apply_output_captures(
                         original_path: original,
                         temp_path: temp,
                     });
+                    consumed.insert(i);
                     i += 1;
                     continue;
                 }
@@ -259,6 +267,8 @@ pub fn apply_output_captures(
                     original_path: original,
                     temp_path: temp,
                 });
+                consumed.insert(i);
+                consumed.insert(i + 1);
                 i += 2;
                 continue;
             }
@@ -266,15 +276,16 @@ pub fn apply_output_captures(
         }
     }
 
-    // 2. Positional rewriting — match the longest subcommand prefix
+    // 2. Positional rewriting — match the longest subcommand prefix.
+    // Skip any slot already rewritten by step 1 so we don't double-capture.
     if !provider.cli_output_positional.is_empty() {
         // Build the list of non-flag (positional) tokens with their indices,
-        // skipping flags and their inline values.
+        // skipping flags, their inline values, and slots consumed by step 1.
         let positionals: Vec<(usize, String)> = rewritten
             .iter()
             .enumerate()
             .filter_map(|(idx, s)| {
-                if s.starts_with('-') {
+                if consumed.contains(&idx) || s.starts_with('-') {
                     None
                 } else {
                     Some((idx, s.clone()))

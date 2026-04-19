@@ -334,37 +334,61 @@ impl GcsClient {
             urlencoded(object_name)
         );
 
-        let token = self.access_token().await?;
-
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&token)
-            .header(reqwest::header::CONTENT_TYPE, content_type)
-            .body(bytes)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GcsError::Api {
-                status,
-                message: body,
-            });
+        // Retry 429/5xx up to 3 times with exponential backoff — matches the
+        // pattern used by `get_with_retry` on the read path. Uploads are
+        // idempotent with the JSON simple-upload API (each call fully replaces
+        // the object at `name=`), so retrying on transient failures is safe.
+        let mut last_err: Option<GcsError> = None;
+        for attempt in 0..3 {
+            let token = self.access_token().await?;
+            match self
+                .http
+                .post(&url)
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(bytes.clone())
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if status == 429 || status >= 500 {
+                        let body = resp.text().await.unwrap_or_default();
+                        last_err = Some(GcsError::Api {
+                            status,
+                            message: body,
+                        });
+                        let delay = std::time::Duration::from_millis(500 * (1 << attempt));
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    if !resp.status().is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(GcsError::Api {
+                            status,
+                            message: body,
+                        });
+                    }
+                    // Success — return the canonical public URL. Path-style so
+                    // object names with `/` segments round-trip cleanly.
+                    return Ok(format!(
+                        "https://storage.googleapis.com/{}/{}",
+                        self.bucket,
+                        object_name
+                            .split('/')
+                            .map(percent_encode_segment)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    ));
+                }
+                Err(e) => {
+                    last_err = Some(GcsError::Http(e));
+                    let delay = std::time::Duration::from_millis(500 * (1 << attempt));
+                    tokio::time::sleep(delay).await;
+                }
+            }
         }
-
-        // Object metadata response — we only need the canonical public URL.
-        Ok(format!(
-            "https://storage.googleapis.com/{}/{}",
-            self.bucket,
-            // Path-style: encode each segment individually so `/` is preserved.
-            object_name
-                .split('/')
-                .map(percent_encode_segment)
-                .collect::<Vec<_>>()
-                .join("/")
-        ))
+        Err(last_err.expect("loop body sets last_err on every failure path"))
     }
 
     /// Retry-aware wrapper for GET requests. Retries on 429/5xx up to 3 times with backoff.
