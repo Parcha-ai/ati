@@ -50,8 +50,14 @@ async fn run_download(
     output_format: &OutputFormat,
     mode: DispatchMode<'_>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let out_path = args.get("out").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let inline = args.get("inline").and_then(|v| v.as_bool()).unwrap_or(false);
+    let out_path = args
+        .get("out")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let inline = args
+        .get("inline")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Strip CLI-only args before sending to server.
     let mut server_args = args.clone();
@@ -65,13 +71,8 @@ async fn run_download(
             fm::build_download_response(&result)
         }
         DispatchMode::Proxy { proxy_url } => {
-            crate::proxy::client::call_tool(
-                proxy_url,
-                "file_manager:download",
-                &server_args,
-                None,
-            )
-            .await?
+            crate::proxy::client::call_tool(proxy_url, "file_manager:download", &server_args, None)
+                .await?
         }
     };
 
@@ -79,7 +80,8 @@ async fn run_download(
         .get("content_base64")
         .and_then(|v| v.as_str())
         .ok_or("download response missing content_base64")?;
-    let bytes = B64.decode(content_b64.as_bytes())
+    let bytes = B64
+        .decode(content_b64.as_bytes())
         .map_err(|e| format!("invalid base64 in response: {e}"))?;
 
     let size_bytes = bytes.len();
@@ -142,34 +144,22 @@ async fn run_upload(
         .file_name()
         .and_then(|f| f.to_str())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            format!("upload-{}", chrono::Utc::now().timestamp_millis())
-        });
+        .unwrap_or_else(|| format!("upload-{}", chrono::Utc::now().timestamp_millis()));
     let content_type = explicit_ct.unwrap_or_else(|| guess_content_type(&path));
 
     let mut wire_args: HashMap<String, Value> = HashMap::new();
     wire_args.insert(
         "filename".into(),
-        Value::String(
-            explicit_object_name.clone().unwrap_or(filename),
-        ),
+        Value::String(explicit_object_name.clone().unwrap_or(filename)),
     );
     wire_args.insert("content_type".into(), Value::String(content_type));
-    wire_args.insert(
-        "content_base64".into(),
-        Value::String(B64.encode(&bytes)),
-    );
+    wire_args.insert("content_base64".into(), Value::String(B64.encode(&bytes)));
 
     let response = match mode {
         DispatchMode::Local { keyring } => upload_local(&wire_args, keyring).await?,
         DispatchMode::Proxy { proxy_url } => {
-            crate::proxy::client::call_tool(
-                proxy_url,
-                "file_manager:upload",
-                &wire_args,
-                None,
-            )
-            .await?
+            crate::proxy::client::call_tool(proxy_url, "file_manager:upload", &wire_args, None)
+                .await?
         }
     };
 

@@ -28,8 +28,8 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use thiserror::Error;
 use std::time::Duration;
+use thiserror::Error;
 
 /// Default ceiling on download/upload size (500 MB).
 pub const DEFAULT_MAX_BYTES: u64 = 500 * 1024 * 1024;
@@ -293,7 +293,11 @@ pub async fn fetch_bytes(args: &DownloadArgs) -> Result<DownloadResult, FileMana
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        let truncated = if body.len() > 512 { &body[..512] } else { &body };
+        let truncated = if body.len() > 512 {
+            &body[..512]
+        } else {
+            &body
+        };
         return Err(FileManagerError::Upstream {
             url: args.url.clone(),
             status: status.as_u16(),
@@ -401,10 +405,7 @@ impl UploadArgs {
 fn sanitize_filename(input: &str) -> String {
     let trimmed = input.trim_matches(|c: char| c == '/' || c.is_whitespace());
     let last = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    let cleaned: String = last
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect::<String>();
+    let cleaned: String = last.chars().filter(|c| !c.is_control()).collect::<String>();
     if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
         format!("upload-{}", chrono::Utc::now().timestamp_millis())
     } else {
@@ -445,7 +446,10 @@ mod tests {
     fn parse_headers_string_json() {
         let v = Value::String(r#"{"Authorization":"Bearer abc"}"#.into());
         let map = parse_headers(Some(&v)).unwrap();
-        assert_eq!(map.get("Authorization").map(String::as_str), Some("Bearer abc"));
+        assert_eq!(
+            map.get("Authorization").map(String::as_str),
+            Some("Bearer abc")
+        );
     }
 
     #[test]
@@ -470,7 +474,10 @@ mod tests {
     #[test]
     fn download_args_defaults() {
         let mut args = HashMap::new();
-        args.insert("url".to_string(), Value::String("https://example.com".into()));
+        args.insert(
+            "url".to_string(),
+            Value::String("https://example.com".into()),
+        );
         let parsed = DownloadArgs::from_value(&args).unwrap();
         assert_eq!(parsed.max_bytes, DEFAULT_MAX_BYTES);
         assert_eq!(parsed.timeout, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
@@ -487,7 +494,10 @@ mod tests {
     #[test]
     fn download_args_zero_max_bytes_rejected() {
         let mut args = HashMap::new();
-        args.insert("url".to_string(), Value::String("https://example.com".into()));
+        args.insert(
+            "url".to_string(),
+            Value::String("https://example.com".into()),
+        );
         args.insert("max_bytes".to_string(), Value::Number(0.into()));
         assert!(DownloadArgs::from_value(&args).is_err());
     }
@@ -495,7 +505,10 @@ mod tests {
     #[test]
     fn download_args_max_bytes_string() {
         let mut args = HashMap::new();
-        args.insert("url".to_string(), Value::String("https://example.com".into()));
+        args.insert(
+            "url".to_string(),
+            Value::String("https://example.com".into()),
+        );
         args.insert("max_bytes".to_string(), Value::String("1024".into()));
         let parsed = DownloadArgs::from_value(&args).unwrap();
         assert_eq!(parsed.max_bytes, 1024);
@@ -505,10 +518,7 @@ mod tests {
     fn upload_args_round_trip() {
         let bytes = b"hello world".to_vec();
         let mut args = HashMap::new();
-        args.insert(
-            "filename".to_string(),
-            Value::String("hello.txt".into()),
-        );
+        args.insert("filename".to_string(), Value::String("hello.txt".into()));
         args.insert(
             "content_type".to_string(),
             Value::String("text/plain".into()),

@@ -29,7 +29,10 @@ fn registry_exposes_file_manager_tools() {
         .get_tool("file_manager:download")
         .expect("file_manager:download must be registered");
     assert!(download.0.is_file_manager());
-    assert_eq!(download.1.scope.as_deref(), Some("tool:file_manager:download"));
+    assert_eq!(
+        download.1.scope.as_deref(),
+        Some("tool:file_manager:download")
+    );
 
     let upload = registry
         .get_tool("file_manager:upload")
@@ -88,7 +91,10 @@ async fn download_happy_path_returns_bytes_and_metadata() {
     let result = file_manager::fetch_bytes(&parsed).await.unwrap();
 
     assert_eq!(result.bytes, body);
-    assert_eq!(result.content_type.as_deref(), Some("application/octet-stream"));
+    assert_eq!(
+        result.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
 
     let resp = build_download_response(&result);
     assert_eq!(resp["size_bytes"], body.len());
@@ -222,10 +228,7 @@ async fn download_caller_supplied_headers_are_forwarded() {
         "url".to_string(),
         Value::String(format!("{}/auth", server.uri())),
     );
-    args.insert(
-        "headers".to_string(),
-        json!({"X-Test-Token": "abc123"}),
-    );
+    args.insert("headers".to_string(), json!({"X-Test-Token": "abc123"}));
     let parsed = DownloadArgs::from_value(&args).unwrap();
     let result = file_manager::fetch_bytes(&parsed).await.unwrap();
     assert_eq!(result.bytes, b"ok");

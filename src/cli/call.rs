@@ -182,7 +182,9 @@ async fn execute_file_manager(
             tool_name,
             args,
             &effective_output,
-            DispatchMode::Proxy { proxy_url: &proxy_url },
+            DispatchMode::Proxy {
+                proxy_url: &proxy_url,
+            },
         )
         .await
     } else {
@@ -200,9 +202,8 @@ async fn execute_file_manager(
 
     // Audit
     let duration = start.elapsed();
-    let scopes = common::load_local_scopes_from_env().unwrap_or_else(|_| {
-        crate::core::scope::ScopeConfig::unrestricted()
-    });
+    let scopes = common::load_local_scopes_from_env()
+        .unwrap_or_else(|_| crate::core::scope::ScopeConfig::unrestricted());
     let (status, error_msg) = match &result {
         Ok(_) => (crate::core::audit::AuditStatus::Ok, None),
         Err(e) => (crate::core::audit::AuditStatus::Error, Some(e.to_string())),

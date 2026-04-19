@@ -1960,9 +1960,7 @@ async fn dispatch_file_manager(
     args: &HashMap<String, Value>,
     keyring: &Keyring,
 ) -> Result<Value, (StatusCode, String)> {
-    use crate::core::file_manager::{
-        self, DownloadArgs, FileManagerError, UploadArgs,
-    };
+    use crate::core::file_manager::{self, DownloadArgs, FileManagerError, UploadArgs};
 
     match tool_name {
         "file_manager:download" => {
@@ -1973,19 +1971,23 @@ async fn dispatch_file_manager(
                 FileManagerError::BadHeader { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
                 other => (StatusCode::BAD_REQUEST, other.to_string()),
             })?;
-            let result = file_manager::fetch_bytes(&parsed).await.map_err(|e| match e {
-                FileManagerError::PrivateUrl(_) => (StatusCode::FORBIDDEN, e.to_string()),
-                FileManagerError::Upstream { status, .. } => (
-                    StatusCode::from_u16(status.max(400).min(599))
-                        .unwrap_or(StatusCode::BAD_GATEWAY),
-                    e.to_string(),
-                ),
-                FileManagerError::SizeCap { .. } => (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
-                FileManagerError::Http { .. } | FileManagerError::InvalidUrl(_) => {
-                    (StatusCode::BAD_GATEWAY, e.to_string())
-                }
-                other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
-            })?;
+            let result = file_manager::fetch_bytes(&parsed)
+                .await
+                .map_err(|e| match e {
+                    FileManagerError::PrivateUrl(_) => (StatusCode::FORBIDDEN, e.to_string()),
+                    FileManagerError::Upstream { status, .. } => (
+                        StatusCode::from_u16(status.clamp(400, 599))
+                            .unwrap_or(StatusCode::BAD_GATEWAY),
+                        e.to_string(),
+                    ),
+                    FileManagerError::SizeCap { .. } => {
+                        (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
+                    }
+                    FileManagerError::Http { .. } | FileManagerError::InvalidUrl(_) => {
+                        (StatusCode::BAD_GATEWAY, e.to_string())
+                    }
+                    other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+                })?;
             Ok(file_manager::build_download_response(&result))
         }
         "file_manager:upload" => {
