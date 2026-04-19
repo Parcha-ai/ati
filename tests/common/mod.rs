@@ -65,6 +65,8 @@ pub fn test_provider(name: &str, base_url: &str) -> Provider {
         cli_default_args: vec![],
         cli_env: HashMap::new(),
         cli_timeout_secs: None,
+        cli_output_args: Vec::new(),
+        cli_output_positional: HashMap::new(),
         openapi_spec: None,
         openapi_include_tags: vec![],
         openapi_exclude_tags: vec![],

@@ -248,9 +248,18 @@ pub(crate) fn load_keyring(ati_dir: &Path) -> Keyring {
     // 3. Try plaintext credentials (local mode)
     let creds_path = ati_dir.join("credentials");
     if creds_path.exists() {
-        if let Ok(kr) = Keyring::load_credentials(&creds_path) {
-            tracing::debug!("keyring: credentials (plaintext)");
-            return kr;
+        match Keyring::load_credentials(&creds_path) {
+            Ok(kr) => {
+                tracing::debug!("keyring: credentials (plaintext)");
+                return kr;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %creds_path.display(),
+                    error = %e,
+                    "failed to load credentials file"
+                );
+            }
         }
     }
 
@@ -387,7 +396,10 @@ async fn execute_local(
             )
             .await
             {
-                Ok(value) => Ok(output::format_output(&value, &effective_output)),
+                Ok(value) => match super::cli_capture::materialize_outputs(value) {
+                    Ok(processed) => Ok(output::format_output(&processed, &effective_output)),
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e.into()),
             }
         }
@@ -482,6 +494,10 @@ async fn execute_via_proxy(
     }
 
     let result = exec_result?;
+    // CLI tools whose providers configure output capture return an `outputs`
+    // envelope in `result`. Materialize those files inside the sandbox and
+    // strip the base64 payload before formatting.
+    let result = super::cli_capture::materialize_outputs(result)?;
     // Handle -J/--json swallowed by trailing_var_arg
     let effective_output = if raw_args.iter().any(|a| a == "-J" || a == "--json") {
         crate::OutputFormat::Json

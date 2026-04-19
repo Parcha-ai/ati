@@ -108,6 +108,19 @@ pub struct Provider {
     /// Default timeout in seconds (default: 120)
     #[serde(default)]
     pub cli_timeout_secs: Option<u64>,
+    /// Named flags whose value is an output file path the proxy must capture.
+    /// Example: `["--output", "-o", "--out"]`. When the agent passes one of these
+    /// flags + a value, the proxy substitutes a temp path, runs the CLI, then
+    /// reads the file back and base64s it into the response. The sandbox-side
+    /// CLI writes those bytes to the original path the agent specified.
+    #[serde(default)]
+    pub cli_output_args: Vec<String>,
+    /// Subcommand prefix → 0-based positional argument index that designates
+    /// an output file path. Example: `{"browse screenshot": 0}` matches
+    /// `bb browse screenshot /tmp/x.png` — arg 0 of the remaining positional
+    /// args (after the matched prefix) is the output path.
+    #[serde(default)]
+    pub cli_output_positional: HashMap<String, usize>,
 
     // --- OpenAPI provider fields (handler = "openapi") ---
     /// Path (relative to ~/.ati/specs/) or URL to OpenAPI spec (JSON or YAML)
@@ -453,6 +466,8 @@ impl CachedProvider {
             cli_default_args: self.cli_default_args.clone(),
             cli_env: self.cli_env.clone(),
             cli_timeout_secs: self.cli_timeout_secs,
+            cli_output_args: Vec::new(),
+            cli_output_positional: HashMap::new(),
             auth_generator: None,
             category: None,
             skills: self.skills.clone(),
@@ -843,6 +858,8 @@ pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
         cli_default_args: Vec::new(),
         cli_env: HashMap::new(),
         cli_timeout_secs: None,
+        cli_output_args: Vec::new(),
+        cli_output_positional: HashMap::new(),
         openapi_spec: None,
         openapi_include_tags: Vec::new(),
         openapi_exclude_tags: Vec::new(),

@@ -28,6 +28,10 @@ pub enum CliError {
     Io(#[from] std::io::Error),
     #[error("Credential file error: {0}")]
     CredentialFile(String),
+    #[error("Captured output '{path}' exceeds ATI_CLI_MAX_OUTPUT_BYTES ({limit} bytes)")]
+    OutputTooLarge { path: String, limit: u64 },
+    #[error("Captured output '{path}' was not produced by the CLI")]
+    OutputMissing { path: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +179,250 @@ pub fn resolve_cli_env(
 }
 
 // ---------------------------------------------------------------------------
+// Output capture — rewrite agent-supplied output paths to proxy temp paths
+// ---------------------------------------------------------------------------
+
+/// Default per-file cap on captured CLI output size (500 MB).
+pub const DEFAULT_CLI_MAX_OUTPUT_BYTES: u64 = 500 * 1024 * 1024;
+
+fn cli_max_output_bytes() -> u64 {
+    std::env::var("ATI_CLI_MAX_OUTPUT_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_CLI_MAX_OUTPUT_BYTES)
+}
+
+/// One captured output: agent-supplied path + the proxy-side temp path the
+/// subprocess actually wrote to.
+#[derive(Debug, Clone)]
+pub struct CapturedOutput {
+    /// Path the agent passed to the CLI (sandbox-side).
+    pub original_path: String,
+    /// Temp path on the proxy that the rewritten arg pointed at.
+    pub temp_path: PathBuf,
+}
+
+/// Apply a provider's output-capture rules to a flat arg list, producing a
+/// rewritten arg list (with temp paths in place of caller paths) plus a
+/// list of captures the proxy must read back after the subprocess exits.
+///
+/// Rules applied in order:
+/// 1. Named flags from `cli_output_args`: any matching `--flag value` pair has
+///    its value rewritten to a temp path. Both `--flag value` and `--flag=value`
+///    forms are supported.
+/// 2. Positional captures from `cli_output_positional`: longest matching
+///    subcommand prefix (after stripping `cli_default_args`) wins; the
+///    configured positional index within the *remaining* args is rewritten.
+pub fn apply_output_captures(
+    provider: &Provider,
+    raw_args: &[String],
+) -> Result<(Vec<String>, Vec<CapturedOutput>), CliError> {
+    let mut rewritten: Vec<String> = raw_args.to_vec();
+    let mut captures: Vec<CapturedOutput> = Vec::new();
+
+    // 1. Named flag rewriting
+    if !provider.cli_output_args.is_empty() {
+        let mut i = 0;
+        while i < rewritten.len() {
+            let arg = rewritten[i].clone();
+            // --flag=value form
+            if let Some(eq_idx) = arg.find('=') {
+                let (flag, value) = arg.split_at(eq_idx);
+                if provider
+                    .cli_output_args
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case(flag))
+                {
+                    let original = value[1..].to_string();
+                    let temp = make_temp_for(&original)?;
+                    rewritten[i] = format!("{}={}", flag, temp.display());
+                    captures.push(CapturedOutput {
+                        original_path: original,
+                        temp_path: temp,
+                    });
+                    i += 1;
+                    continue;
+                }
+            }
+            // --flag value form
+            if provider
+                .cli_output_args
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(&arg))
+                && i + 1 < rewritten.len()
+            {
+                let original = rewritten[i + 1].clone();
+                let temp = make_temp_for(&original)?;
+                rewritten[i + 1] = temp.to_string_lossy().into_owned();
+                captures.push(CapturedOutput {
+                    original_path: original,
+                    temp_path: temp,
+                });
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    // 2. Positional rewriting — match the longest subcommand prefix
+    if !provider.cli_output_positional.is_empty() {
+        // Build the list of non-flag (positional) tokens with their indices,
+        // skipping flags and their inline values.
+        let positionals: Vec<(usize, String)> = rewritten
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| {
+                if s.starts_with('-') {
+                    None
+                } else {
+                    Some((idx, s.clone()))
+                }
+            })
+            .collect();
+
+        // Find the longest configured prefix (by token count) that matches the
+        // start of `positionals`.
+        let mut best: Option<(usize, usize)> = None; // (prefix_token_count, output_index)
+        for (prefix, idx) in &provider.cli_output_positional {
+            let prefix_tokens: Vec<&str> = prefix.split_whitespace().collect();
+            if prefix_tokens.is_empty() {
+                continue;
+            }
+            if positionals.len() < prefix_tokens.len() + idx + 1 {
+                continue;
+            }
+            let prefix_matches = prefix_tokens
+                .iter()
+                .enumerate()
+                .all(|(i, tok)| positionals[i].1 == *tok);
+            if !prefix_matches {
+                continue;
+            }
+            let count = prefix_tokens.len();
+            if best.is_none_or(|(c, _)| count > c) {
+                best = Some((count, *idx));
+            }
+        }
+
+        if let Some((prefix_count, output_idx)) = best {
+            let target_positional_idx = prefix_count + output_idx;
+            if let Some((real_idx, original)) = positionals.get(target_positional_idx).cloned() {
+                let temp = make_temp_for(&original)?;
+                rewritten[real_idx] = temp.to_string_lossy().into_owned();
+                captures.push(CapturedOutput {
+                    original_path: original,
+                    temp_path: temp,
+                });
+            }
+        }
+    }
+
+    Ok((rewritten, captures))
+}
+
+/// Build a unique proxy-side temp path that preserves the file extension of
+/// `original_path`, so CLIs that key behavior off extension (e.g. `bb`'s
+/// `--type` defaulting via `.png`/`.jpeg`) still get the right hint.
+fn make_temp_for(original_path: &str) -> Result<PathBuf, CliError> {
+    let ext = Path::new(original_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let suffix: u64 = rand::random();
+    let pid = std::process::id();
+    let name = if ext.is_empty() {
+        format!(".ati-cli-out-{pid}-{suffix:016x}")
+    } else {
+        format!(".ati-cli-out-{pid}-{suffix:016x}.{ext}")
+    };
+    Ok(std::env::temp_dir().join(name))
+}
+
+/// Read each captured temp path, base64-encode, build the JSON map keyed by
+/// the agent's original paths. Always cleans up temp files (even on size cap
+/// violation), and never silently skips a missing file — agent supplied a
+/// path expecting a result, so missing = error.
+fn collect_capture_results(
+    captures: &[CapturedOutput],
+) -> Result<HashMap<String, serde_json::Value>, CliError> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let max = cli_max_output_bytes();
+    let mut out = HashMap::with_capacity(captures.len());
+
+    for cap in captures {
+        let bytes_result = std::fs::read(&cap.temp_path);
+        // Cleanup happens regardless of read outcome.
+        let _ = std::fs::remove_file(&cap.temp_path);
+
+        let bytes = match bytes_result {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CliError::OutputMissing {
+                    path: cap.original_path.clone(),
+                });
+            }
+            Err(e) => return Err(CliError::Io(e)),
+        };
+
+        if (bytes.len() as u64) > max {
+            return Err(CliError::OutputTooLarge {
+                path: cap.original_path.clone(),
+                limit: max,
+            });
+        }
+
+        let entry = serde_json::json!({
+            "content_base64": B64.encode(&bytes),
+            "size_bytes": bytes.len(),
+            "content_type": guess_content_type(&cap.original_path),
+        });
+        out.insert(cap.original_path.clone(), entry);
+    }
+    Ok(out)
+}
+
+/// Best-effort MIME type from a path's extension. Mirrors the small table in
+/// `cli/file_manager.rs::guess_content_type`. Falls back to octet-stream.
+fn guess_content_type(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    let ext = lower.rsplit('.').next().unwrap_or("");
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "html" | "htm" => "text/html",
+        "md" => "text/markdown",
+        "txt" | "log" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Best-effort cleanup — used when the subprocess errors before we get to the
+/// normal collection path.
+fn discard_captures(captures: &[CapturedOutput]) {
+    for cap in captures {
+        let _ = std::fs::remove_file(&cap.temp_path);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Execute CLI tool
 // ---------------------------------------------------------------------------
 
@@ -252,10 +500,15 @@ pub async fn execute_with_gen(
         }
     }
 
+    // Apply output-capture rewriting BEFORE the subprocess runs. The agent's
+    // intended output paths are swapped for proxy-side temp paths; the originals
+    // are preserved on `captures` so we can map captured bytes back to them.
+    let (rewritten_args, captures) = apply_output_captures(provider, raw_args)?;
+
     // Clone values for the blocking closure
     let command = cli_command.to_string();
     let default_args = provider.cli_default_args.clone();
-    let extra_args = raw_args.to_vec();
+    let extra_args = rewritten_args;
     let env_snapshot = final_env;
     let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
@@ -271,30 +524,53 @@ pub async fn execute_with_gen(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| CliError::Spawn(format!("{command}: {e}")))?;
+        .map_err(|e| {
+            discard_captures(&captures);
+            CliError::Spawn(format!("{command}: {e}"))
+        })?;
 
     // Apply timeout — kill_on_drop ensures the child is killed if we bail early
-    let output = tokio::time::timeout(timeout_dur, child.wait_with_output())
-        .await
-        .map_err(|_| CliError::Timeout(timeout_secs))?
-        .map_err(CliError::Io)?;
+    let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            discard_captures(&captures);
+            return Err(CliError::Io(e));
+        }
+        Err(_) => {
+            discard_captures(&captures);
+            return Err(CliError::Timeout(timeout_secs));
+        }
+    };
 
     // cred_files still alive here — drop explicitly after subprocess exits
     drop(cred_files);
 
     if !output.status.success() {
+        discard_captures(&captures);
         let code = output.status.code().unwrap_or(-1);
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(CliError::NonZeroExit { code, stderr });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value = match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-        Ok(v) => v,
-        Err(_) => serde_json::Value::String(stdout.trim().to_string()),
-    };
 
-    Ok(value)
+    // No captures configured → preserve the legacy response shape exactly:
+    // either parsed JSON or the trimmed stdout string.
+    if captures.is_empty() {
+        let value = match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+            Ok(v) => v,
+            Err(_) => serde_json::Value::String(stdout.trim().to_string()),
+        };
+        return Ok(value);
+    }
+
+    // Captures present → return a structured envelope so the sandbox CLI can
+    // distinguish "stdout text" from "files the agent should write to disk".
+    let outputs = collect_capture_results(&captures)?;
+    Ok(serde_json::json!({
+        "stdout": stdout.trim().to_string(),
+        "outputs": outputs,
+    }))
 }
 
 #[cfg(test)]

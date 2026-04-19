@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth;
 pub mod call;
+pub mod cli_capture;
 pub mod common;
 pub mod file_manager;
 pub mod help;
