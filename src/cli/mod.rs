@@ -2,6 +2,7 @@ pub mod audit;
 pub mod auth;
 pub mod call;
 pub mod common;
+pub mod file_manager;
 pub mod help;
 pub mod init;
 pub mod keys;

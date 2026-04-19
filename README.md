@@ -1,6 +1,6 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Parcha-ai/ati/ci.yml?branch=main&label=CI)](https://github.com/Parcha-ai/ati/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/Parcha-ai/ati)](LICENSE)
-[![663 tests](https://img.shields.io/badge/tests-663-brightgreen)](#building)
+[![753 tests](https://img.shields.io/badge/tests-753-brightgreen)](#building)
 [![PyPI](https://img.shields.io/pypi/v/ati-client)](https://pypi.org/project/ati-client/)
 [![crates.io](https://img.shields.io/crates/v/agent-tools-interface)](https://crates.io/crates/agent-tools-interface)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-blue)](#building)
@@ -293,9 +293,9 @@ When JWT validation is configured, ATI treats tokens strictly: invalid or missin
 
 ---
 
-## Five Provider Types
+## Provider Types
 
-Every provider type produces the same interface: `ati run <tool> --arg value`. The agent doesn't know or care what's behind it.
+Every provider type produces the same interface: `ati run <tool> --arg value`. The agent doesn't know or care what's behind it. ATI ships with five user-configurable provider types (OpenAPI, MCP, Skills, CLI, HTTP) plus one built-in (`file_manager`).
 
 ### OpenAPI Specs — Auto-discovered from any spec
 
@@ -471,6 +471,36 @@ ati run medical_search --term "CRISPR gene therapy" --retmax 5
 ```
 
 Auth types: `bearer`, `header`, `query`, `basic`, `oauth2`, `none`.
+
+### File Manager — Built-in `download` and `upload`
+
+ATI ships with a virtual `file_manager` provider that exposes two tools without any manifest. It exists so agents in hardened sandboxes (which can only reach the ATI proxy) can still pull bytes from arbitrary URLs and push files to object storage.
+
+```bash
+# "I have a URL, give me the bytes." Writes to the local path.
+ati run file_manager:download \
+  --url "https://example.com/output.mp4" \
+  --out /tmp/clip.mp4
+# → {"success": true, "path": "/tmp/clip.mp4", "size_bytes": 8655798,
+#    "content_type": "video/mp4", "source_url": "..."}
+
+# Or return base64 inline (small files / data pipelines)
+ati run file_manager:download --url "https://example.com/report.csv" --inline true
+
+# Push a local file back out — returns a public URL
+ati run file_manager:upload --path /tmp/narration.mp3
+# → {"success": true, "url": "https://storage.googleapis.com/.../narration.mp3",
+#    "size_bytes": 818826, "content_type": "audio/mpeg"}
+```
+
+Download parameters: `--out <path>`, `--inline true`, `--max-bytes <n>` (default 500 MB), `--timeout <seconds>` (default 120), `--headers <json>`, `--follow-redirects true|false`. SSRF protection is honored — private/internal addresses are blocked when `ATI_SSRF_PROTECTION=1` is set.
+
+Upload backend defaults to GCS. Configure on the proxy via:
+- `ATI_UPLOAD_BUCKET=<bucket>` — required
+- `ATI_UPLOAD_PREFIX=<prefix>` — optional (default `ati-uploads`)
+- keyring key `gcp_credentials` — service account JSON
+
+In proxy mode the proxy performs the network fetch and returns base64 to the sandbox, which writes it to disk. In local mode ATI fetches directly. Both modes share the same JSON contract.
 
 ---
 

@@ -560,6 +560,25 @@ async fn handle_call(
                 ),
             }
         }
+        "file_manager" => {
+            let args_map = call_req.args_as_map();
+            match dispatch_file_manager(&call_req.tool_name, &args_map, &state.keyring).await {
+                Ok(result) => (
+                    StatusCode::OK,
+                    Json(CallResponse {
+                        result,
+                        error: None,
+                    }),
+                ),
+                Err((status, msg)) => (
+                    status,
+                    Json(CallResponse {
+                        result: Value::Null,
+                        error: Some(msg),
+                    }),
+                ),
+            }
+        }
         _ => {
             let args_map = call_req.args_as_map();
             let raw_response = match http::execute_tool_with_gen(
@@ -1934,6 +1953,110 @@ pub async fn run(
 }
 
 /// Write an audit entry from the proxy server. Failures are silently ignored.
+/// Dispatch a `file_manager:*` tool call. Returns either a JSON payload or an
+/// (HTTP status, message) error for the caller to forward.
+async fn dispatch_file_manager(
+    tool_name: &str,
+    args: &HashMap<String, Value>,
+    keyring: &Keyring,
+) -> Result<Value, (StatusCode, String)> {
+    use crate::core::file_manager::{
+        self, DownloadArgs, FileManagerError, UploadArgs,
+    };
+
+    match tool_name {
+        "file_manager:download" => {
+            let parsed = DownloadArgs::from_value(args).map_err(|e| match e {
+                FileManagerError::MissingArg(_) | FileManagerError::InvalidArg { .. } => {
+                    (StatusCode::BAD_REQUEST, e.to_string())
+                }
+                FileManagerError::BadHeader { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
+                other => (StatusCode::BAD_REQUEST, other.to_string()),
+            })?;
+            let result = file_manager::fetch_bytes(&parsed).await.map_err(|e| match e {
+                FileManagerError::PrivateUrl(_) => (StatusCode::FORBIDDEN, e.to_string()),
+                FileManagerError::Upstream { status, .. } => (
+                    StatusCode::from_u16(status.max(400).min(599))
+                        .unwrap_or(StatusCode::BAD_GATEWAY),
+                    e.to_string(),
+                ),
+                FileManagerError::SizeCap { .. } => (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
+                FileManagerError::Http { .. } | FileManagerError::InvalidUrl(_) => {
+                    (StatusCode::BAD_GATEWAY, e.to_string())
+                }
+                other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+            })?;
+            Ok(file_manager::build_download_response(&result))
+        }
+        "file_manager:upload" => {
+            let parsed = UploadArgs::from_wire(args)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            match upload_via_gcs(parsed, keyring).await {
+                Ok(v) => Ok(v),
+                Err(FileManagerError::UploadNotConfigured) => Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    FileManagerError::UploadNotConfigured.to_string(),
+                )),
+                Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
+            }
+        }
+        other => Err((
+            StatusCode::NOT_FOUND,
+            format!("Unknown file_manager tool: '{other}'"),
+        )),
+    }
+}
+
+/// Upload to the proxy's configured GCS bucket. Configuration:
+/// - `ATI_UPLOAD_BUCKET` env var — target bucket
+/// - `ATI_UPLOAD_PREFIX` env var (optional) — prefix prepended to object keys (default: "ati-uploads")
+/// - keyring key `gcp_credentials` — service account JSON
+async fn upload_via_gcs(
+    args: crate::core::file_manager::UploadArgs,
+    keyring: &Keyring,
+) -> Result<Value, crate::core::file_manager::FileManagerError> {
+    use crate::core::file_manager::{FileManagerError, UploadResult};
+
+    let bucket = std::env::var("ATI_UPLOAD_BUCKET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or(FileManagerError::UploadNotConfigured)?;
+    let prefix = std::env::var("ATI_UPLOAD_PREFIX")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "ati-uploads".to_string());
+    let service_account_json = keyring
+        .get("gcp_credentials")
+        .ok_or_else(|| FileManagerError::Upload("gcp_credentials missing from keyring".into()))?
+        .to_string();
+
+    let content_type = args
+        .content_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let size_bytes = args.bytes.len() as u64;
+
+    // Object key = <prefix>/<utc-date>/<uuid>-<filename>
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    let uuid = uuid::Uuid::new_v4();
+    let object_name = format!("{prefix}/{date}/{uuid}-{}", args.filename);
+
+    let client = crate::core::gcs::GcsClient::new_read_write(bucket, &service_account_json)
+        .map_err(|e| FileManagerError::Upload(e.to_string()))?;
+    let url = client
+        .upload_object(&object_name, args.bytes, &content_type)
+        .await
+        .map_err(|e| FileManagerError::Upload(e.to_string()))?;
+
+    Ok(crate::core::file_manager::build_upload_response(
+        &UploadResult {
+            url,
+            size_bytes,
+            content_type,
+        },
+    ))
+}
+
 fn write_proxy_audit(
     call_req: &CallRequest,
     agent_sub: &str,

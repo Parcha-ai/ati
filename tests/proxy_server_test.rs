@@ -219,8 +219,10 @@ async fn test_health_endpoint() {
 
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["tools"], 3); // test_search + test_create + test_api:get_data
-    assert_eq!(json["providers"], 1);
+    // test_search + test_create + test_api:get_data + file_manager:download + file_manager:upload
+    assert_eq!(json["tools"], 5);
+    // The user-defined provider plus the built-in `file_manager` provider.
+    assert_eq!(json["providers"], 2);
     assert!(json["version"].as_str().is_some());
 }
 

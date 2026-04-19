@@ -641,18 +641,22 @@ impl ManifestRegistry {
             }
         }
 
-        Ok(ManifestRegistry {
+        let mut registry = ManifestRegistry {
             manifests,
             tool_index,
-        })
+        };
+        register_file_manager_provider(&mut registry);
+        Ok(registry)
     }
 
     /// Create an empty registry (no manifests loaded).
     pub fn empty() -> Self {
-        ManifestRegistry {
+        let mut registry = ManifestRegistry {
             manifests: Vec::new(),
             tool_index: HashMap::new(),
-        }
+        };
+        register_file_manager_provider(&mut registry);
+        registry
     }
 
     /// Look up a tool by name. Returns the provider and tool definition.
@@ -801,4 +805,116 @@ impl Provider {
     pub fn mcp_transport_type(&self) -> &str {
         self.mcp_transport.as_deref().unwrap_or("stdio")
     }
+
+    /// Returns true if this provider uses the built-in file_manager handler.
+    pub fn is_file_manager(&self) -> bool {
+        self.handler == "file_manager"
+    }
+}
+
+/// Register the virtual `file_manager` provider (download + upload tools).
+/// Idempotent — safe to call multiple times.
+pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
+    if registry.has_provider("file_manager") {
+        return;
+    }
+
+    let provider = Provider {
+        name: "file_manager".to_string(),
+        description: "Generic binary download/upload for agents".to_string(),
+        base_url: String::new(),
+        auth_type: AuthType::None,
+        auth_key_name: None,
+        auth_header_name: None,
+        auth_query_name: None,
+        auth_value_prefix: None,
+        extra_headers: HashMap::new(),
+        oauth2_token_url: None,
+        auth_secret_name: None,
+        oauth2_basic_auth: false,
+        internal: false,
+        handler: "file_manager".to_string(),
+        mcp_transport: None,
+        mcp_command: None,
+        mcp_args: Vec::new(),
+        mcp_url: None,
+        mcp_env: HashMap::new(),
+        cli_command: None,
+        cli_default_args: Vec::new(),
+        cli_env: HashMap::new(),
+        cli_timeout_secs: None,
+        openapi_spec: None,
+        openapi_include_tags: Vec::new(),
+        openapi_exclude_tags: Vec::new(),
+        openapi_include_operations: Vec::new(),
+        openapi_exclude_operations: Vec::new(),
+        openapi_max_operations: None,
+        openapi_overrides: HashMap::new(),
+        auth_generator: None,
+        category: Some("file_manager".to_string()),
+        skills: Vec::new(),
+    };
+
+    let download_schema = serde_json::json!({
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+            "url": {"type": "string", "description": "URL to fetch bytes from"},
+            "out": {"type": "string", "description": "Local path to write bytes; if omitted, returns base64 inline"},
+            "inline": {"type": "boolean", "description": "Return bytes as base64 in the response instead of writing to disk"},
+            "max_bytes": {"type": "integer", "description": "Abort if body exceeds this many bytes (default 500 MB)"},
+            "timeout": {"type": "integer", "description": "Request timeout in seconds (default 120)"},
+            "headers": {"type": "object", "description": "Extra request headers, e.g. {\"Authorization\": \"Bearer abc\"}"},
+            "follow_redirects": {"type": "boolean", "description": "Follow 3xx redirects (default true)"}
+        }
+    });
+
+    let upload_schema = serde_json::json!({
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+            "path": {"type": "string", "description": "Local file path to upload"},
+            "content_type": {"type": "string", "description": "Override MIME type (default: inferred from extension)"},
+            "object_name": {"type": "string", "description": "Object key to store as (default: auto-generated with file extension)"}
+        }
+    });
+
+    let tools = vec![
+        Tool {
+            name: "file_manager:download".to_string(),
+            description: "Download bytes from a URL. Writes to --out <path> or returns base64 inline.".to_string(),
+            endpoint: String::new(),
+            method: HttpMethod::Post,
+            scope: Some("tool:file_manager:download".to_string()),
+            input_schema: Some(download_schema),
+            response: None,
+            tags: vec!["file".to_string(), "download".to_string(), "binary".to_string()],
+            hint: Some("Use for 'I have a URL, give me the bytes' — images, video, audio, PDFs, CSVs, ZIPs.".to_string()),
+            examples: vec![
+                "ati run file_manager:download --url https://example.com/file.mp4 --out /tmp/clip.mp4".to_string(),
+                "ati run file_manager:download --url https://example.com/data.csv --inline true".to_string(),
+            ],
+        },
+        Tool {
+            name: "file_manager:upload".to_string(),
+            description: "Upload a local file to the configured object store, return a public URL.".to_string(),
+            endpoint: String::new(),
+            method: HttpMethod::Post,
+            scope: Some("tool:file_manager:upload".to_string()),
+            input_schema: Some(upload_schema),
+            response: None,
+            tags: vec!["file".to_string(), "upload".to_string(), "binary".to_string()],
+            hint: Some("Upload a local file to object storage (GCS by default) and get a public URL.".to_string()),
+            examples: vec![
+                "ati run file_manager:upload --path /tmp/narration.mp3".to_string(),
+                "ati run file_manager:upload --path /tmp/report.pdf --content-type application/pdf".to_string(),
+            ],
+        },
+    ];
+
+    let mi = registry.manifests.len();
+    for (ti, tool) in tools.iter().enumerate() {
+        registry.tool_index.insert(tool.name.clone(), (mi, ti));
+    }
+    registry.manifests.push(Manifest { provider, tools });
 }

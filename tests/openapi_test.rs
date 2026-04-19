@@ -227,7 +227,11 @@ openapi_include_tags = ["pet"]
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
-    let tools = registry.list_public_tools();
+    let tools: Vec<_> = registry
+        .list_public_tools()
+        .into_iter()
+        .filter(|(p, _)| p.name == "petstore")
+        .collect();
     // Only pet-tagged operations: getPetById, deletePet, addPet, findPetsByStatus
     assert_eq!(
         tools.len(),
@@ -289,7 +293,11 @@ openapi_max_operations = 2
     let registry =
         ati::core::manifest::ManifestRegistry::load(&dir.path().join("manifests")).unwrap();
 
-    let tools = registry.list_public_tools();
+    let tools: Vec<_> = registry
+        .list_public_tools()
+        .into_iter()
+        .filter(|(p, _)| p.name == "petstore")
+        .collect();
     assert_eq!(
         tools.len(),
         2,
@@ -508,8 +516,12 @@ auth_type = "none"
 
     // Should not panic — graceful degradation
     let registry = ati::core::manifest::ManifestRegistry::load(&manifests_dir).unwrap();
-    // Provider loads but with 0 tools
-    let tools = registry.list_public_tools();
+    // Provider loads but with 0 tools (excluding the built-in file_manager provider)
+    let tools: Vec<_> = registry
+        .list_public_tools()
+        .into_iter()
+        .filter(|(p, _)| p.name != "file_manager")
+        .collect();
     assert_eq!(tools.len(), 0);
 }
 
