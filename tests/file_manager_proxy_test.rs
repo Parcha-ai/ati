@@ -298,6 +298,54 @@ bucket = "test-bucket"
     );
 }
 
+/// Regression: axum's default 2 MB body limit (and the previous hardcoded
+/// 10 MB `to_bytes` cap in handle_call) rejected large upload payloads
+/// before the handler could run. Ship a 3 MB payload to make sure neither
+/// ceiling fires. We don't need the upload to succeed — just to get past the
+/// body-read step (403/503 for missing destination config is fine).
+#[tokio::test]
+async fn proxy_accepts_upload_body_over_2mb() {
+    let _g = env_mutex().lock().await;
+    clear_file_manager_env();
+    let app = build_app();
+
+    // 3 MB of zeroes — base64 inflates to ~4 MB over the wire.
+    let bytes = vec![0u8; 3 * 1024 * 1024];
+    let body = json!({
+        "tool_name": "file_manager:upload",
+        "args": {
+            "filename": "big.bin",
+            "content_type": "application/octet-stream",
+            "content_base64": B64.encode(&bytes),
+        },
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    // Not BAD_REQUEST (that'd be our body-read limit) and not PAYLOAD_TOO_LARGE
+    // from axum. SERVICE_UNAVAILABLE is fine — it means the handler ran and
+    // saw "no destinations configured", which is exactly what we want to
+    // assert the body made it through.
+    assert_ne!(
+        resp.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "axum default body limit kicked in — DefaultBodyLimit layer missing?"
+    );
+    let status = resp.status();
+    let json = body_json(resp.into_body()).await;
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(
+        !err.contains("length limit exceeded"),
+        "handle_call body cap rejected the payload: status={status} error={err}"
+    );
+    // Expected path: body parsed, upload fails because no destinations configured.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
 #[tokio::test]
 async fn proxy_upload_no_destination_no_default_returns_503() {
     let _g = env_mutex().lock().await;

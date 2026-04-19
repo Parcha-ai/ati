@@ -348,8 +348,13 @@ async fn handle_call(
     // Extract JWT claims from request extensions (set by auth middleware)
     let claims = req.extensions().get::<TokenClaims>().cloned();
 
-    // Parse request body
-    let body_bytes = match axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await {
+    // Parse request body. The ceiling must accommodate the worst-case upload
+    // payload: `file_manager::MAX_UPLOAD_BYTES` of raw bytes, base64-inflated
+    // (~1.34×), plus a few KB of JSON framing. Anti-abuse is enforced
+    // downstream by per-tool limits (`max_bytes` on downloads, `MAX_UPLOAD_BYTES`
+    // on uploads) and by JWT scope + rate limits — this is just the outer
+    // wire cap.
+    let body_bytes = match axum::body::to_bytes(req.into_body(), max_call_body_bytes()).await {
         Ok(b) => b,
         Err(e) => {
             return (
@@ -1753,7 +1758,22 @@ async fn auth_middleware(
 // --- Router builder ---
 
 /// Build the axum Router from a pre-constructed ProxyState.
+/// Outer body-size ceiling for `POST /call`. Large enough to carry the worst
+/// case `file_manager:upload` payload (`MAX_UPLOAD_BYTES` of raw bytes,
+/// base64-inflated ~4/3×, plus a few KB of JSON framing).
+///
+/// Per-tool limits (`max_bytes`, `MAX_UPLOAD_BYTES`) plus JWT scopes + rate
+/// limits are the real gates — this is just the outermost wrapper check.
+fn max_call_body_bytes() -> usize {
+    (crate::core::file_manager::MAX_UPLOAD_BYTES as usize)
+        .saturating_mul(4)
+        .saturating_div(3)
+        .saturating_add(8 * 1024)
+}
+
 pub fn build_router(state: Arc<ProxyState>) -> Router {
+    use axum::extract::DefaultBodyLimit;
+
     Router::new()
         .route("/call", post(handle_call))
         .route("/help", post(handle_help))
@@ -1773,6 +1793,11 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/skillati/{name}/ref/{reference}", get(handle_skillati_ref))
         .route("/health", get(handle_health))
         .route("/.well-known/jwks.json", get(handle_jwks))
+        // Raise axum's default 2 MB body-extractor limit so request bodies
+        // carrying base64-encoded upload payloads aren't rejected before the
+        // handler runs. `handle_call` still enforces its own
+        // `max_call_body_bytes()` cap when streaming the body to bytes.
+        .layer(DefaultBodyLimit::max(max_call_body_bytes()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
