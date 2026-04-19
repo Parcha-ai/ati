@@ -20,6 +20,20 @@ use ati::core::manifest::ManifestRegistry;
 use ati::core::skill::SkillRegistry;
 use ati::proxy::server::{build_router, ProxyState};
 
+/// Serialize tests that mutate process-wide env vars (ATI_DOWNLOAD_ALLOWLIST,
+/// ATI_UPLOAD_BUCKET). All tests in this file take this lock to keep the env
+/// stable across the assertion window.
+fn env_mutex() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn clear_file_manager_env() {
+    std::env::remove_var("ATI_DOWNLOAD_ALLOWLIST");
+    std::env::remove_var("ATI_UPLOAD_BUCKET");
+    std::env::remove_var("ATI_UPLOAD_PREFIX");
+}
+
 fn build_app() -> axum::Router {
     // Empty registry — file_manager is auto-registered.
     let registry = ManifestRegistry::empty();
@@ -42,6 +56,8 @@ async fn body_json(body: Body) -> Value {
 
 #[tokio::test]
 async fn proxy_dispatches_file_manager_download_happy_path() {
+    let _g = env_mutex().lock().await;
+    clear_file_manager_env();
     let upstream = MockServer::start().await;
     let payload = b"the quick brown fox".to_vec();
     Mock::given(method("GET"))
@@ -81,6 +97,8 @@ async fn proxy_dispatches_file_manager_download_happy_path() {
 
 #[tokio::test]
 async fn proxy_returns_payload_too_large_when_size_cap_exceeded() {
+    let _g = env_mutex().lock().await;
+    clear_file_manager_env();
     let upstream = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/big.bin"))
@@ -116,6 +134,8 @@ async fn proxy_returns_payload_too_large_when_size_cap_exceeded() {
 
 #[tokio::test]
 async fn proxy_propagates_upstream_404_status() {
+    let _g = env_mutex().lock().await;
+    clear_file_manager_env();
     let upstream = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/missing"))
@@ -145,6 +165,8 @@ async fn proxy_propagates_upstream_404_status() {
 
 #[tokio::test]
 async fn proxy_rejects_missing_url_with_bad_request() {
+    let _g = env_mutex().lock().await;
+    clear_file_manager_env();
     let app = build_app();
     let body = json!({
         "tool_name": "file_manager:download",
@@ -161,9 +183,37 @@ async fn proxy_rejects_missing_url_with_bad_request() {
 }
 
 #[tokio::test]
+async fn proxy_returns_forbidden_when_host_not_in_allowlist() {
+    let _g = env_mutex().lock().await;
+    clear_file_manager_env();
+    std::env::set_var("ATI_DOWNLOAD_ALLOWLIST", "only.allowed.test");
+    let app = build_app();
+
+    let body = json!({
+        "tool_name": "file_manager:download",
+        "args": {"url": "https://this-is-not-allowed.test/x"},
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let json = body_json(resp.into_body()).await;
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("not in the download allowlist"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn proxy_upload_without_bucket_returns_503() {
-    // Don't set ATI_UPLOAD_BUCKET — should return 503.
-    std::env::remove_var("ATI_UPLOAD_BUCKET");
+    let _g = env_mutex().lock().await;
+    clear_file_manager_env();
     let app = build_app();
 
     let body = json!({

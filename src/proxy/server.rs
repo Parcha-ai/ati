@@ -1975,6 +1975,9 @@ async fn dispatch_file_manager(
                 .await
                 .map_err(|e| match e {
                     FileManagerError::PrivateUrl(_) => (StatusCode::FORBIDDEN, e.to_string()),
+                    FileManagerError::HostNotAllowed { .. } => {
+                        (StatusCode::FORBIDDEN, e.to_string())
+                    }
                     FileManagerError::Upstream { status, .. } => (
                         StatusCode::from_u16(status.clamp(400, 599))
                             .unwrap_or(StatusCode::BAD_GATEWAY),

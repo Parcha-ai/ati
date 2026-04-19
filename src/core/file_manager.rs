@@ -46,6 +46,8 @@ pub enum FileManagerError {
     InvalidArg { name: &'static str, reason: String },
     #[error("URL is not allowed (private/internal address): {0}")]
     PrivateUrl(String),
+    #[error("Host '{host}' is not in the download allowlist")]
+    HostNotAllowed { host: String },
     #[error("Invalid URL: {0}")]
     InvalidUrl(String),
     #[error("HTTP error fetching '{url}': {source}")]
@@ -251,14 +253,74 @@ pub struct DownloadResult {
     pub source_url: String,
 }
 
+/// Read the `ATI_DOWNLOAD_ALLOWLIST` env var. Returns `None` if unset or empty
+/// (meaning "no allowlist configured"); returns `Some(patterns)` otherwise.
+///
+/// Patterns are comma-separated and case-insensitive. Each pattern is one of:
+/// - exact host: `v3b.fal.media`
+/// - subdomain wildcard: `*.fal.media` matches `v3b.fal.media`, `cdn.fal.media`, etc.
+/// - bare wildcard: `*` matches anything (NOT recommended — defeats the purpose)
+fn allowlist_patterns() -> Option<Vec<String>> {
+    let raw = std::env::var("ATI_DOWNLOAD_ALLOWLIST").ok()?;
+    let patterns: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if patterns.is_empty() {
+        None
+    } else {
+        Some(patterns)
+    }
+}
+
+/// Returns true if `host` matches any of the configured allowlist patterns.
+fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    let host = host.to_lowercase();
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        return host == suffix || host.ends_with(&format!(".{suffix}"));
+    }
+    host == pattern
+}
+
+/// Reject the URL if `ATI_DOWNLOAD_ALLOWLIST` is set and the host doesn't match.
+/// When the env var is unset or empty, downloads to any (non-private) host are
+/// allowed — local-mode operators who want a wide-open dev experience can leave
+/// the allowlist off; production proxies should always set it.
+pub fn enforce_download_allowlist(url: &str) -> Result<(), FileManagerError> {
+    let patterns = match allowlist_patterns() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| FileManagerError::InvalidUrl(format!("could not parse URL: {e}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| FileManagerError::InvalidUrl("URL has no host component".into()))?;
+
+    if patterns.iter().any(|p| host_matches_pattern(host, p)) {
+        Ok(())
+    } else {
+        Err(FileManagerError::HostNotAllowed {
+            host: host.to_string(),
+        })
+    }
+}
+
 /// Perform the actual HTTP fetch. Streams the body and aborts if it exceeds `max_bytes`.
 ///
-/// Applies SSRF protection per `crate::core::http::validate_url_not_private`.
+/// Applies SSRF protection per `crate::core::http::validate_url_not_private`,
+/// then enforces the download host allowlist (env `ATI_DOWNLOAD_ALLOWLIST`).
 pub async fn fetch_bytes(args: &DownloadArgs) -> Result<DownloadResult, FileManagerError> {
     crate::core::http::validate_url_not_private(&args.url).map_err(|e| match e {
         crate::core::http::HttpError::SsrfBlocked(url) => FileManagerError::PrivateUrl(url),
         other => FileManagerError::InvalidUrl(other.to_string()),
     })?;
+
+    enforce_download_allowlist(&args.url)?;
 
     let redirect_policy = if args.follow_redirects {
         reqwest::redirect::Policy::limited(10)
@@ -581,5 +643,27 @@ mod tests {
         assert_eq!(v["size_bytes"], 5);
         assert_eq!(v["content_type"], "text/plain");
         assert!(v["content_base64"].as_str().is_some());
+    }
+
+    #[test]
+    fn host_pattern_exact_match() {
+        assert!(host_matches_pattern("v3b.fal.media", "v3b.fal.media"));
+        assert!(!host_matches_pattern("evil.com", "v3b.fal.media"));
+        assert!(host_matches_pattern("V3B.FAL.MEDIA", "v3b.fal.media"));
+    }
+
+    #[test]
+    fn host_pattern_subdomain_wildcard() {
+        assert!(host_matches_pattern("v3b.fal.media", "*.fal.media"));
+        assert!(host_matches_pattern("cdn.fal.media", "*.fal.media"));
+        assert!(host_matches_pattern("fal.media", "*.fal.media"));
+        assert!(!host_matches_pattern("evil.com", "*.fal.media"));
+        // Don't match suffix-collision tricks like "evilfal.media"
+        assert!(!host_matches_pattern("evilfal.media", "*.fal.media"));
+    }
+
+    #[test]
+    fn host_pattern_bare_wildcard_matches_anything() {
+        assert!(host_matches_pattern("anywhere.com", "*"));
     }
 }

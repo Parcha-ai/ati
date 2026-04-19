@@ -1,6 +1,6 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Parcha-ai/ati/ci.yml?branch=main&label=CI)](https://github.com/Parcha-ai/ati/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/Parcha-ai/ati)](LICENSE)
-[![753 tests](https://img.shields.io/badge/tests-753-brightgreen)](#building)
+[![767 tests](https://img.shields.io/badge/tests-767-brightgreen)](#building)
 [![PyPI](https://img.shields.io/pypi/v/ati-client)](https://pypi.org/project/ati-client/)
 [![crates.io](https://img.shields.io/crates/v/agent-tools-interface)](https://crates.io/crates/agent-tools-interface)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-blue)](#building)
@@ -493,14 +493,20 @@ ati run file_manager:upload --path /tmp/narration.mp3
 #    "size_bytes": 818826, "content_type": "audio/mpeg"}
 ```
 
-Download parameters: `--out <path>`, `--inline true`, `--max-bytes <n>` (default 500 MB), `--timeout <seconds>` (default 120), `--headers <json>`, `--follow-redirects true|false`. SSRF protection is honored — private/internal addresses are blocked when `ATI_SSRF_PROTECTION=1` is set.
+Download parameters: `--out <path>`, `--inline true`, `--max-bytes <n>` (default 500 MB), `--timeout <seconds>` (default 120), `--headers <json>`, `--follow-redirects true|false`.
 
-Upload backend defaults to GCS. Configure on the proxy via:
-- `ATI_UPLOAD_BUCKET=<bucket>` — required
-- `ATI_UPLOAD_PREFIX=<prefix>` — optional (default `ati-uploads`)
-- keyring key `gcp_credentials` — service account JSON
+**Security model — required for production:**
 
-In proxy mode the proxy performs the network fetch and returns base64 to the sandbox, which writes it to disk. In local mode ATI fetches directly. Both modes share the same JSON contract.
+- `ATI_SSRF_PROTECTION=1` — blocks downloads to private/internal addresses (loopback, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, etc.).
+- `ATI_DOWNLOAD_ALLOWLIST=v3b.fal.media,*.googleapis.com,raw.githubusercontent.com` — comma-separated host patterns the proxy is allowed to fetch from. Supports `*.example.com` subdomain wildcards. **When unset, downloads are unrestricted** — only acceptable in local-mode dev. Always set this on production proxies, otherwise an agent can use the proxy to exfiltrate to attacker-controlled hosts or probe internal infrastructure.
+
+Upload backend defaults to GCS. The proxy uploads to a single operator-controlled bucket — agents cannot choose the destination. Configure on the proxy via:
+
+- `ATI_UPLOAD_BUCKET=<bucket>` — required, the only allowed upload destination.
+- `ATI_UPLOAD_PREFIX=<prefix>` — optional (default `ati-uploads`).
+- keyring key `gcp_credentials` — service account JSON.
+
+In proxy mode the proxy performs the network fetch / GCS upload and returns base64 to the sandbox, which writes it to disk. In local mode ATI fetches directly. Both modes share the same JSON contract.
 
 ---
 
