@@ -137,6 +137,11 @@ async fn run_upload(
         .or_else(|| args.get("object-name"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let destination = args
+        .get("destination")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let bytes = std::fs::read(&path).map_err(|e| format!("failed to read {path}: {e}"))?;
 
@@ -154,6 +159,9 @@ async fn run_upload(
     );
     wire_args.insert("content_type".into(), Value::String(content_type));
     wire_args.insert("content_base64".into(), Value::String(B64.encode(&bytes)));
+    if let Some(ref d) = destination {
+        wire_args.insert("destination".into(), Value::String(d.clone()));
+    }
 
     let response = match mode {
         DispatchMode::Local { keyring } => upload_local(&wire_args, keyring).await?,
@@ -166,53 +174,39 @@ async fn run_upload(
     Ok(crate::output::format_output(&response, output_format))
 }
 
-/// Run upload directly via the local keyring + GCS.
+/// Run upload directly using the local manifest-declared destinations.
+/// The `file_manager` provider's `upload_destinations` map governs what's
+/// allowed — same allowlist semantics as the proxy path.
 async fn upload_local(
     wire_args: &HashMap<String, Value>,
     keyring: &Keyring,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    use crate::core::file_manager::{FileManagerError, UploadArgs, UploadResult};
+    use crate::core::file_manager::{upload_to_destination, UploadArgs};
+    use crate::core::manifest::ManifestRegistry;
 
     let parsed = UploadArgs::from_wire(wire_args)?;
 
-    let bucket = std::env::var("ATI_UPLOAD_BUCKET")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            Box::<dyn std::error::Error>::from(FileManagerError::UploadNotConfigured.to_string())
-        })?;
-    let prefix = std::env::var("ATI_UPLOAD_PREFIX")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "ati-uploads".to_string());
-    let service_account_json = keyring
-        .get("gcp_credentials")
-        .ok_or("gcp_credentials missing from keyring")?
-        .to_string();
+    // Load the local manifest registry to find the operator's `file_manager`
+    // provider with its declared upload destinations. If no manifest exists,
+    // the auto-registered virtual provider has an empty destinations map,
+    // which yields a clean `UploadNotConfigured` error.
+    let ati_dir = super::common::ati_dir();
+    let manifests_dir = ati_dir.join("manifests");
+    let registry = ManifestRegistry::load(&manifests_dir)?;
+    let provider = registry
+        .list_providers()
+        .into_iter()
+        .find(|p| p.handler == "file_manager")
+        .ok_or("file_manager provider not registered")?
+        .clone();
 
-    let content_type = parsed
-        .content_type
-        .clone()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    let size_bytes = parsed.bytes.len() as u64;
-    let date = chrono::Utc::now().format("%Y-%m-%d");
-    let uuid = uuid::Uuid::new_v4();
-    let object_name = format!("{prefix}/{date}/{uuid}-{}", parsed.filename);
-
-    let client = crate::core::gcs::GcsClient::new_read_write(bucket, &service_account_json)
-        .map_err(|e| format!("gcs client init: {e}"))?;
-    let url = client
-        .upload_object(&object_name, parsed.bytes, &content_type)
-        .await
-        .map_err(|e| format!("gcs upload: {e}"))?;
-
-    Ok(crate::core::file_manager::build_upload_response(
-        &UploadResult {
-            url,
-            size_bytes,
-            content_type,
-        },
-    ))
+    Ok(upload_to_destination(
+        parsed,
+        &provider.upload_destinations,
+        provider.upload_default_destination.as_deref(),
+        keyring,
+    )
+    .await?)
 }
 
 /// Map common extensions to MIME types. Falls back to octet-stream.

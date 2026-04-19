@@ -35,18 +35,33 @@ fn clear_file_manager_env() {
 }
 
 fn build_app() -> axum::Router {
-    // Empty registry — file_manager is auto-registered.
+    // Empty registry — file_manager is auto-registered with no upload destinations.
     let registry = ManifestRegistry::empty();
+    build_app_with_registry(registry, Keyring::empty())
+}
+
+fn build_app_with_registry(registry: ManifestRegistry, keyring: Keyring) -> axum::Router {
     let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring,
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
     });
     build_router(state)
+}
+
+/// Build a registry that includes a `file_manager.toml` manifest at the given
+/// TOML string. Useful for asserting the operator-allowlist behavior.
+fn build_registry_with_manifest(toml: &str) -> (tempfile::TempDir, ManifestRegistry) {
+    let dir = tempfile::tempdir().unwrap();
+    let manifests = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(manifests.join("file_manager.toml"), toml).unwrap();
+    let registry = ManifestRegistry::load(&manifests).expect("load manifest");
+    (dir, registry)
 }
 
 async fn body_json(body: Body) -> Value {
@@ -211,7 +226,7 @@ async fn proxy_returns_forbidden_when_host_not_in_allowlist() {
 }
 
 #[tokio::test]
-async fn proxy_upload_without_bucket_returns_503() {
+async fn proxy_upload_without_destinations_returns_503() {
     let _g = env_mutex().lock().await;
     clear_file_manager_env();
     let app = build_app();
@@ -234,5 +249,86 @@ async fn proxy_upload_without_bucket_returns_503() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let json = body_json(resp.into_body()).await;
     let err = json["error"].as_str().unwrap_or("");
-    assert!(err.contains("ATI_UPLOAD_BUCKET"), "unexpected error: {err}");
+    assert!(
+        err.contains("Upload destinations not configured"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn proxy_upload_unknown_destination_returns_403() {
+    let _g = env_mutex().lock().await;
+    clear_file_manager_env();
+    // Operator allowlists only `gcs`; agent asks for `evil`.
+    let toml = r#"
+[provider]
+name = "file_manager"
+description = "test"
+handler = "file_manager"
+upload_default_destination = "gcs"
+
+[provider.upload_destinations.gcs]
+kind = "gcs"
+bucket = "test-bucket"
+"#;
+    let (_dir, registry) = build_registry_with_manifest(toml);
+    let app = build_app_with_registry(registry, Keyring::empty());
+
+    let body = json!({
+        "tool_name": "file_manager:upload",
+        "args": {
+            "filename": "x.txt",
+            "content_base64": B64.encode(b"hello"),
+            "destination": "evil",
+        },
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let json = body_json(resp.into_body()).await;
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("Unknown upload destination 'evil'"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn proxy_upload_no_destination_no_default_returns_503() {
+    let _g = env_mutex().lock().await;
+    clear_file_manager_env();
+    // Operator declares destinations but no default; agent omits --destination.
+    let toml = r#"
+[provider]
+name = "file_manager"
+description = "test"
+handler = "file_manager"
+
+[provider.upload_destinations.gcs]
+kind = "gcs"
+bucket = "test-bucket"
+"#;
+    let (_dir, registry) = build_registry_with_manifest(toml);
+    let app = build_app_with_registry(registry, Keyring::empty());
+
+    let body = json!({
+        "tool_name": "file_manager:upload",
+        "args": {
+            "filename": "x.txt",
+            "content_base64": B64.encode(b"hello"),
+        },
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

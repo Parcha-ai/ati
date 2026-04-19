@@ -142,6 +142,8 @@ fn mock_provider(base_url: &str) -> Provider {
         cli_timeout_secs: None,
         cli_output_args: Vec::new(),
         cli_output_positional: HashMap::new(),
+        upload_destinations: HashMap::new(),
+        upload_default_destination: None,
         openapi_spec: None,
         openapi_include_tags: vec![],
         openapi_exclude_tags: vec![],

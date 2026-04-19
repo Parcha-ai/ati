@@ -562,7 +562,9 @@ async fn handle_call(
         }
         "file_manager" => {
             let args_map = call_req.args_as_map();
-            match dispatch_file_manager(&call_req.tool_name, &args_map, &state.keyring).await {
+            match dispatch_file_manager(&call_req.tool_name, &args_map, provider, &state.keyring)
+                .await
+            {
                 Ok(result) => (
                     StatusCode::OK,
                     Json(CallResponse {
@@ -1958,6 +1960,7 @@ pub async fn run(
 async fn dispatch_file_manager(
     tool_name: &str,
     args: &HashMap<String, Value>,
+    provider: &Provider,
     keyring: &Keyring,
 ) -> Result<Value, (StatusCode, String)> {
     use crate::core::file_manager::{self, DownloadArgs, FileManagerError, UploadArgs};
@@ -1996,12 +1999,21 @@ async fn dispatch_file_manager(
         "file_manager:upload" => {
             let parsed = UploadArgs::from_wire(args)
                 .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-            match upload_via_gcs(parsed, keyring).await {
+            match crate::core::file_manager::upload_to_destination(
+                parsed,
+                &provider.upload_destinations,
+                provider.upload_default_destination.as_deref(),
+                keyring,
+            )
+            .await
+            {
                 Ok(v) => Ok(v),
-                Err(FileManagerError::UploadNotConfigured) => Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    FileManagerError::UploadNotConfigured.to_string(),
-                )),
+                Err(e @ FileManagerError::UploadNotConfigured) => {
+                    Err((StatusCode::SERVICE_UNAVAILABLE, e.to_string()))
+                }
+                Err(e @ FileManagerError::UnknownDestination(_)) => {
+                    Err((StatusCode::FORBIDDEN, e.to_string()))
+                }
                 Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
             }
         }
@@ -2010,56 +2022,6 @@ async fn dispatch_file_manager(
             format!("Unknown file_manager tool: '{other}'"),
         )),
     }
-}
-
-/// Upload to the proxy's configured GCS bucket. Configuration:
-/// - `ATI_UPLOAD_BUCKET` env var — target bucket
-/// - `ATI_UPLOAD_PREFIX` env var (optional) — prefix prepended to object keys (default: "ati-uploads")
-/// - keyring key `gcp_credentials` — service account JSON
-async fn upload_via_gcs(
-    args: crate::core::file_manager::UploadArgs,
-    keyring: &Keyring,
-) -> Result<Value, crate::core::file_manager::FileManagerError> {
-    use crate::core::file_manager::{FileManagerError, UploadResult};
-
-    let bucket = std::env::var("ATI_UPLOAD_BUCKET")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or(FileManagerError::UploadNotConfigured)?;
-    let prefix = std::env::var("ATI_UPLOAD_PREFIX")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "ati-uploads".to_string());
-    let service_account_json = keyring
-        .get("gcp_credentials")
-        .ok_or_else(|| FileManagerError::Upload("gcp_credentials missing from keyring".into()))?
-        .to_string();
-
-    let content_type = args
-        .content_type
-        .clone()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    let size_bytes = args.bytes.len() as u64;
-
-    // Object key = <prefix>/<utc-date>/<uuid>-<filename>
-    let date = chrono::Utc::now().format("%Y-%m-%d");
-    let uuid = uuid::Uuid::new_v4();
-    let object_name = format!("{prefix}/{date}/{uuid}-{}", args.filename);
-
-    let client = crate::core::gcs::GcsClient::new_read_write(bucket, &service_account_json)
-        .map_err(|e| FileManagerError::Upload(e.to_string()))?;
-    let url = client
-        .upload_object(&object_name, args.bytes, &content_type)
-        .await
-        .map_err(|e| FileManagerError::Upload(e.to_string()))?;
-
-    Ok(crate::core::file_manager::build_upload_response(
-        &UploadResult {
-            url,
-            size_bytes,
-            content_type,
-        },
-    ))
 }
 
 fn write_proxy_audit(

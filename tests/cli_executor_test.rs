@@ -46,6 +46,8 @@ fn make_cli_provider(
         cli_timeout_secs: timeout,
         cli_output_args: Vec::new(),
         cli_output_positional: HashMap::new(),
+        upload_destinations: HashMap::new(),
+        upload_default_destination: None,
         auth_generator: None,
         category: None,
         skills: Vec::new(),

@@ -278,10 +278,110 @@ fn upload_response_payload_shape() {
         url: "https://storage.googleapis.com/bucket/x.mp4".into(),
         size_bytes: 1234,
         content_type: "video/mp4".into(),
+        destination: "gcs".into(),
     };
     let v = file_manager::build_upload_response(&result);
     assert_eq!(v["success"], true);
     assert_eq!(v["url"], "https://storage.googleapis.com/bucket/x.mp4");
     assert_eq!(v["size_bytes"], 1234);
     assert_eq!(v["content_type"], "video/mp4");
+    assert_eq!(v["destination"], "gcs");
+}
+
+// ---------------------------------------------------------------------------
+// Operator manifest declares allowlist of upload destinations
+// ---------------------------------------------------------------------------
+
+#[test]
+fn manifest_loads_with_destinations() {
+    use ati::core::file_manager::UploadDestination;
+    let dir = tempfile::tempdir().unwrap();
+    let manifests = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("file_manager.toml"),
+        r#"
+[provider]
+name = "file_manager"
+description = "test"
+handler = "file_manager"
+upload_default_destination = "fal"
+
+[provider.upload_destinations.fal]
+kind = "fal_storage"
+key_ref = "fal_api_key"
+
+[provider.upload_destinations.gcs]
+kind = "gcs"
+bucket = "my-bucket"
+prefix = "uploads"
+"#,
+    )
+    .unwrap();
+
+    let registry = ati::core::manifest::ManifestRegistry::load(&manifests).unwrap();
+    let provider = registry
+        .list_providers()
+        .into_iter()
+        .find(|p| p.handler == "file_manager")
+        .expect("file_manager provider");
+    assert_eq!(provider.upload_destinations.len(), 2);
+    assert_eq!(provider.upload_default_destination.as_deref(), Some("fal"));
+    assert!(matches!(
+        provider.upload_destinations.get("fal").unwrap(),
+        UploadDestination::FalStorage { .. }
+    ));
+    let gcs = provider.upload_destinations.get("gcs").unwrap();
+    if let UploadDestination::Gcs { bucket, prefix, .. } = gcs {
+        assert_eq!(bucket, "my-bucket");
+        assert_eq!(prefix, "uploads");
+    } else {
+        panic!("expected GCS destination");
+    }
+}
+
+#[test]
+fn manifest_rejects_default_not_in_destinations() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifests = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("file_manager.toml"),
+        r#"
+[provider]
+name = "file_manager"
+description = "test"
+handler = "file_manager"
+upload_default_destination = "missing"
+
+[provider.upload_destinations.gcs]
+kind = "gcs"
+bucket = "b"
+"#,
+    )
+    .unwrap();
+
+    let result = ati::core::manifest::ManifestRegistry::load(&manifests);
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("expected manifest load to fail"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("upload_default_destination 'missing'"),
+        "expected validation error, got: {msg}"
+    );
+}
+
+#[test]
+fn auto_registered_file_manager_has_empty_destinations() {
+    // No manifest dropped — auto-registered provider should disable uploads.
+    let registry = ati::core::manifest::ManifestRegistry::empty();
+    let provider = registry
+        .list_providers()
+        .into_iter()
+        .find(|p| p.handler == "file_manager")
+        .expect("auto-registered file_manager provider");
+    assert!(provider.upload_destinations.is_empty());
+    assert!(provider.upload_default_destination.is_none());
 }

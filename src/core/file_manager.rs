@@ -72,8 +72,10 @@ pub enum FileManagerError {
         #[source]
         source: std::io::Error,
     },
-    #[error("Upload backend not configured (set ATI_UPLOAD_BUCKET on the proxy)")]
+    #[error("Upload destinations not configured on the proxy — operator must declare `[provider.upload_destinations.<name>]` in `manifests/file_manager.toml`")]
     UploadNotConfigured,
+    #[error("Unknown upload destination '{0}' — not in the operator's allowlist")]
+    UnknownDestination(String),
     #[error("Upload failed: {0}")]
     Upload(String),
     #[error("Invalid base64 in upload payload: {0}")]
@@ -427,10 +429,14 @@ pub struct UploadArgs {
     pub filename: String,
     pub content_type: Option<String>,
     pub bytes: Vec<u8>,
+    /// Destination key from the proxy's allowlist. `None` means "use the
+    /// operator-configured default."
+    pub destination: Option<String>,
 }
 
 impl UploadArgs {
-    /// Decode upload args sent over the wire (base64 + filename + content_type).
+    /// Decode upload args sent over the wire (base64 + filename + content_type
+    /// + optional destination).
     pub fn from_wire(args: &HashMap<String, Value>) -> Result<Self, FileManagerError> {
         let filename = args
             .get("filename")
@@ -454,10 +460,16 @@ impl UploadArgs {
                 limit: MAX_UPLOAD_BYTES,
             });
         }
+        let destination = args
+            .get("destination")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         Ok(UploadArgs {
             filename: sanitize_filename(&filename),
             content_type,
             bytes,
+            destination,
         })
     }
 }
@@ -481,6 +493,79 @@ pub struct UploadResult {
     pub url: String,
     pub size_bytes: u64,
     pub content_type: String,
+    /// Which configured destination key was used.
+    pub destination: String,
+}
+
+// ---------------------------------------------------------------------------
+// Upload destination allowlist
+// ---------------------------------------------------------------------------
+
+/// One typed sink the operator's manifest declares as a permitted upload
+/// destination. The agent can pick from these keys via `--destination <key>`;
+/// anything else is refused with a typed error.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UploadDestination {
+    /// Google Cloud Storage bucket. Object goes to `<bucket>/<prefix>/<date>/<uuid>-<filename>`.
+    /// `key_ref` names a keyring key holding the GCP service account JSON.
+    Gcs {
+        bucket: String,
+        #[serde(default = "default_gcs_prefix")]
+        prefix: String,
+        #[serde(default = "default_gcs_key_ref")]
+        key_ref: String,
+    },
+    /// fal.ai CDN — uploads via fal's signed-token storage flow.
+    /// `key_ref` names a keyring key holding the fal API key.
+    /// `endpoint` overrides the REST base (default `https://rest.alpha.fal.ai`).
+    FalStorage {
+        #[serde(default = "default_fal_key_ref")]
+        key_ref: String,
+        #[serde(default)]
+        endpoint: Option<String>,
+    },
+}
+
+fn default_gcs_prefix() -> String {
+    "ati-uploads".to_string()
+}
+
+fn default_gcs_key_ref() -> String {
+    "gcp_credentials".to_string()
+}
+
+fn default_fal_key_ref() -> String {
+    "fal_api_key".to_string()
+}
+
+/// Resolve a caller-supplied (or omitted) destination key against the operator
+/// manifest's allowlist. Refuses any key not in the map with a typed error.
+pub fn resolve_destination<'a>(
+    destinations: &'a HashMap<String, UploadDestination>,
+    default: Option<&str>,
+    requested: Option<&str>,
+) -> Result<(String, &'a UploadDestination), FileManagerError> {
+    if destinations.is_empty() {
+        return Err(FileManagerError::UploadNotConfigured);
+    }
+    let key = match requested {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => default
+            .map(|s| s.to_string())
+            .ok_or(FileManagerError::UploadNotConfigured)?,
+    };
+    let sink = destinations
+        .get(&key)
+        .ok_or_else(|| FileManagerError::UnknownDestination(key.clone()))?;
+    Ok((key, sink))
+}
+
+/// List configured destination keys, sorted — useful for discovery output.
+pub fn destination_keys(destinations: &HashMap<String, UploadDestination>) -> Vec<String> {
+    let mut keys: Vec<String> = destinations.keys().cloned().collect();
+    keys.sort();
+    keys
 }
 
 pub fn build_upload_response(result: &UploadResult) -> Value {
@@ -489,6 +574,170 @@ pub fn build_upload_response(result: &UploadResult) -> Value {
         "url": result.url,
         "size_bytes": result.size_bytes,
         "content_type": result.content_type,
+        "destination": result.destination,
+    })
+}
+
+/// Dispatch an upload to one of the operator-allowlisted destinations.
+/// Resolves the requested key (or default) against the manifest's destinations
+/// map, then routes to the typed sink. Refuses any key not in the map.
+pub async fn upload_to_destination(
+    args: UploadArgs,
+    destinations: &HashMap<String, UploadDestination>,
+    default: Option<&str>,
+    keyring: &crate::core::keyring::Keyring,
+) -> Result<Value, FileManagerError> {
+    let (key, sink) = resolve_destination(destinations, default, args.destination.as_deref())?;
+    let result = match sink {
+        UploadDestination::Gcs {
+            bucket,
+            prefix,
+            key_ref,
+        } => upload_to_gcs(&args, bucket, prefix, key_ref, keyring, &key).await?,
+        UploadDestination::FalStorage { key_ref, endpoint } => {
+            upload_to_fal(&args, key_ref, endpoint.as_deref(), keyring, &key).await?
+        }
+    };
+    Ok(build_upload_response(&result))
+}
+
+async fn upload_to_gcs(
+    args: &UploadArgs,
+    bucket: &str,
+    prefix: &str,
+    key_ref: &str,
+    keyring: &crate::core::keyring::Keyring,
+    destination_key: &str,
+) -> Result<UploadResult, FileManagerError> {
+    let service_account_json = keyring
+        .get(key_ref)
+        .ok_or_else(|| {
+            FileManagerError::Upload(format!("keyring key '{key_ref}' missing for GCS upload"))
+        })?
+        .to_string();
+
+    let content_type = args
+        .content_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let size_bytes = args.bytes.len() as u64;
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    let uuid = uuid::Uuid::new_v4();
+    let object_name = format!("{prefix}/{date}/{uuid}-{}", args.filename);
+
+    let client =
+        crate::core::gcs::GcsClient::new_read_write(bucket.to_string(), &service_account_json)
+            .map_err(|e| FileManagerError::Upload(e.to_string()))?;
+    let url = client
+        .upload_object(&object_name, args.bytes.clone(), &content_type)
+        .await
+        .map_err(|e| FileManagerError::Upload(e.to_string()))?;
+
+    Ok(UploadResult {
+        url,
+        size_bytes,
+        content_type,
+        destination: destination_key.to_string(),
+    })
+}
+
+/// Upload to fal.ai's CDN via their two-step signed-token flow.
+/// 1. POST `<rest>/storage/auth/token?storage_type=fal-cdn-v3` with
+///    `Authorization: Key <api_key>` → `{token, token_type, base_url, expires_at}`
+/// 2. POST `<base_url or v3.fal.media>/files/upload` with the signed token,
+///    `Content-Type: <mime>`, `X-Fal-File-Name: <filename>`, body = bytes
+///    → `{access_url: "..."}`
+async fn upload_to_fal(
+    args: &UploadArgs,
+    key_ref: &str,
+    endpoint: Option<&str>,
+    keyring: &crate::core::keyring::Keyring,
+    destination_key: &str,
+) -> Result<UploadResult, FileManagerError> {
+    use serde::Deserialize;
+
+    let api_key = keyring
+        .get(key_ref)
+        .ok_or_else(|| {
+            FileManagerError::Upload(format!("keyring key '{key_ref}' missing for fal upload"))
+        })?
+        .to_string();
+    let rest_base = endpoint.unwrap_or("https://rest.alpha.fal.ai");
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| FileManagerError::Upload(format!("http client init: {e}")))?;
+
+    // Step 1: mint signed token
+    let token_url = format!("{rest_base}/storage/auth/token?storage_type=fal-cdn-v3");
+    let token_resp = http
+        .post(&token_url)
+        .header("Authorization", format!("Key {api_key}"))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .map_err(|e| FileManagerError::Upload(format!("fal token request failed: {e}")))?;
+    if !token_resp.status().is_success() {
+        let status = token_resp.status().as_u16();
+        let body = token_resp.text().await.unwrap_or_default();
+        return Err(FileManagerError::Upload(format!(
+            "fal token mint returned {status}: {body}"
+        )));
+    }
+    #[derive(Deserialize)]
+    struct FalToken {
+        token: String,
+        token_type: String,
+        base_url: String,
+    }
+    let token: FalToken = token_resp
+        .json()
+        .await
+        .map_err(|e| FileManagerError::Upload(format!("fal token JSON parse failed: {e}")))?;
+
+    // Step 2: PUT bytes to <base_url>/files/upload
+    let content_type = args
+        .content_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let size_bytes = args.bytes.len() as u64;
+    let upload_url = format!("{}/files/upload", token.base_url.trim_end_matches('/'));
+    let upload_resp = http
+        .post(&upload_url)
+        .header(
+            "Authorization",
+            format!("{} {}", token.token_type, token.token),
+        )
+        .header("Content-Type", &content_type)
+        .header("X-Fal-File-Name", &args.filename)
+        .body(args.bytes.clone())
+        .send()
+        .await
+        .map_err(|e| FileManagerError::Upload(format!("fal upload request failed: {e}")))?;
+    if !upload_resp.status().is_success() {
+        let status = upload_resp.status().as_u16();
+        let body = upload_resp.text().await.unwrap_or_default();
+        return Err(FileManagerError::Upload(format!(
+            "fal upload returned {status}: {body}"
+        )));
+    }
+    #[derive(Deserialize)]
+    struct FalUploadResponse {
+        access_url: String,
+    }
+    let body: FalUploadResponse = upload_resp
+        .json()
+        .await
+        .map_err(|e| FileManagerError::Upload(format!("fal upload JSON parse failed: {e}")))?;
+
+    Ok(UploadResult {
+        url: body.access_url,
+        size_bytes,
+        content_type,
+        destination: destination_key.to_string(),
     })
 }
 
@@ -665,5 +914,61 @@ mod tests {
     #[test]
     fn host_pattern_bare_wildcard_matches_anything() {
         assert!(host_matches_pattern("anywhere.com", "*"));
+    }
+
+    fn make_destinations() -> HashMap<String, UploadDestination> {
+        let mut m = HashMap::new();
+        m.insert(
+            "gcs".to_string(),
+            UploadDestination::Gcs {
+                bucket: "b".to_string(),
+                prefix: "p".to_string(),
+                key_ref: "gcp_credentials".to_string(),
+            },
+        );
+        m.insert(
+            "fal".to_string(),
+            UploadDestination::FalStorage {
+                key_ref: "fal_api_key".to_string(),
+                endpoint: None,
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn resolve_destination_picks_explicit_key() {
+        let m = make_destinations();
+        let (k, sink) = resolve_destination(&m, Some("gcs"), Some("fal")).unwrap();
+        assert_eq!(k, "fal");
+        assert!(matches!(sink, UploadDestination::FalStorage { .. }));
+    }
+
+    #[test]
+    fn resolve_destination_falls_back_to_default() {
+        let m = make_destinations();
+        let (k, _) = resolve_destination(&m, Some("gcs"), None).unwrap();
+        assert_eq!(k, "gcs");
+    }
+
+    #[test]
+    fn resolve_destination_unknown_key_rejected() {
+        let m = make_destinations();
+        let err = resolve_destination(&m, Some("gcs"), Some("evil")).unwrap_err();
+        assert!(matches!(err, FileManagerError::UnknownDestination(ref s) if s == "evil"));
+    }
+
+    #[test]
+    fn resolve_destination_empty_map_not_configured() {
+        let m: HashMap<String, UploadDestination> = HashMap::new();
+        let err = resolve_destination(&m, None, None).unwrap_err();
+        assert!(matches!(err, FileManagerError::UploadNotConfigured));
+    }
+
+    #[test]
+    fn resolve_destination_no_default_no_request_not_configured() {
+        let m = make_destinations();
+        let err = resolve_destination(&m, None, None).unwrap_err();
+        assert!(matches!(err, FileManagerError::UploadNotConfigured));
     }
 }

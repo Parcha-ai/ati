@@ -17,6 +17,8 @@ pub enum ManifestError {
     Parse(String, toml::de::Error),
     #[error("No manifests directory found at {0}")]
     NoDirectory(String),
+    #[error("Manifest {0} is invalid: {1}")]
+    Invalid(String, String),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -121,6 +123,18 @@ pub struct Provider {
     /// args (after the matched prefix) is the output path.
     #[serde(default)]
     pub cli_output_positional: HashMap<String, usize>,
+
+    // --- file_manager provider fields (handler = "file_manager") ---
+    /// Operator-declared allowlist of upload destinations. Each key is a
+    /// short name agents can pass via `--destination <key>`; the value is a
+    /// typed sink (GCS bucket, fal storage). Anything not in this map is
+    /// refused. **An empty map disables uploads entirely.**
+    #[serde(default)]
+    pub upload_destinations: HashMap<String, crate::core::file_manager::UploadDestination>,
+    /// Destination key used when the agent omits `--destination`. Must be
+    /// present in `upload_destinations` (validated at load time).
+    #[serde(default)]
+    pub upload_default_destination: Option<String>,
 
     // --- OpenAPI provider fields (handler = "openapi") ---
     /// Path (relative to ~/.ati/specs/) or URL to OpenAPI spec (JSON or YAML)
@@ -468,6 +482,8 @@ impl CachedProvider {
             cli_timeout_secs: self.cli_timeout_secs,
             cli_output_args: Vec::new(),
             cli_output_positional: HashMap::new(),
+            upload_destinations: HashMap::new(),
+            upload_default_destination: None,
             auth_generator: None,
             category: None,
             skills: self.skills.clone(),
@@ -539,6 +555,22 @@ impl ManifestRegistry {
                             );
                             // Graceful degradation — continue without tools
                         }
+                    }
+                }
+            }
+
+            // For file_manager providers, validate that any declared default
+            // destination is actually present in the allowlist. Refuse to load
+            // an inconsistent manifest rather than silently coercing it.
+            if manifest.provider.handler == "file_manager" {
+                if let Some(ref default) = manifest.provider.upload_default_destination {
+                    if !manifest.provider.upload_destinations.contains_key(default) {
+                        return Err(ManifestError::Invalid(
+                            path.display().to_string(),
+                            format!(
+                                "upload_default_destination '{default}' is not present in [provider.upload_destinations]"
+                            ),
+                        ));
                     }
                 }
             }
@@ -828,9 +860,32 @@ impl Provider {
 }
 
 /// Register the virtual `file_manager` provider (download + upload tools).
-/// Idempotent — safe to call multiple times.
+///
+/// Three cases:
+/// 1. Operator manifest already declares the `file_manager` provider WITH tools
+///    → leave it alone.
+/// 2. Operator manifest declares it but with no `[[tools]]` (the common case —
+///    they're just declaring the upload allowlist) → attach the built-in tools
+///    so the operator only needs the destinations block.
+/// 3. No manifest at all → register a default provider with the built-in tools
+///    and an empty destinations map (uploads will return UploadNotConfigured).
 pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
-    if registry.has_provider("file_manager") {
+    let download_tool = build_file_manager_download_tool();
+    let upload_tool = build_file_manager_upload_tool();
+
+    if let Some(mi) = registry
+        .manifests
+        .iter()
+        .position(|m| m.provider.handler == "file_manager")
+    {
+        // Operator declared it. Backfill tools if they didn't list any.
+        if registry.manifests[mi].tools.is_empty() {
+            let tools = vec![download_tool, upload_tool];
+            for (ti, tool) in tools.iter().enumerate() {
+                registry.tool_index.insert(tool.name.clone(), (mi, ti));
+            }
+            registry.manifests[mi].tools = tools;
+        }
         return;
     }
 
@@ -860,6 +915,8 @@ pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
         cli_timeout_secs: None,
         cli_output_args: Vec::new(),
         cli_output_positional: HashMap::new(),
+        upload_destinations: HashMap::new(),
+        upload_default_destination: None,
         openapi_spec: None,
         openapi_include_tags: Vec::new(),
         openapi_exclude_tags: Vec::new(),
@@ -872,7 +929,16 @@ pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
         skills: Vec::new(),
     };
 
-    let download_schema = serde_json::json!({
+    let tools = vec![download_tool, upload_tool];
+    let mi = registry.manifests.len();
+    for (ti, tool) in tools.iter().enumerate() {
+        registry.tool_index.insert(tool.name.clone(), (mi, ti));
+    }
+    registry.manifests.push(Manifest { provider, tools });
+}
+
+fn build_file_manager_download_tool() -> Tool {
+    let schema = serde_json::json!({
         "type": "object",
         "required": ["url"],
         "properties": {
@@ -886,52 +952,58 @@ pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
         }
     });
 
-    let upload_schema = serde_json::json!({
+    Tool {
+        name: "file_manager:download".to_string(),
+        description: "Download bytes from a URL. Writes to --out <path> or returns base64 inline."
+            .to_string(),
+        endpoint: String::new(),
+        method: HttpMethod::Post,
+        scope: Some("tool:file_manager:download".to_string()),
+        input_schema: Some(schema),
+        response: None,
+        tags: vec![
+            "file".to_string(),
+            "download".to_string(),
+            "binary".to_string(),
+        ],
+        hint: Some(
+            "Use for 'I have a URL, give me the bytes' — images, video, audio, PDFs, CSVs, ZIPs."
+                .to_string(),
+        ),
+        examples: vec![
+            "ati run file_manager:download --url https://example.com/file.mp4 --out /tmp/clip.mp4"
+                .to_string(),
+            "ati run file_manager:download --url https://example.com/data.csv --inline true"
+                .to_string(),
+        ],
+    }
+}
+
+fn build_file_manager_upload_tool() -> Tool {
+    let schema = serde_json::json!({
         "type": "object",
         "required": ["path"],
         "properties": {
             "path": {"type": "string", "description": "Local file path to upload"},
             "content_type": {"type": "string", "description": "Override MIME type (default: inferred from extension)"},
-            "object_name": {"type": "string", "description": "Object key to store as (default: auto-generated with file extension)"}
+            "object_name": {"type": "string", "description": "Object key (when destination is GCS-style); default: auto-generated"},
+            "destination": {"type": "string", "description": "Allowlist key declared in the operator's file_manager.toml manifest (e.g. \"fal\", \"gcs\"). Omit to use the operator default."}
         }
     });
 
-    let tools = vec![
-        Tool {
-            name: "file_manager:download".to_string(),
-            description: "Download bytes from a URL. Writes to --out <path> or returns base64 inline.".to_string(),
-            endpoint: String::new(),
-            method: HttpMethod::Post,
-            scope: Some("tool:file_manager:download".to_string()),
-            input_schema: Some(download_schema),
-            response: None,
-            tags: vec!["file".to_string(), "download".to_string(), "binary".to_string()],
-            hint: Some("Use for 'I have a URL, give me the bytes' — images, video, audio, PDFs, CSVs, ZIPs.".to_string()),
-            examples: vec![
-                "ati run file_manager:download --url https://example.com/file.mp4 --out /tmp/clip.mp4".to_string(),
-                "ati run file_manager:download --url https://example.com/data.csv --inline true".to_string(),
-            ],
-        },
-        Tool {
-            name: "file_manager:upload".to_string(),
-            description: "Upload a local file to the configured object store, return a public URL.".to_string(),
-            endpoint: String::new(),
-            method: HttpMethod::Post,
-            scope: Some("tool:file_manager:upload".to_string()),
-            input_schema: Some(upload_schema),
-            response: None,
-            tags: vec!["file".to_string(), "upload".to_string(), "binary".to_string()],
-            hint: Some("Upload a local file to object storage (GCS by default) and get a public URL.".to_string()),
-            examples: vec![
-                "ati run file_manager:upload --path /tmp/narration.mp3".to_string(),
-                "ati run file_manager:upload --path /tmp/report.pdf --content-type application/pdf".to_string(),
-            ],
-        },
-    ];
-
-    let mi = registry.manifests.len();
-    for (ti, tool) in tools.iter().enumerate() {
-        registry.tool_index.insert(tool.name.clone(), (mi, ti));
+    Tool {
+        name: "file_manager:upload".to_string(),
+        description: "Upload a local file to a manifest-declared destination, return a public URL.".to_string(),
+        endpoint: String::new(),
+        method: HttpMethod::Post,
+        scope: Some("tool:file_manager:upload".to_string()),
+        input_schema: Some(schema),
+        response: None,
+        tags: vec!["file".to_string(), "upload".to_string(), "binary".to_string()],
+        hint: Some("Upload a local file to a manifest-declared destination (GCS, fal_storage, etc.) and get a public URL.".to_string()),
+        examples: vec![
+            "ati run file_manager:upload --path /tmp/narration.mp3".to_string(),
+            "ati run file_manager:upload --path /tmp/report.pdf --destination gcs".to_string(),
+        ],
     }
-    registry.manifests.push(Manifest { provider, tools });
 }
