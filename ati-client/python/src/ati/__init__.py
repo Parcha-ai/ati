@@ -296,7 +296,7 @@ def _format_skill_listing(entries: list) -> str:
     return header + body + footer
 
 
-__version__ = "0.7.8"
+__version__ = "0.7.9"
 
 
 class AtiOrchestrator:

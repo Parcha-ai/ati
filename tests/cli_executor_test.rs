@@ -44,6 +44,10 @@ fn make_cli_provider(
         cli_default_args: default_args,
         cli_env,
         cli_timeout_secs: timeout,
+        cli_output_args: Vec::new(),
+        cli_output_positional: HashMap::new(),
+        upload_destinations: HashMap::new(),
+        upload_default_destination: None,
         auth_generator: None,
         category: None,
         skills: Vec::new(),
@@ -391,4 +395,318 @@ fn test_add_cli_creates_manifest() {
         content.contains("cli_command = \"echo\""),
         "should have correct command"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Output capture (cli_output_args / cli_output_positional)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_cli_output_args_named_flag_captures_file() {
+    // Use `sh -c 'echo "bytes" > $1' _ --output PATH` style by wrapping with sh.
+    // Simpler: use a tiny shell script that writes to whatever --output points at.
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("writer.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         # Find --output and write payload there\n\
+         while [ $# -gt 0 ]; do\n\
+           if [ \"$1\" = \"--output\" ]; then\n\
+             shift\n\
+             printf 'captured-bytes-%s' \"$BB_MARKER\" > \"$1\"\n\
+             exit 0\n\
+           fi\n\
+           shift\n\
+         done\n\
+         exit 2\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let agent_path = tmp
+        .path()
+        .join("sandbox-out.bin")
+        .to_string_lossy()
+        .to_string();
+
+    let mut env = HashMap::new();
+    env.insert("BB_MARKER".to_string(), "ABC".to_string());
+    let mut provider = make_cli_provider("writer", script.to_str().unwrap(), vec![], env, None);
+    provider.cli_output_args = vec!["--output".to_string()];
+
+    let keyring = Keyring::empty();
+    let result = cli_executor::execute(
+        &provider,
+        &["--output".to_string(), agent_path.clone()],
+        &keyring,
+    )
+    .await
+    .unwrap();
+
+    // Agent-facing path should NOT have been written (that's a sandbox path —
+    // the proxy substituted a temp and captured the bytes back into the response).
+    assert!(
+        !std::path::Path::new(&agent_path).exists(),
+        "proxy must not write to the agent's original path"
+    );
+
+    // Response has the envelope
+    let outputs = result.get("outputs").and_then(|v| v.as_object()).unwrap();
+    let entry = outputs
+        .get(&agent_path)
+        .expect("expected original path key");
+    let b64 = entry
+        .get("content_base64")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let bytes = B64.decode(b64).unwrap();
+    assert_eq!(bytes, b"captured-bytes-ABC");
+    assert_eq!(
+        entry.get("size_bytes").unwrap().as_u64().unwrap(),
+        bytes.len() as u64
+    );
+}
+
+#[tokio::test]
+async fn test_cli_output_positional_rewrites_path() {
+    // Script that writes a PNG-like payload to its LAST positional arg.
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("shot.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         # Expect: browse screenshot <path>\n\
+         [ \"$1\" = \"browse\" ] || exit 2\n\
+         [ \"$2\" = \"screenshot\" ] || exit 2\n\
+         printf 'PNG-HEADER' > \"$3\"\n\
+         echo 'wrote screenshot to '$3\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let agent_path = tmp.path().join("shot.png").to_string_lossy().to_string();
+
+    let mut provider = make_cli_provider(
+        "fakebb",
+        script.to_str().unwrap(),
+        vec![],
+        HashMap::new(),
+        None,
+    );
+    provider
+        .cli_output_positional
+        .insert("browse screenshot".to_string(), 0);
+
+    let keyring = Keyring::empty();
+    let result = cli_executor::execute(
+        &provider,
+        &["browse".into(), "screenshot".into(), agent_path.clone()],
+        &keyring,
+    )
+    .await
+    .unwrap();
+
+    assert!(!std::path::Path::new(&agent_path).exists());
+    let outputs = result.get("outputs").and_then(|v| v.as_object()).unwrap();
+    let entry = outputs.get(&agent_path).expect("path key missing");
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let b64 = entry
+        .get("content_base64")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert_eq!(B64.decode(b64).unwrap(), b"PNG-HEADER");
+    assert_eq!(
+        entry.get("content_type").and_then(|v| v.as_str()),
+        Some("image/png")
+    );
+
+    let stdout = result.get("stdout").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        stdout.starts_with("wrote screenshot to"),
+        "stdout preserved: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn test_cli_output_missing_file_returns_error() {
+    // Script exits 0 but never writes the output file.
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("noop.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut provider = make_cli_provider(
+        "noop",
+        script.to_str().unwrap(),
+        vec![],
+        HashMap::new(),
+        None,
+    );
+    provider.cli_output_args = vec!["--output".to_string()];
+
+    let keyring = Keyring::empty();
+    let err = cli_executor::execute(
+        &provider,
+        &[
+            "--output".to_string(),
+            tmp.path().join("missing.bin").to_string_lossy().to_string(),
+        ],
+        &keyring,
+    )
+    .await
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("was not produced"), "unexpected error: {msg}");
+}
+
+#[tokio::test]
+async fn test_cli_no_capture_preserves_legacy_shape() {
+    // No cli_output_args configured → response stays a plain string as before.
+    let provider = make_cli_provider("myecho", "echo", vec![], HashMap::new(), None);
+    let keyring = Keyring::empty();
+    let result = cli_executor::execute(&provider, &["hello".into()], &keyring)
+        .await
+        .unwrap();
+    assert_eq!(result.as_str().unwrap(), "hello");
+    assert!(result.get("outputs").is_none());
+}
+
+#[tokio::test]
+async fn test_cli_output_nonzero_exit_still_cleans_temp() {
+    // Script: write to output, then fail with exit 7. Temp must be deleted.
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("fail.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf 'partial' > \"$2\"\nexit 7\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Use a unique extension so we only see THIS test's temp files (other
+    // parallel tests in the same binary also create `.ati-cli-out-*` temps).
+    let agent_path = tmp
+        .path()
+        .join("agent.cleanup-marker-xyz")
+        .to_string_lossy()
+        .to_string();
+    let mut provider = make_cli_provider(
+        "fail",
+        script.to_str().unwrap(),
+        vec![],
+        HashMap::new(),
+        None,
+    );
+    provider.cli_output_args = vec!["--output".to_string()];
+
+    let keyring = Keyring::empty();
+    let err = cli_executor::execute(
+        &provider,
+        &["--output".to_string(), agent_path.clone()],
+        &keyring,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("exited with code 7"));
+    // Agent path untouched
+    assert!(!std::path::Path::new(&agent_path).exists());
+    // No leftover proxy-side temp files with our unique extension marker.
+    let temp_dir = std::env::temp_dir();
+    let leftovers: Vec<_> = std::fs::read_dir(&temp_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s.starts_with(".ati-cli-out-") && s.ends_with(".cleanup-marker-xyz")
+        })
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "proxy temp not cleaned up: {leftovers:?}"
+    );
+}
+
+#[test]
+fn test_apply_output_captures_equals_form() {
+    use ati::core::cli_executor::apply_output_captures;
+    let mut provider = make_cli_provider("t", "echo", vec![], HashMap::new(), None);
+    provider.cli_output_args = vec!["--output".to_string()];
+
+    let (rewritten, captures) =
+        apply_output_captures(&provider, &["--output=/tmp/real.bin".to_string()]).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].original_path, "/tmp/real.bin");
+    assert!(rewritten[0].starts_with("--output="));
+    assert_ne!(rewritten[0], "--output=/tmp/real.bin");
+}
+
+/// Regression: when both cli_output_args and cli_output_positional are
+/// configured (as the bb manifest does), step 1's named-flag rewrite must
+/// consume the slot so step 2's positional rewrite doesn't pick up the
+/// already-substituted temp path as a new "output."
+#[test]
+fn test_apply_output_captures_no_double_rewrite_when_both_configured() {
+    use ati::core::cli_executor::apply_output_captures;
+    let mut provider = make_cli_provider("bb_clone", "true", vec![], HashMap::new(), None);
+    provider.cli_output_args = vec!["--output".to_string(), "-o".to_string()];
+    provider
+        .cli_output_positional
+        .insert("browse screenshot".to_string(), 0);
+
+    // Named-flag form on a subcommand that ALSO has a positional output rule.
+    let raw_args = vec![
+        "browse".to_string(),
+        "screenshot".to_string(),
+        "--output".to_string(),
+        "/tmp/shot.png".to_string(),
+    ];
+    let (rewritten, captures) = apply_output_captures(&provider, &raw_args).unwrap();
+
+    // Exactly one capture, pointing at the agent's original path.
+    assert_eq!(
+        captures.len(),
+        1,
+        "expected single capture, got {captures:?}"
+    );
+    assert_eq!(captures[0].original_path, "/tmp/shot.png");
+
+    // The arg following --output is the rewritten temp path.
+    assert_eq!(rewritten[0], "browse");
+    assert_eq!(rewritten[1], "screenshot");
+    assert_eq!(rewritten[2], "--output");
+    assert_ne!(
+        rewritten[3], "/tmp/shot.png",
+        "named-flag value should have been rewritten to a temp path"
+    );
+    assert!(
+        rewritten[3].contains(".ati-cli-out-"),
+        "rewritten value should be a temp path: {}",
+        rewritten[3]
+    );
+}
+
+/// Variant: positional form on the same provider config — the positional
+/// rewrite still kicks in (no --output flag → step 1 finds nothing → step 2
+/// handles the bare path).
+#[test]
+fn test_apply_output_captures_positional_still_works_when_both_configured() {
+    use ati::core::cli_executor::apply_output_captures;
+    let mut provider = make_cli_provider("bb_clone", "true", vec![], HashMap::new(), None);
+    provider.cli_output_args = vec!["--output".to_string(), "-o".to_string()];
+    provider
+        .cli_output_positional
+        .insert("browse screenshot".to_string(), 0);
+
+    let raw_args = vec![
+        "browse".to_string(),
+        "screenshot".to_string(),
+        "/tmp/positional.png".to_string(),
+    ];
+    let (rewritten, captures) = apply_output_captures(&provider, &raw_args).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].original_path, "/tmp/positional.png");
+    assert_ne!(rewritten[2], "/tmp/positional.png");
 }

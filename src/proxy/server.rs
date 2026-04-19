@@ -348,8 +348,13 @@ async fn handle_call(
     // Extract JWT claims from request extensions (set by auth middleware)
     let claims = req.extensions().get::<TokenClaims>().cloned();
 
-    // Parse request body
-    let body_bytes = match axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await {
+    // Parse request body. The ceiling must accommodate the worst-case upload
+    // payload: `file_manager::MAX_UPLOAD_BYTES` of raw bytes, base64-inflated
+    // (~1.34×), plus a few KB of JSON framing. Anti-abuse is enforced
+    // downstream by per-tool limits (`max_bytes` on downloads, `MAX_UPLOAD_BYTES`
+    // on uploads) and by JWT scope + rate limits — this is just the outer
+    // wire cap.
+    let body_bytes = match axum::body::to_bytes(req.into_body(), max_call_body_bytes()).await {
         Ok(b) => b,
         Err(e) => {
             return (
@@ -556,6 +561,27 @@ async fn handle_call(
                     Json(CallResponse {
                         result: Value::Null,
                         error: Some(format!("CLI error: {e}")),
+                    }),
+                ),
+            }
+        }
+        "file_manager" => {
+            let args_map = call_req.args_as_map();
+            match dispatch_file_manager(&call_req.tool_name, &args_map, provider, &state.keyring)
+                .await
+            {
+                Ok(result) => (
+                    StatusCode::OK,
+                    Json(CallResponse {
+                        result,
+                        error: None,
+                    }),
+                ),
+                Err((status, msg)) => (
+                    status,
+                    Json(CallResponse {
+                        result: Value::Null,
+                        error: Some(msg),
                     }),
                 ),
             }
@@ -1732,7 +1758,22 @@ async fn auth_middleware(
 // --- Router builder ---
 
 /// Build the axum Router from a pre-constructed ProxyState.
+/// Outer body-size ceiling for `POST /call`. Large enough to carry the worst
+/// case `file_manager:upload` payload (`MAX_UPLOAD_BYTES` of raw bytes,
+/// base64-inflated ~4/3×, plus a few KB of JSON framing).
+///
+/// Per-tool limits (`max_bytes`, `MAX_UPLOAD_BYTES`) plus JWT scopes + rate
+/// limits are the real gates — this is just the outermost wrapper check.
+fn max_call_body_bytes() -> usize {
+    (crate::core::file_manager::MAX_UPLOAD_BYTES as usize)
+        .saturating_mul(4)
+        .saturating_div(3)
+        .saturating_add(8 * 1024)
+}
+
 pub fn build_router(state: Arc<ProxyState>) -> Router {
+    use axum::extract::DefaultBodyLimit;
+
     Router::new()
         .route("/call", post(handle_call))
         .route("/help", post(handle_help))
@@ -1752,6 +1793,11 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/skillati/{name}/ref/{reference}", get(handle_skillati_ref))
         .route("/health", get(handle_health))
         .route("/.well-known/jwks.json", get(handle_jwks))
+        // Raise axum's default 2 MB body-extractor limit so request bodies
+        // carrying base64-encoded upload payloads aren't rejected before the
+        // handler runs. `handle_call` still enforces its own
+        // `max_call_body_bytes()` cap when streaming the body to bytes.
+        .layer(DefaultBodyLimit::max(max_call_body_bytes()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -1933,7 +1979,75 @@ pub async fn run(
     Ok(())
 }
 
-/// Write an audit entry from the proxy server. Failures are silently ignored.
+/// Dispatch a `file_manager:*` tool call. Returns either a JSON payload or an
+/// (HTTP status, message) error for the caller to forward.
+async fn dispatch_file_manager(
+    tool_name: &str,
+    args: &HashMap<String, Value>,
+    provider: &Provider,
+    keyring: &Keyring,
+) -> Result<Value, (StatusCode, String)> {
+    use crate::core::file_manager::{self, DownloadArgs, FileManagerError, UploadArgs};
+
+    match tool_name {
+        "file_manager:download" => {
+            let parsed = DownloadArgs::from_value(args).map_err(|e| match e {
+                FileManagerError::MissingArg(_) | FileManagerError::InvalidArg { .. } => {
+                    (StatusCode::BAD_REQUEST, e.to_string())
+                }
+                FileManagerError::BadHeader { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
+                other => (StatusCode::BAD_REQUEST, other.to_string()),
+            })?;
+            let result = file_manager::fetch_bytes(&parsed)
+                .await
+                .map_err(|e| match e {
+                    FileManagerError::PrivateUrl(_) => (StatusCode::FORBIDDEN, e.to_string()),
+                    FileManagerError::HostNotAllowed { .. } => {
+                        (StatusCode::FORBIDDEN, e.to_string())
+                    }
+                    FileManagerError::Upstream { status, .. } => (
+                        StatusCode::from_u16(status.clamp(400, 599))
+                            .unwrap_or(StatusCode::BAD_GATEWAY),
+                        e.to_string(),
+                    ),
+                    FileManagerError::SizeCap { .. } => {
+                        (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
+                    }
+                    FileManagerError::Http { .. } | FileManagerError::InvalidUrl(_) => {
+                        (StatusCode::BAD_GATEWAY, e.to_string())
+                    }
+                    other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+                })?;
+            Ok(file_manager::build_download_response(&result))
+        }
+        "file_manager:upload" => {
+            let parsed = UploadArgs::from_wire(args)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            match crate::core::file_manager::upload_to_destination(
+                parsed,
+                &provider.upload_destinations,
+                provider.upload_default_destination.as_deref(),
+                keyring,
+            )
+            .await
+            {
+                Ok(v) => Ok(v),
+                Err(e @ FileManagerError::UploadNotConfigured) => {
+                    Err((StatusCode::SERVICE_UNAVAILABLE, e.to_string()))
+                }
+                Err(e @ FileManagerError::UnknownDestination(_)) => {
+                    Err((StatusCode::FORBIDDEN, e.to_string()))
+                }
+                Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
+            }
+        }
+        other => Err((
+            StatusCode::NOT_FOUND,
+            format!("Unknown file_manager tool: '{other}'"),
+        )),
+    }
+}
+
 fn write_proxy_audit(
     call_req: &CallRequest,
     agent_sub: &str,

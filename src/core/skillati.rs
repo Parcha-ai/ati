@@ -632,7 +632,7 @@ impl SkillAtiClient {
         let mut names = gcs.list_skill_names().await?;
         names.sort();
 
-        let mut entries: Vec<SkillAtiCatalogEntry> = stream::iter(names.into_iter())
+        let mut entries: Vec<SkillAtiCatalogEntry> = stream::iter(names)
             .map(|name| async move {
                 let raw = self.read_text(&name, "SKILL.md").await?;
                 let parsed = parse_skill_metadata(&name, &raw, None)
@@ -657,7 +657,7 @@ impl SkillAtiClient {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
-        entries.sort_by(|a, b| a.meta.name.to_lowercase().cmp(&b.meta.name.to_lowercase()));
+        entries.sort_by_key(|a| a.meta.name.to_lowercase());
         Ok(entries)
     }
 
@@ -774,7 +774,7 @@ pub fn build_catalog_manifest(
         skills.push(build_catalog_entry_from_dir(&skill_dir)?);
     }
 
-    skills.sort_by(|a, b| a.meta.name.to_lowercase().cmp(&b.meta.name.to_lowercase()));
+    skills.sort_by_key(|a| a.meta.name.to_lowercase());
     Ok(SkillAtiCatalogManifest {
         version: default_catalog_version(),
         generated_at: Utc::now().to_rfc3339(),
