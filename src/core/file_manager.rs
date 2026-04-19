@@ -692,20 +692,30 @@ fn require_public_https_url(url: &str) -> Result<(), FileManagerError> {
 
 fn is_private_ip_addr(ip: std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(ip) => {
-            ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127)
-        }
+        std::net::IpAddr::V4(ip) => is_private_ipv4(ip),
         std::net::IpAddr::V6(ip) => {
+            // IPv4-mapped IPv6 (::ffff:a.b.c.d): a compromised server could
+            // return a URL like `https://[::ffff:169.254.169.254]/` and bypass
+            // the v4-only private checks. Unwrap the mapped form and recurse
+            // through the v4 rules.
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_private_ipv4(v4);
+            }
             ip.is_loopback()
                 || ip.is_unspecified()
                 || ip.is_unique_local()
                 || ip.is_unicast_link_local()
         }
     }
+}
+
+fn is_private_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        // Carrier-grade NAT (RFC 6598): 100.64.0.0/10
+        || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127)
 }
 
 /// Upload to fal.ai's CDN via their two-step signed-token flow.
@@ -1088,6 +1098,32 @@ mod tests {
     #[test]
     fn require_public_https_rejects_link_local_ipv6() {
         assert!(require_public_https_url("https://[fe80::1]/x").is_err());
+    }
+
+    /// Regression: v1 of `is_private_ip_addr` missed IPv4-mapped IPv6 addresses,
+    /// letting a compromised server bypass the SSRF guard with
+    /// `::ffff:169.254.169.254` et al.
+    #[test]
+    fn require_public_https_rejects_ipv4_mapped_metadata_address() {
+        assert!(require_public_https_url("https://[::ffff:169.254.169.254]/").is_err());
+    }
+
+    #[test]
+    fn require_public_https_rejects_ipv4_mapped_loopback() {
+        assert!(require_public_https_url("https://[::ffff:127.0.0.1]/x").is_err());
+    }
+
+    #[test]
+    fn require_public_https_rejects_ipv4_mapped_rfc1918() {
+        assert!(require_public_https_url("https://[::ffff:10.0.0.1]/x").is_err());
+        assert!(require_public_https_url("https://[::ffff:192.168.1.1]/x").is_err());
+        assert!(require_public_https_url("https://[::ffff:172.16.0.1]/x").is_err());
+    }
+
+    #[test]
+    fn require_public_https_rejects_ipv4_mapped_cgnat() {
+        // 100.64.0.0/10 — carrier-grade NAT
+        assert!(require_public_https_url("https://[::ffff:100.64.0.1]/x").is_err());
     }
 
     #[test]

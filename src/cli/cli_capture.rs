@@ -59,6 +59,15 @@ pub fn materialize_outputs(response: Value) -> Result<Value, Box<dyn std::error:
         let bytes = B64
             .decode(b64.as_bytes())
             .map_err(|e| format!("output '{path}' has invalid base64: {e}"))?;
+        // Create intermediate directories. Agents routinely pass deep paths
+        // like `/workspace/out/renders/frame.png` — without this, a missing
+        // parent would fail the write even when the capture itself succeeded.
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create parent directory for '{path}': {e}"))?;
+            }
+        }
         std::fs::write(path, &bytes)
             .map_err(|e| format!("failed to write output '{path}': {e}"))?;
         // Strip the base64 from the user-facing response (it's already on disk
@@ -125,5 +134,34 @@ mod tests {
             }
         });
         assert!(materialize_outputs(response).is_err());
+    }
+
+    /// Agents routinely pass deep paths where intermediate directories don't
+    /// yet exist (e.g. a fresh sandbox workspace). Without create_dir_all the
+    /// write would fail with ENOENT.
+    #[test]
+    fn writes_to_deep_path_creates_intermediate_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep_path = dir.path().join("a").join("b").join("c").join("frame.png");
+        let path_str = deep_path.to_string_lossy().to_string();
+        let bytes = b"deep-bytes".to_vec();
+        let response = json!({
+            "outputs": {
+                path_str.clone(): {
+                    "content_base64": B64.encode(&bytes),
+                    "size_bytes": bytes.len(),
+                }
+            }
+        });
+
+        assert!(
+            !deep_path.parent().unwrap().exists(),
+            "parent dir must not exist before the call"
+        );
+
+        materialize_outputs(response).unwrap();
+
+        assert!(deep_path.exists(), "deep path should have been created");
+        assert_eq!(std::fs::read(&deep_path).unwrap(), bytes);
     }
 }
