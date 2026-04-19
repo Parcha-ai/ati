@@ -287,7 +287,7 @@ fn substitute_path_params(
 
 /// Percent-encode a path segment value. Encodes everything except unreserved chars
 /// (RFC 3986 section 2.3: ALPHA / DIGIT / "-" / "." / "_" / "~").
-fn percent_encode_path_segment(s: &str) -> String {
+pub(crate) fn percent_encode_path_segment(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len());
     for byte in s.bytes() {
         match byte {

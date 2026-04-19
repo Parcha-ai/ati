@@ -60,11 +60,33 @@ pub struct GcsClient {
     http: reqwest::Client,
     service_account: ServiceAccount,
     token: Mutex<Option<CachedToken>>,
+    scope: String,
 }
 
 impl GcsClient {
-    /// Create a new GCS client from a bucket name and service account JSON string.
+    /// Create a new read-only GCS client (used by the skill registry loader).
     pub fn new(bucket: String, service_account_json: &str) -> Result<Self, GcsError> {
+        Self::new_with_scope(
+            bucket,
+            service_account_json,
+            "https://www.googleapis.com/auth/devstorage.read_only",
+        )
+    }
+
+    /// Create a read/write GCS client (used by the file_manager upload tool).
+    pub fn new_read_write(bucket: String, service_account_json: &str) -> Result<Self, GcsError> {
+        Self::new_with_scope(
+            bucket,
+            service_account_json,
+            "https://www.googleapis.com/auth/devstorage.read_write",
+        )
+    }
+
+    fn new_with_scope(
+        bucket: String,
+        service_account_json: &str,
+        scope: &str,
+    ) -> Result<Self, GcsError> {
         let sa: ServiceAccount = serde_json::from_str(service_account_json)
             .map_err(|e| GcsError::InvalidCredentials(e.to_string()))?;
 
@@ -75,7 +97,7 @@ impl GcsClient {
         }
 
         let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(GcsError::Http)?;
 
@@ -84,7 +106,13 @@ impl GcsClient {
             http,
             service_account: sa,
             token: Mutex::new(None),
+            scope: scope.to_string(),
         })
+    }
+
+    /// Bucket name this client targets.
+    pub fn bucket(&self) -> &str {
+        &self.bucket
     }
 
     /// Get a valid access token, refreshing if expired.
@@ -111,7 +139,7 @@ impl GcsClient {
 
         let claims = serde_json::json!({
             "iss": self.service_account.client_email,
-            "scope": "https://www.googleapis.com/auth/devstorage.read_only",
+            "scope": self.scope,
             "aud": self.service_account.token_uri,
             "iat": now,
             "exp": now + 3600,
@@ -290,6 +318,83 @@ impl GcsClient {
         String::from_utf8(bytes).map_err(|e| GcsError::Utf8(e.to_string()))
     }
 
+    /// Upload bytes to `<bucket>/<object_name>` using the GCS JSON simple upload API.
+    /// Returns the public-style URL `https://storage.googleapis.com/<bucket>/<object_name>`.
+    /// The object is *not* made public — the URL only resolves if the bucket grants
+    /// public read access, which is the proxy-operator's responsibility to configure.
+    pub async fn upload_object(
+        &self,
+        object_name: &str,
+        bytes: Vec<u8>,
+        content_type: &str,
+    ) -> Result<String, GcsError> {
+        let url = format!(
+            "https://storage.googleapis.com/upload/storage/v1/b/{}/o?uploadType=media&name={}",
+            self.bucket,
+            urlencoded(object_name)
+        );
+
+        // Retry 429/5xx up to 3 times with exponential backoff — matches the
+        // pattern used by `get_with_retry`. Uploads are idempotent with the
+        // JSON simple-upload API (each call fully replaces the object at
+        // `name=`), so retrying on transient failures is safe.
+        //
+        // `bytes::Bytes` is Arc-backed, so cloning across retries is O(1) —
+        // the alternative is a 1 GB memcpy per attempt on large uploads.
+        let body = bytes::Bytes::from(bytes);
+        let mut last_err: Option<GcsError> = None;
+        for attempt in 0..3 {
+            let token = self.access_token().await?;
+            match self
+                .http
+                .post(&url)
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(body.clone())
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if status == 429 || status >= 500 {
+                        let body = resp.text().await.unwrap_or_default();
+                        last_err = Some(GcsError::Api {
+                            status,
+                            message: body,
+                        });
+                        let delay = std::time::Duration::from_millis(500 * (1 << attempt));
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    if !resp.status().is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(GcsError::Api {
+                            status,
+                            message: body,
+                        });
+                    }
+                    // Success — return the canonical public URL. Path-style so
+                    // object names with `/` segments round-trip cleanly.
+                    return Ok(format!(
+                        "https://storage.googleapis.com/{}/{}",
+                        self.bucket,
+                        object_name
+                            .split('/')
+                            .map(percent_encode_segment)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    ));
+                }
+                Err(e) => {
+                    last_err = Some(GcsError::Http(e));
+                    let delay = std::time::Duration::from_millis(500 * (1 << attempt));
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+        Err(last_err.expect("loop body sets last_err on every failure path"))
+    }
+
     /// Retry-aware wrapper for GET requests. Retries on 429/5xx up to 3 times with backoff.
     async fn get_with_retry(&self, url: &str) -> Result<reqwest::Response, GcsError> {
         let mut last_err = None;
@@ -331,6 +436,10 @@ fn urlencoded(s: &str) -> String {
         .replace('&', "%26")
         .replace('=', "%3D")
 }
+
+// `percent_encode_segment` used to live here; it was an exact duplicate of
+// `core::http::percent_encode_path_segment`. Import that instead.
+use crate::core::http::percent_encode_path_segment as percent_encode_segment;
 
 // ---------------------------------------------------------------------------
 // GCS skill source — loads all skills from a bucket into memory

@@ -140,6 +140,12 @@ pub async fn execute_with_registry(
     // Note: -J/--json may be swallowed by trailing_var_arg when placed after
     // tool args. This is handled in execute_local's output formatting.
 
+    // file_manager tools need client-side file IO — short-circuit to a dedicated
+    // path that handles the local file work then re-dispatches to local or proxy.
+    if super::file_manager::is_file_manager_tool(tool_name) {
+        return execute_file_manager(cli, tool_name, &args, raw_args).await;
+    }
+
     // Auto-detect: proxy mode if ATI_PROXY_URL is set
     if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
         tracing::debug!(proxy_url = %proxy_url, "mode: proxy");
@@ -149,6 +155,78 @@ pub async fn execute_with_registry(
     // Local mode: keyring + direct HTTP
     tracing::debug!("mode: local (no ATI_PROXY_URL)");
     execute_local(cli, tool_name, &args, raw_args, registry).await
+}
+
+/// Handle the virtual `file_manager:*` tools. These need client-side file IO
+/// (read for upload, write for download) regardless of local-vs-proxy mode.
+async fn execute_file_manager(
+    cli: &Cli,
+    tool_name: &str,
+    args: &HashMap<String, Value>,
+    raw_args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use super::file_manager::{execute as fm_execute, DispatchMode};
+
+    // Honor -J/--json swallowed by trailing_var_arg.
+    let effective_output = if raw_args.iter().any(|a| a == "-J" || a == "--json") {
+        crate::OutputFormat::Json
+    } else {
+        cli.output.clone()
+    };
+
+    let start = std::time::Instant::now();
+
+    let result = if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
+        tracing::debug!(proxy_url = %proxy_url, "file_manager: proxy mode");
+        fm_execute(
+            tool_name,
+            args,
+            &effective_output,
+            DispatchMode::Proxy {
+                proxy_url: &proxy_url,
+            },
+        )
+        .await
+    } else {
+        tracing::debug!("file_manager: local mode");
+        let ati_dir = common::ati_dir();
+        let keyring = load_keyring(&ati_dir);
+        fm_execute(
+            tool_name,
+            args,
+            &effective_output,
+            DispatchMode::Local { keyring: &keyring },
+        )
+        .await
+    };
+
+    // Audit
+    let duration = start.elapsed();
+    let scopes = common::load_local_scopes_from_env()
+        .unwrap_or_else(|_| crate::core::scope::ScopeConfig::unrestricted());
+    let (status, error_msg) = match &result {
+        Ok(_) => (crate::core::audit::AuditStatus::Ok, None),
+        Err(e) => (crate::core::audit::AuditStatus::Error, Some(e.to_string())),
+    };
+    let audit_entry = crate::core::audit::AuditEntry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        tool: tool_name.to_string(),
+        args: crate::core::audit::sanitize_args(&serde_json::json!(args)),
+        status,
+        duration_ms: duration.as_millis() as u64,
+        agent_sub: scopes.sub.clone(),
+        job_id: None,
+        sandbox_id: None,
+        error: error_msg,
+        exit_code: None,
+    };
+    if let Err(e) = crate::core::audit::append(&audit_entry) {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
+    let formatted = result?;
+    println!("{formatted}");
+    Ok(())
 }
 
 /// Load keyring using cascade: keyring.enc (sealed) → keyring.enc (persistent) → credentials → empty.
@@ -170,9 +248,18 @@ pub(crate) fn load_keyring(ati_dir: &Path) -> Keyring {
     // 3. Try plaintext credentials (local mode)
     let creds_path = ati_dir.join("credentials");
     if creds_path.exists() {
-        if let Ok(kr) = Keyring::load_credentials(&creds_path) {
-            tracing::debug!("keyring: credentials (plaintext)");
-            return kr;
+        match Keyring::load_credentials(&creds_path) {
+            Ok(kr) => {
+                tracing::debug!("keyring: credentials (plaintext)");
+                return kr;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %creds_path.display(),
+                    error = %e,
+                    "failed to load credentials file"
+                );
+            }
         }
     }
 
@@ -309,7 +396,10 @@ async fn execute_local(
             )
             .await
             {
-                Ok(value) => Ok(output::format_output(&value, &effective_output)),
+                Ok(value) => match super::cli_capture::materialize_outputs(value).await {
+                    Ok(processed) => Ok(output::format_output(&processed, &effective_output)),
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e.into()),
             }
         }
@@ -404,6 +494,10 @@ async fn execute_via_proxy(
     }
 
     let result = exec_result?;
+    // CLI tools whose providers configure output capture return an `outputs`
+    // envelope in `result`. Materialize those files inside the sandbox and
+    // strip the base64 payload before formatting.
+    let result = super::cli_capture::materialize_outputs(result).await?;
     // Handle -J/--json swallowed by trailing_var_arg
     let effective_output = if raw_args.iter().any(|a| a == "-J" || a == "--json") {
         crate::OutputFormat::Json

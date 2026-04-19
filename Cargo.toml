@@ -1,6 +1,6 @@
 [package]
 name = "agent-tools-interface"
-version = "0.7.8"
+version = "0.7.9"
 edition = "2021"
 description = "Agent Tools Interface — secure CLI for AI agent tool execution"
 license = "Apache-2.0"
@@ -30,7 +30,11 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "stream"], default-features = false }
+
+# Ref-counted byte buffer (used to avoid cloning large upload payloads across
+# retry attempts and across the reqwest body handoff).
+bytes = "1"
 
 # HTTP server (for `ati proxy`)
 axum = { version = "0.8", features = ["json"] }
@@ -99,4 +103,4 @@ assert_cmd = "2"
 predicates = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "stream"], default-features = false }

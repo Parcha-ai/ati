@@ -3,6 +3,7 @@ pub mod auth_generator;
 pub mod cli_executor;
 pub mod dirs;
 pub mod error;
+pub mod file_manager;
 pub mod gcs;
 pub mod http;
 pub mod jwt;
