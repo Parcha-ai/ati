@@ -355,7 +355,7 @@ fn make_temp_for(original_path: &str) -> Result<PathBuf, CliError> {
 /// the agent's original paths. Always cleans up temp files (even on size cap
 /// violation), and never silently skips a missing file — agent supplied a
 /// path expecting a result, so missing = error.
-fn collect_capture_results(
+async fn collect_capture_results(
     captures: &[CapturedOutput],
 ) -> Result<HashMap<String, serde_json::Value>, CliError> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -363,9 +363,9 @@ fn collect_capture_results(
     let mut out = HashMap::with_capacity(captures.len());
 
     for cap in captures {
-        let bytes_result = std::fs::read(&cap.temp_path);
+        let bytes_result = tokio::fs::read(&cap.temp_path).await;
         // Cleanup happens regardless of read outcome.
-        let _ = std::fs::remove_file(&cap.temp_path);
+        let _ = tokio::fs::remove_file(&cap.temp_path).await;
 
         let bytes = match bytes_result {
             Ok(b) => b,
@@ -394,36 +394,7 @@ fn collect_capture_results(
     Ok(out)
 }
 
-/// Best-effort MIME type from a path's extension. Mirrors the small table in
-/// `cli/file_manager.rs::guess_content_type`. Falls back to octet-stream.
-fn guess_content_type(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    let ext = lower.rsplit('.').next().unwrap_or("");
-    match ext {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "mp4" | "m4v" => "video/mp4",
-        "mov" => "video/quicktime",
-        "webm" => "video/webm",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" | "oga" => "audio/ogg",
-        "flac" => "audio/flac",
-        "m4a" => "audio/mp4",
-        "csv" => "text/csv",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "zip" => "application/zip",
-        "html" | "htm" => "text/html",
-        "md" => "text/markdown",
-        "txt" | "log" => "text/plain",
-        _ => "application/octet-stream",
-    }
-}
+use crate::core::file_manager::guess_content_type;
 
 /// Best-effort cleanup — used when the subprocess errors before we get to the
 /// normal collection path.
@@ -577,7 +548,7 @@ pub async fn execute_with_gen(
 
     // Captures present → return a structured envelope so the sandbox CLI can
     // distinguish "stdout text" from "files the agent should write to disk".
-    let outputs = collect_capture_results(&captures)?;
+    let outputs = collect_capture_results(&captures).await?;
     Ok(serde_json::json!({
         "stdout": stdout.trim().to_string(),
         "outputs": outputs,

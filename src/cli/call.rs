@@ -396,7 +396,7 @@ async fn execute_local(
             )
             .await
             {
-                Ok(value) => match super::cli_capture::materialize_outputs(value) {
+                Ok(value) => match super::cli_capture::materialize_outputs(value).await {
                     Ok(processed) => Ok(output::format_output(&processed, &effective_output)),
                     Err(e) => Err(e),
                 },
@@ -497,7 +497,7 @@ async fn execute_via_proxy(
     // CLI tools whose providers configure output capture return an `outputs`
     // envelope in `result`. Materialize those files inside the sandbox and
     // strip the base64 payload before formatting.
-    let result = super::cli_capture::materialize_outputs(result)?;
+    let result = super::cli_capture::materialize_outputs(result).await?;
     // Handle -J/--json swallowed by trailing_var_arg
     let effective_output = if raw_args.iter().any(|a| a == "-J" || a == "--json") {
         crate::OutputFormat::Json

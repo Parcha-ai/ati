@@ -54,12 +54,10 @@ async fn run_download(
         .get("out")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let inline = args
-        .get("inline")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
 
-    // Strip CLI-only args before sending to server.
+    // Strip CLI-only args before sending to server. `inline` is accepted (and
+    // documented) for callers that prefer to be explicit, but it's a no-op —
+    // base64 is returned inline any time `--out` is absent.
     let mut server_args = args.clone();
     server_args.remove("out");
     server_args.remove("inline");
@@ -103,12 +101,11 @@ async fn run_download(
     });
 
     if let Some(path) = out_path {
-        std::fs::write(&path, &bytes).map_err(|e| format!("failed to write {path}: {e}"))?;
+        tokio::fs::write(&path, &bytes)
+            .await
+            .map_err(|e| format!("failed to write {path}: {e}"))?;
         out_json["path"] = Value::String(path);
-    } else if inline {
-        out_json["content_base64"] = Value::String(content_b64.to_string());
     } else {
-        // No --out and no --inline flag → return base64 by default (issue's "inline if absent").
         out_json["content_base64"] = Value::String(content_b64.to_string());
     }
 
@@ -152,7 +149,7 @@ async fn run_upload(
         .and_then(|f| f.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("upload-{}", chrono::Utc::now().timestamp_millis()));
-    let content_type = explicit_ct.unwrap_or_else(|| guess_content_type(&path));
+    let content_type = explicit_ct.unwrap_or_else(|| fm::guess_content_type(&path).to_string());
 
     let mut wire_args: HashMap<String, Value> = HashMap::new();
     wire_args.insert(
@@ -160,7 +157,12 @@ async fn run_upload(
         Value::String(explicit_object_name.clone().unwrap_or(filename)),
     );
     wire_args.insert("content_type".into(), Value::String(content_type));
-    wire_args.insert("content_base64".into(), Value::String(B64.encode(&bytes)));
+    // Encode then drop the raw bytes before the HTTP call — for a 500 MB
+    // upload this frees the raw Vec so peak RAM stays at ~1.34× instead of
+    // 2.34× (raw + base64 both held through the proxy POST).
+    let encoded = B64.encode(&bytes);
+    drop(bytes);
+    wire_args.insert("content_base64".into(), Value::String(encoded));
     if let Some(ref d) = destination {
         wire_args.insert("destination".into(), Value::String(d.clone()));
     }
@@ -211,54 +213,9 @@ async fn upload_local(
     .await?)
 }
 
-/// Map common extensions to MIME types. Falls back to octet-stream.
-fn guess_content_type(path: &str) -> String {
-    let lower = path.to_lowercase();
-    let ext = lower.rsplit('.').next().unwrap_or("");
-    match ext {
-        "mp4" | "m4v" => "video/mp4",
-        "mov" => "video/quicktime",
-        "webm" => "video/webm",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" | "oga" => "audio/ogg",
-        "flac" => "audio/flac",
-        "m4a" => "audio/mp4",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "csv" => "text/csv",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "zip" => "application/zip",
-        "txt" | "log" => "text/plain",
-        "html" | "htm" => "text/html",
-        "md" => "text/markdown",
-        _ => "application/octet-stream",
-    }
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn guess_content_type_mp4() {
-        assert_eq!(guess_content_type("/tmp/a.mp4"), "video/mp4");
-        assert_eq!(guess_content_type("A.MP4"), "video/mp4");
-    }
-
-    #[test]
-    fn guess_content_type_unknown() {
-        assert_eq!(
-            guess_content_type("/tmp/mystery.xyz"),
-            "application/octet-stream"
-        );
-    }
 
     #[test]
     fn is_file_manager_tool_matches() {

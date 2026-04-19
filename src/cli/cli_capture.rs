@@ -1,39 +1,20 @@
-//! Sandbox-side handling of CLI tool responses that contain captured output files.
-//!
-//! When a CLI tool was invoked with output-path args (per the provider manifest's
-//! `cli_output_args` / `cli_output_positional`), the proxy/local executor returns
-//! a structured envelope:
-//!
-//! ```json
-//! {
-//!   "stdout": "<subprocess stdout>",
-//!   "outputs": {
-//!     "/tmp/shot.png": {
-//!       "content_base64": "...",
-//!       "size_bytes": 18432,
-//!       "content_type": "image/png"
-//!     }
-//!   }
-//! }
-//! ```
-//!
-//! This module decodes each base64 payload and writes it to the agent's
-//! original path inside the sandbox, then rewrites the response so that the
-//! base64 isn't echoed back through stdout (which would be useless noise — the
-//! file is what the agent wanted).
+//! Sandbox-side handling of CLI tool responses with an `outputs` envelope —
+//! the proxy rewrote agent-supplied output paths to proxy-side temps and
+//! ships the bytes back as base64 per captured file. This module decodes
+//! each payload, writes to the agent's original path, and strips the base64
+//! from the user-facing response.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::Value;
 
-/// Inspect a CLI tool response. If it contains the `outputs` envelope, decode
-/// and write each captured file to disk on the sandbox side, then return a
-/// version of the response with `content_base64` stripped (replaced with a
-/// `path` field on each output) so the agent sees a clean record of what
-/// landed where.
+/// Decode any `outputs` envelope in a CLI tool response, write each captured
+/// file to disk on the sandbox side, and strip the base64 payload from the
+/// returned JSON (replacing it with a `path` field per output).
 ///
-/// Returns the (possibly rewritten) response. On any decode/write failure,
-/// returns the underlying error so the caller can surface it.
-pub fn materialize_outputs(response: Value) -> Result<Value, Box<dyn std::error::Error>> {
+/// Async because captured files can be up to `ATI_CLI_MAX_OUTPUT_BYTES`
+/// (default 500 MB) each — blocking disk I/O on the tokio runtime would
+/// stall every other task on the same worker.
+pub async fn materialize_outputs(response: Value) -> Result<Value, Box<dyn std::error::Error>> {
     let mut response = response;
     let outputs_val = match response.get_mut("outputs") {
         Some(v) => v,
@@ -59,20 +40,18 @@ pub fn materialize_outputs(response: Value) -> Result<Value, Box<dyn std::error:
         let bytes = B64
             .decode(b64.as_bytes())
             .map_err(|e| format!("output '{path}' has invalid base64: {e}"))?;
-        // Create intermediate directories. Agents routinely pass deep paths
-        // like `/workspace/out/renders/frame.png` — without this, a missing
-        // parent would fail the write even when the capture itself succeeded.
+        // mkdir -p the parent so deep sandbox paths like
+        // /workspace/out/renders/frame.png land when intermediates don't exist.
         if let Some(parent) = std::path::Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
+                tokio::fs::create_dir_all(parent)
+                    .await
                     .map_err(|e| format!("failed to create parent directory for '{path}': {e}"))?;
             }
         }
-        std::fs::write(path, &bytes)
+        tokio::fs::write(path, &bytes)
+            .await
             .map_err(|e| format!("failed to write output '{path}': {e}"))?;
-        // Strip the base64 from the user-facing response (it's already on disk
-        // and re-emitting it just wastes context). Keep size + content_type so
-        // the agent can sanity-check what landed.
         entry_obj.remove("content_base64");
         entry_obj.insert("path".to_string(), Value::String(path.clone()));
     }
@@ -85,15 +64,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn no_outputs_field_passes_through() {
+    #[tokio::test]
+    async fn no_outputs_field_passes_through() {
         let v = json!({"stdout": "ok"});
-        let out = materialize_outputs(v.clone()).unwrap();
+        let out = materialize_outputs(v.clone()).await.unwrap();
         assert_eq!(out, v);
     }
 
-    #[test]
-    fn writes_outputs_to_disk_and_strips_base64() {
+    #[tokio::test]
+    async fn writes_outputs_to_disk_and_strips_base64() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shot.png");
         let path_str = path.to_string_lossy().to_string();
@@ -110,7 +89,7 @@ mod tests {
             }
         });
 
-        let materialized = materialize_outputs(response).unwrap();
+        let materialized = materialize_outputs(response).await.unwrap();
 
         // File was written
         let on_disk = std::fs::read(&path).unwrap();
@@ -124,8 +103,8 @@ mod tests {
         assert_eq!(entry["content_type"], "image/png");
     }
 
-    #[test]
-    fn invalid_base64_returns_error() {
+    #[tokio::test]
+    async fn invalid_base64_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x.bin").to_string_lossy().to_string();
         let response = json!({
@@ -133,14 +112,14 @@ mod tests {
                 path: {"content_base64": "!!!not base64!!!", "size_bytes": 0}
             }
         });
-        assert!(materialize_outputs(response).is_err());
+        assert!(materialize_outputs(response).await.is_err());
     }
 
     /// Agents routinely pass deep paths where intermediate directories don't
     /// yet exist (e.g. a fresh sandbox workspace). Without create_dir_all the
     /// write would fail with ENOENT.
-    #[test]
-    fn writes_to_deep_path_creates_intermediate_directories() {
+    #[tokio::test]
+    async fn writes_to_deep_path_creates_intermediate_directories() {
         let dir = tempfile::tempdir().unwrap();
         let deep_path = dir.path().join("a").join("b").join("c").join("frame.png");
         let path_str = deep_path.to_string_lossy().to_string();
@@ -159,7 +138,7 @@ mod tests {
             "parent dir must not exist before the call"
         );
 
-        materialize_outputs(response).unwrap();
+        materialize_outputs(response).await.unwrap();
 
         assert!(deep_path.exists(), "deep path should have been created");
         assert_eq!(std::fs::read(&deep_path).unwrap(), bytes);

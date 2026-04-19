@@ -335,9 +335,13 @@ impl GcsClient {
         );
 
         // Retry 429/5xx up to 3 times with exponential backoff — matches the
-        // pattern used by `get_with_retry` on the read path. Uploads are
-        // idempotent with the JSON simple-upload API (each call fully replaces
-        // the object at `name=`), so retrying on transient failures is safe.
+        // pattern used by `get_with_retry`. Uploads are idempotent with the
+        // JSON simple-upload API (each call fully replaces the object at
+        // `name=`), so retrying on transient failures is safe.
+        //
+        // `bytes::Bytes` is Arc-backed, so cloning across retries is O(1) —
+        // the alternative is a 1 GB memcpy per attempt on large uploads.
+        let body = bytes::Bytes::from(bytes);
         let mut last_err: Option<GcsError> = None;
         for attempt in 0..3 {
             let token = self.access_token().await?;
@@ -346,7 +350,7 @@ impl GcsClient {
                 .post(&url)
                 .bearer_auth(&token)
                 .header(reqwest::header::CONTENT_TYPE, content_type)
-                .body(bytes.clone())
+                .body(body.clone())
                 .send()
                 .await
             {
@@ -433,19 +437,9 @@ fn urlencoded(s: &str) -> String {
         .replace('=', "%3D")
 }
 
-/// Percent-encode one path segment (preserves unreserved per RFC 3986).
-fn percent_encode_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{:02X}", byte)),
-        }
-    }
-    out
-}
+// `percent_encode_segment` used to live here; it was an exact duplicate of
+// `core::http::percent_encode_path_segment`. Import that instead.
+use crate::core::http::percent_encode_path_segment as percent_encode_segment;
 
 // ---------------------------------------------------------------------------
 // GCS skill source — loads all skills from a bucket into memory

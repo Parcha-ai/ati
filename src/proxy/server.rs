@@ -1989,57 +1989,30 @@ async fn dispatch_file_manager(
 ) -> Result<Value, (StatusCode, String)> {
     use crate::core::file_manager::{self, DownloadArgs, FileManagerError, UploadArgs};
 
+    // One mapping, derived from FileManagerError::http_status, so adding an
+    // error variant can't silently regress one handler while the other updates.
+    let to_resp = |e: FileManagerError| {
+        let status =
+            StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, e.to_string())
+    };
+
     match tool_name {
         "file_manager:download" => {
-            let parsed = DownloadArgs::from_value(args).map_err(|e| match e {
-                FileManagerError::MissingArg(_) | FileManagerError::InvalidArg { .. } => {
-                    (StatusCode::BAD_REQUEST, e.to_string())
-                }
-                FileManagerError::BadHeader { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
-                other => (StatusCode::BAD_REQUEST, other.to_string()),
-            })?;
-            let result = file_manager::fetch_bytes(&parsed)
-                .await
-                .map_err(|e| match e {
-                    FileManagerError::PrivateUrl(_) => (StatusCode::FORBIDDEN, e.to_string()),
-                    FileManagerError::HostNotAllowed { .. } => {
-                        (StatusCode::FORBIDDEN, e.to_string())
-                    }
-                    FileManagerError::Upstream { status, .. } => (
-                        StatusCode::from_u16(status.clamp(400, 599))
-                            .unwrap_or(StatusCode::BAD_GATEWAY),
-                        e.to_string(),
-                    ),
-                    FileManagerError::SizeCap { .. } => {
-                        (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
-                    }
-                    FileManagerError::Http { .. } | FileManagerError::InvalidUrl(_) => {
-                        (StatusCode::BAD_GATEWAY, e.to_string())
-                    }
-                    other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
-                })?;
+            let parsed = DownloadArgs::from_value(args).map_err(to_resp)?;
+            let result = file_manager::fetch_bytes(&parsed).await.map_err(to_resp)?;
             Ok(file_manager::build_download_response(&result))
         }
         "file_manager:upload" => {
-            let parsed = UploadArgs::from_wire(args)
-                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-            match crate::core::file_manager::upload_to_destination(
+            let parsed = UploadArgs::from_wire(args).map_err(to_resp)?;
+            file_manager::upload_to_destination(
                 parsed,
                 &provider.upload_destinations,
                 provider.upload_default_destination.as_deref(),
                 keyring,
             )
             .await
-            {
-                Ok(v) => Ok(v),
-                Err(e @ FileManagerError::UploadNotConfigured) => {
-                    Err((StatusCode::SERVICE_UNAVAILABLE, e.to_string()))
-                }
-                Err(e @ FileManagerError::UnknownDestination(_)) => {
-                    Err((StatusCode::FORBIDDEN, e.to_string()))
-                }
-                Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
-            }
+            .map_err(to_resp)
         }
         other => Err((
             StatusCode::NOT_FOUND,

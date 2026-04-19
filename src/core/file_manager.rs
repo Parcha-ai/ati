@@ -1,29 +1,11 @@
-//! File manager — generic binary download/upload tools for ATI agents.
+//! File manager — `file_manager:download` / `file_manager:upload` virtual
+//! tools. Registered automatically with no TOML manifest so sandboxed agents
+//! can move binary bytes through the proxy (network egress is otherwise
+//! confined to the proxy host).
 //!
-//! Two virtual tools, registered automatically without a TOML manifest:
-//!
-//! - `file_manager:download` — fetch bytes from a URL, return them inline (base64)
-//!   to the caller. The caller (CLI in either local or proxy mode) writes the
-//!   bytes to disk if `--out <path>` was passed.
-//! - `file_manager:upload` — upload bytes (base64-encoded in the request) to the
-//!   configured object store (GCS by default), return a public URL.
-//!
-//! ## Why a virtual provider?
-//!
-//! These two tools don't fit the HTTP/MCP/OpenAPI provider model — there's no
-//! single upstream API and the parameters are generic. Treating them as a
-//! built-in handler keeps proxy-side dispatch simple and avoids per-provider
-//! manifests for every CDN or storage backend an agent might touch.
-//!
-//! ## Mode behavior
-//!
-//! - **Local**: ATI fetches the URL directly and writes to disk (or returns base64).
-//! - **Proxy**: the proxy fetches the URL (sandboxes have hardened egress) and
-//!   returns the bytes as base64 to the sandbox-side ATI CLI. The CLI then
-//!   writes them to the path the agent specified inside its sandbox.
-//!
-//! Upload reverses that: the CLI base64-encodes the local file and ships it to
-//! the proxy, which writes to the configured bucket and returns the URL.
+//! In proxy mode the proxy performs the fetch/upload; bytes travel over the
+//! `/call` JSON wire as base64. The sandbox-side CLI materializes them to
+//! disk (`--out`) or ships them (`--path`). Local mode does the work inline.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};
@@ -83,6 +65,27 @@ pub enum FileManagerError {
     Base64(#[from] base64::DecodeError),
 }
 
+impl FileManagerError {
+    /// HTTP status this variant should map to when surfaced over the proxy
+    /// `POST /call` endpoint. Kept here (rather than in `proxy/server.rs`)
+    /// so adding a new error variant doesn't silently default to 500 in one
+    /// handler and 400 in another.
+    pub fn http_status(&self) -> u16 {
+        match self {
+            Self::MissingArg(_)
+            | Self::InvalidArg { .. }
+            | Self::BadHeader { .. }
+            | Self::Base64(_) => 400,
+            Self::PrivateUrl(_) | Self::HostNotAllowed { .. } | Self::UnknownDestination(_) => 403,
+            Self::SizeCap { .. } => 413,
+            Self::UploadNotConfigured => 503,
+            Self::Upstream { status, .. } => (*status).clamp(400, 599),
+            Self::Http { .. } | Self::InvalidUrl(_) | Self::Upload(_) => 502,
+            Self::Io { .. } => 500,
+        }
+    }
+}
+
 /// Headers an agent must not be able to set on outbound downloads.
 const DENIED_DOWNLOAD_HEADERS: &[&str] = &[
     "host",
@@ -134,24 +137,7 @@ impl DownloadArgs {
             return Err(FileManagerError::MissingArg("url"));
         }
 
-        let max_bytes = args
-            .get("max_bytes")
-            .or_else(|| args.get("max-bytes"))
-            .map(|v| match v {
-                Value::Number(n) => n.as_u64().ok_or_else(|| FileManagerError::InvalidArg {
-                    name: "max_bytes",
-                    reason: "must be a positive integer".into(),
-                }),
-                Value::String(s) => s.parse::<u64>().map_err(|e| FileManagerError::InvalidArg {
-                    name: "max_bytes",
-                    reason: e.to_string(),
-                }),
-                _ => Err(FileManagerError::InvalidArg {
-                    name: "max_bytes",
-                    reason: "must be a positive integer".into(),
-                }),
-            })
-            .transpose()?
+        let max_bytes = parse_u64_arg(args, &["max_bytes", "max-bytes"], "max_bytes")?
             .unwrap_or(DEFAULT_MAX_BYTES);
         if max_bytes == 0 {
             return Err(FileManagerError::InvalidArg {
@@ -160,24 +146,8 @@ impl DownloadArgs {
             });
         }
 
-        let timeout_secs = args
-            .get("timeout")
-            .map(|v| match v {
-                Value::Number(n) => n.as_u64().ok_or_else(|| FileManagerError::InvalidArg {
-                    name: "timeout",
-                    reason: "must be a positive integer".into(),
-                }),
-                Value::String(s) => s.parse::<u64>().map_err(|e| FileManagerError::InvalidArg {
-                    name: "timeout",
-                    reason: e.to_string(),
-                }),
-                _ => Err(FileManagerError::InvalidArg {
-                    name: "timeout",
-                    reason: "must be a positive integer".into(),
-                }),
-            })
-            .transpose()?
-            .unwrap_or(DEFAULT_TIMEOUT_SECS);
+        let timeout_secs =
+            parse_u64_arg(args, &["timeout"], "timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
         let follow_redirects = args
             .get("follow_redirects")
@@ -195,6 +165,35 @@ impl DownloadArgs {
             follow_redirects,
             headers,
         })
+    }
+}
+
+/// Look up an optional u64 arg under any of several aliases (to handle both
+/// `max_bytes` and `max-bytes` from CLI arg normalization). Accepts JSON
+/// numbers or numeric strings.
+fn parse_u64_arg(
+    args: &HashMap<String, Value>,
+    aliases: &[&str],
+    field: &'static str,
+) -> Result<Option<u64>, FileManagerError> {
+    let raw = aliases.iter().find_map(|k| args.get(*k));
+    let Some(v) = raw else {
+        return Ok(None);
+    };
+    let err = || FileManagerError::InvalidArg {
+        name: field,
+        reason: "must be a positive integer".into(),
+    };
+    match v {
+        Value::Number(n) => n.as_u64().map(Some).ok_or_else(err),
+        Value::String(s) => s
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|e| FileManagerError::InvalidArg {
+                name: field,
+                reason: e.to_string(),
+            }),
+        _ => Err(err()),
     }
 }
 
@@ -249,7 +248,8 @@ fn parse_headers(value: Option<&Value>) -> Result<HashMap<String, String>, FileM
 }
 
 /// Result of a successful download — the bytes plus discovered metadata.
-#[derive(Debug, Clone)]
+/// Intentionally NOT `Clone` — `bytes` can be up to `DEFAULT_MAX_BYTES`.
+#[derive(Debug)]
 pub struct DownloadResult {
     pub bytes: Vec<u8>,
     pub content_type: Option<String>,
@@ -370,22 +370,29 @@ pub async fn fetch_bytes(args: &DownloadArgs) -> Result<DownloadResult, FileMana
         });
     }
 
-    // Pre-flight against Content-Length when present.
-    if let Some(len_header) = response.headers().get(reqwest::header::CONTENT_LENGTH) {
-        if let Ok(len_str) = len_header.to_str() {
-            if let Ok(len) = len_str.parse::<u64>() {
-                if len > args.max_bytes {
-                    return Err(FileManagerError::SizeCap {
-                        limit: args.max_bytes,
-                    });
-                }
-            }
+    // Pre-flight against Content-Length when present, and use it to seed the
+    // accumulator's capacity so we avoid ~log2(N) regrow memcpy cycles for
+    // large downloads.
+    let content_length = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    if let Some(len) = content_length {
+        if len > args.max_bytes {
+            return Err(FileManagerError::SizeCap {
+                limit: args.max_bytes,
+            });
         }
     }
 
-    // Stream the body so we can abort early on oversize.
+    // Stream the body so we can abort early on oversize. Cap the preallocation
+    // at `max_bytes` so a spoofed Content-Length can't force a huge allocation.
     use futures::StreamExt;
-    let mut bytes = Vec::with_capacity(64 * 1024);
+    let initial_cap = content_length
+        .map(|l| l.min(args.max_bytes) as usize)
+        .unwrap_or(64 * 1024);
+    let mut bytes = Vec::with_capacity(initial_cap);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| FileManagerError::Http {
@@ -420,12 +427,45 @@ pub fn build_download_response(result: &DownloadResult) -> Value {
     })
 }
 
+/// Best-effort MIME type from a path's extension. Shared across
+/// `file_manager:*` tools and CLI output capture. Falls back to octet-stream.
+pub fn guess_content_type(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    let ext = lower.rsplit('.').next().unwrap_or("");
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "html" | "htm" => "text/html",
+        "md" => "text/markdown",
+        "txt" | "log" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Upload
 // ---------------------------------------------------------------------------
 
 /// Parsed upload arguments — what the caller needs to send to the proxy.
-#[derive(Debug, Clone)]
+/// Intentionally NOT `Clone` — `bytes` can be up to `MAX_UPLOAD_BYTES` and
+/// cloning it would be a costly footgun. Each sink consumes `args` by value.
+#[derive(Debug)]
 pub struct UploadArgs {
     pub filename: String,
     pub content_type: Option<String>,
@@ -489,7 +529,7 @@ fn sanitize_filename(input: &str) -> String {
 }
 
 /// Outcome of a successful upload — what the proxy returns to the CLI.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct UploadResult {
     pub url: String,
     pub size_bytes: u64,
@@ -562,13 +602,6 @@ pub fn resolve_destination<'a>(
     Ok((key, sink))
 }
 
-/// List configured destination keys, sorted — useful for discovery output.
-pub fn destination_keys(destinations: &HashMap<String, UploadDestination>) -> Vec<String> {
-    let mut keys: Vec<String> = destinations.keys().cloned().collect();
-    keys.sort();
-    keys
-}
-
 pub fn build_upload_response(result: &UploadResult) -> Value {
     json!({
         "success": true,
@@ -594,16 +627,16 @@ pub async fn upload_to_destination(
             bucket,
             prefix,
             key_ref,
-        } => upload_to_gcs(&args, bucket, prefix, key_ref, keyring, &key).await?,
+        } => upload_to_gcs(args, bucket, prefix, key_ref, keyring, &key).await?,
         UploadDestination::FalStorage { key_ref, endpoint } => {
-            upload_to_fal(&args, key_ref, endpoint.as_deref(), keyring, &key).await?
+            upload_to_fal(args, key_ref, endpoint.as_deref(), keyring, &key).await?
         }
     };
     Ok(build_upload_response(&result))
 }
 
 async fn upload_to_gcs(
-    args: &UploadArgs,
+    args: UploadArgs,
     bucket: &str,
     prefix: &str,
     key_ref: &str,
@@ -619,7 +652,6 @@ async fn upload_to_gcs(
 
     let content_type = args
         .content_type
-        .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let size_bytes = args.bytes.len() as u64;
     let date = chrono::Utc::now().format("%Y-%m-%d");
@@ -630,7 +662,7 @@ async fn upload_to_gcs(
         crate::core::gcs::GcsClient::new_read_write(bucket.to_string(), &service_account_json)
             .map_err(|e| FileManagerError::Upload(e.to_string()))?;
     let url = client
-        .upload_object(&object_name, args.bytes.clone(), &content_type)
+        .upload_object(&object_name, args.bytes, &content_type)
         .await
         .map_err(|e| FileManagerError::Upload(e.to_string()))?;
 
@@ -726,7 +758,7 @@ fn is_private_ipv4(ip: std::net::Ipv4Addr) -> bool {
 ///    `Content-Type: <mime>`, `X-Fal-File-Name: <filename>`, body = bytes
 ///    → `{access_url: "..."}`
 async fn upload_to_fal(
-    args: &UploadArgs,
+    args: UploadArgs,
     key_ref: &str,
     endpoint: Option<&str>,
     keyring: &crate::core::keyring::Keyring,
@@ -779,7 +811,6 @@ async fn upload_to_fal(
     // Step 2: PUT bytes to <base_url>/files/upload
     let content_type = args
         .content_type
-        .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let size_bytes = args.bytes.len() as u64;
     let upload_url = format!("{}/files/upload", token.base_url.trim_end_matches('/'));
@@ -801,7 +832,7 @@ async fn upload_to_fal(
         )
         .header("Content-Type", &content_type)
         .header("X-Fal-File-Name", &args.filename)
-        .body(args.bytes.clone())
+        .body(args.bytes)
         .send()
         .await
         .map_err(|e| FileManagerError::Upload(format!("fal upload request failed: {e}")))?;
