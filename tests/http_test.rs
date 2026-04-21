@@ -297,3 +297,138 @@ async fn test_form_urlencoded_body() {
         .unwrap();
     assert_eq!(result["access_token"], "abc123");
 }
+
+// ---------------------------------------------------------------------------
+// Issue #81 — upstream 404 "no records" classification and structured errors
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_upstream_404_no_records_returns_no_records_variant() {
+    // PDL-style 404 body — should map to HttpError::NoRecordsFound, not ApiError.
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/person/enrich"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "status": 404,
+            "error": {
+                "type": "not_found",
+                "message": "No records were found matching your request"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = mock_provider(&server.uri());
+    let tool = mock_tool("/person/enrich", HttpMethod::Get, json!({}));
+    let keyring = Keyring::empty();
+
+    let err = execute_tool(&provider, &tool, &HashMap::new(), &keyring)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, HttpError::NoRecordsFound { status: 404 }),
+        "expected NoRecordsFound variant, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_upstream_404_message_only_still_detected_as_no_records() {
+    // Middesk-style — no error.type field, just a plain message.
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/businesses"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "message": "No companies were found matching your request"
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = mock_provider(&server.uri());
+    let tool = mock_tool("/businesses", HttpMethod::Get, json!({}));
+    let keyring = Keyring::empty();
+
+    let err = execute_tool(&provider, &tool, &HashMap::new(), &keyring)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, HttpError::NoRecordsFound { status: 404 }),
+        "expected NoRecordsFound variant, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_upstream_404_unrelated_body_stays_api_error() {
+    // A 404 that is NOT a "no records" shape should stay as ApiError so the
+    // proxy treats it like any other upstream failure.
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/endpoint"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": { "type": "invalid_route", "message": "This endpoint was removed" }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = mock_provider(&server.uri());
+    let tool = mock_tool("/endpoint", HttpMethod::Get, json!({}));
+    let keyring = Keyring::empty();
+
+    let err = execute_tool(&provider, &tool, &HashMap::new(), &keyring)
+        .await
+        .unwrap_err();
+
+    match err {
+        HttpError::ApiError {
+            status,
+            error_type,
+            error_message,
+            ..
+        } => {
+            assert_eq!(status, 404);
+            assert_eq!(error_type.as_deref(), Some("invalid_route"));
+            assert_eq!(error_message.as_deref(), Some("This endpoint was removed"));
+        }
+        other => panic!("expected ApiError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_upstream_402_insufficient_credits_carries_structured_fields() {
+    // xAI-style 402 — flat body with error + message strings.
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/quote"))
+        .respond_with(ResponseTemplate::new(402).set_body_json(json!({
+            "error": "Insufficient credits",
+            "message": "Your current balance is $0.01"
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = mock_provider(&server.uri());
+    let tool = mock_tool("/v1/quote", HttpMethod::Get, json!({}));
+    let keyring = Keyring::empty();
+
+    let err = execute_tool(&provider, &tool, &HashMap::new(), &keyring)
+        .await
+        .unwrap_err();
+
+    match err {
+        HttpError::ApiError {
+            status,
+            error_message,
+            ..
+        } => {
+            assert_eq!(status, 402);
+            // Flat shape: `error` is used as the message when no nested message exists.
+            assert_eq!(error_message.as_deref(), Some("Insufficient credits"));
+        }
+        other => panic!("expected ApiError, got {other:?}"),
+    }
+}

@@ -17,7 +17,22 @@ pub enum HttpError {
     #[error("HTTP request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("API error ({status}): {body}")]
-    ApiError { status: u16, body: String },
+    ApiError {
+        status: u16,
+        body: String,
+        /// Parsed from the upstream JSON body when present (e.g. "not_found",
+        /// "invalid_request"). Used for Sentry tagging.
+        error_type: Option<String>,
+        /// Parsed human-readable message from the upstream body. Used for
+        /// Sentry tagging after scrubbing.
+        error_message: Option<String>,
+    },
+    /// Upstream returned a 404 with a body shape that signals "no records
+    /// match" (PDL, Middesk, etc.). The caller should treat this as a legit
+    /// empty result rather than a failure. Carries the parsed message for
+    /// optional logging.
+    #[error("No records found ({status})")]
+    NoRecordsFound { status: u16 },
     #[error("Failed to parse response as JSON: {0}")]
     ParseError(String),
     #[error("OAuth2 token exchange failed: {0}")]
@@ -498,9 +513,21 @@ pub async fn execute_tool_with_gen(
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_else(|_| "empty".into());
+        let status_u16 = status.as_u16();
+        let (error_type, error_message) = crate::core::sentry_scope::parse_upstream_error(&body);
+        if status_u16 == 404
+            && crate::core::sentry_scope::is_no_records_body(
+                error_type.as_deref(),
+                error_message.as_deref(),
+            )
+        {
+            return Err(HttpError::NoRecordsFound { status: status_u16 });
+        }
         return Err(HttpError::ApiError {
-            status: status.as_u16(),
+            status: status_u16,
             body,
+            error_type,
+            error_message,
         });
     }
 

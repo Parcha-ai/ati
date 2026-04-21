@@ -28,6 +28,7 @@ use crate::core::manifest::{ManifestRegistry, Provider, Tool};
 use crate::core::mcp_client;
 use crate::core::response;
 use crate::core::scope::ScopeConfig;
+use crate::core::sentry_scope;
 use crate::core::skill::{self, SkillRegistry};
 use crate::core::skillati::{RemoteSkillMeta, SkillAtiClient, SkillAtiError};
 
@@ -529,13 +530,25 @@ async fn handle_call(
                         error: None,
                     }),
                 ),
-                Err(e) => (
-                    StatusCode::BAD_GATEWAY,
-                    Json(CallResponse {
-                        result: Value::Null,
-                        error: Some(format!("MCP error: {e}")),
-                    }),
-                ),
+                Err(e) => {
+                    let (provider_name, operation_id) =
+                        sentry_scope::split_tool_name(&call_req.tool_name);
+                    sentry_scope::report_upstream_error(
+                        &provider_name,
+                        &operation_id,
+                        0,
+                        502,
+                        None,
+                        Some(&e.to_string()),
+                    );
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(CallResponse {
+                            result: Value::Null,
+                            error: Some(format!("MCP error: {e}")),
+                        }),
+                    )
+                }
             }
         }
         "cli" => {
@@ -556,13 +569,25 @@ async fn handle_call(
                         error: None,
                     }),
                 ),
-                Err(e) => (
-                    StatusCode::BAD_GATEWAY,
-                    Json(CallResponse {
-                        result: Value::Null,
-                        error: Some(format!("CLI error: {e}")),
-                    }),
-                ),
+                Err(e) => {
+                    let (provider_name, operation_id) =
+                        sentry_scope::split_tool_name(&call_req.tool_name);
+                    sentry_scope::report_upstream_error(
+                        &provider_name,
+                        &operation_id,
+                        0,
+                        502,
+                        None,
+                        Some(&e.to_string()),
+                    );
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(CallResponse {
+                            result: Value::Null,
+                            error: Some(format!("CLI error: {e}")),
+                        }),
+                    )
+                }
             }
         }
         "file_manager" => {
@@ -599,8 +624,46 @@ async fn handle_call(
             .await
             {
                 Ok(resp) => resp,
+                Err(http::HttpError::NoRecordsFound { status }) => {
+                    // Legit empty upstream result — not an error. Return a
+                    // clean empty object so callers can distinguish from a
+                    // failed call and move on without paging Sentry.
+                    let duration = start.elapsed();
+                    tracing::info!(
+                        tool = %call_req.tool_name,
+                        upstream_status = status,
+                        "upstream returned no records"
+                    );
+                    write_proxy_audit(&call_req, &agent_sub, claims.as_ref(), duration, None);
+                    return (
+                        StatusCode::OK,
+                        Json(CallResponse {
+                            result: serde_json::json!({ "records": [] }),
+                            error: None,
+                        }),
+                    );
+                }
                 Err(e) => {
                     let duration = start.elapsed();
+                    let (provider_name, operation_id) =
+                        sentry_scope::split_tool_name(&call_req.tool_name);
+                    let (upstream_status, error_type, error_message) = match &e {
+                        http::HttpError::ApiError {
+                            status,
+                            error_type,
+                            error_message,
+                            ..
+                        } => (*status, error_type.clone(), error_message.clone()),
+                        _ => (0u16, None, Some(e.to_string())),
+                    };
+                    sentry_scope::report_upstream_error(
+                        &provider_name,
+                        &operation_id,
+                        upstream_status,
+                        502,
+                        error_type.as_deref(),
+                        error_message.as_deref(),
+                    );
                     write_proxy_audit(
                         &call_req,
                         &agent_sub,
