@@ -12,6 +12,9 @@
 pub fn split_tool_name(tool_name: &str) -> (String, String) {
     match tool_name.split_once(crate::core::manifest::TOOL_SEP) {
         Some((p, op)) if !p.is_empty() && !op.is_empty() => (p.to_string(), op.to_string()),
+        // Preserve the bare provider prefix (no trailing colon) when op is
+        // missing or empty, so Sentry tags stay clean.
+        Some((p, _)) if !p.is_empty() => (p.to_string(), "unknown".to_string()),
         _ => (tool_name.to_string(), "unknown".to_string()),
     }
 }
@@ -166,6 +169,11 @@ fn is_email_domain(b: u8) -> bool {
 }
 
 fn match_ipv4(b: &[u8], start: usize) -> Option<usize> {
+    // Don't match inside a longer dotted-numeric run (e.g. "library 1.2.3.4"
+    // in a version string — left boundary should not be a digit or a dot).
+    if start > 0 && (b[start - 1].is_ascii_digit() || b[start - 1] == b'.') {
+        return None;
+    }
     let mut i = start;
     for octet in 0..4 {
         let octet_start = i;
@@ -178,12 +186,22 @@ fn match_ipv4(b: &[u8], start: usize) -> Option<usize> {
         if i == octet_start {
             return None;
         }
+        // Validate octet value ≤ 255 to reject "999.999.999.999".
+        let octet_str = std::str::from_utf8(&b[octet_start..i]).unwrap_or("");
+        let octet_val: u16 = octet_str.parse().unwrap_or(u16::MAX);
+        if octet_val > 255 {
+            return None;
+        }
         if octet < 3 {
             if i >= b.len() || b[i] != b'.' {
                 return None;
             }
             i += 1;
         }
+    }
+    // Don't match if followed by another digit or dot (continuation of longer run).
+    if i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
+        return None;
     }
     Some(i)
 }
@@ -245,20 +263,20 @@ pub fn parse_upstream_error(body: &str) -> (Option<String>, Option<String>) {
 }
 
 /// True when a 404 body looks like a legit "no records" response the caller
-/// should treat as an empty result, not an error. Matches:
-///   - `error.type == "not_found"`
-///   - message starting with /^No (records|companies|persons|results|matches) (were )?found/
+/// should treat as an empty result, not an error.
+///
+/// Requires the message to match one of the known "No X (were )?found"
+/// phrases. The `error.type == "not_found"` hint **narrows** rather than
+/// short-circuits: a response with `type: not_found` and no recognizable
+/// message is treated as a real error so we don't silently convert genuine
+/// 404s (removed endpoints, mistyped routes) to empty results.
 pub fn is_no_records_body(error_type: Option<&str>, error_message: Option<&str>) -> bool {
-    if matches!(error_type, Some("not_found")) {
-        return true;
-    }
     let msg = match error_message {
         Some(m) => m.trim(),
         None => return false,
     };
     let lower = msg.to_ascii_lowercase();
     let lower = lower.trim_start_matches("no ");
-    // After stripping "no ", check for a keyword + "found" / "were found".
     let keywords = [
         "records were found",
         "companies were found",
@@ -271,7 +289,20 @@ pub fn is_no_records_body(error_type: Option<&str>, error_message: Option<&str>)
         "results found",
         "matches found",
     ];
-    keywords.iter().any(|k| lower.starts_with(k))
+    let message_matches = keywords.iter().any(|k| lower.starts_with(k));
+    if message_matches {
+        return true;
+    }
+    // Accept `type: not_found` only when accompanied by a short, generic
+    // "not found" message (no specific resource-name in the text). This keeps
+    // PDL's `{type: not_found, message: "No records were found..."}` flowing
+    // through (already matched above) while still catching providers that
+    // send `{type: not_found, message: "not found"}` without being specific
+    // about what was missing.
+    if matches!(error_type, Some("not_found")) {
+        return lower == "not found" || lower.is_empty();
+    }
+    false
 }
 
 /// Attach structured tags + fingerprint to the current Sentry scope and emit a
@@ -418,7 +449,7 @@ mod tests {
     fn split_tool_name_empty_op() {
         assert_eq!(
             split_tool_name("provider:"),
-            ("provider:".into(), "unknown".into())
+            ("provider".into(), "unknown".into())
         );
     }
 
@@ -449,8 +480,22 @@ mod tests {
     }
 
     #[test]
-    fn no_records_type_matches() {
-        assert!(is_no_records_body(Some("not_found"), None));
+    fn no_records_type_alone_does_not_match() {
+        // `type: not_found` without a message is ambiguous — could be a
+        // genuine missing-resource 404 (removed endpoint, mistyped route).
+        // Don't silently convert it to an empty result.
+        assert!(!is_no_records_body(Some("not_found"), None));
+        assert!(!is_no_records_body(
+            Some("not_found"),
+            Some("User account 42 was deleted")
+        ));
+    }
+
+    #[test]
+    fn no_records_type_with_generic_not_found_message_matches() {
+        // `type: not_found` + generic message → treat as empty result.
+        assert!(is_no_records_body(Some("not_found"), Some("not found")));
+        assert!(is_no_records_body(Some("not_found"), Some("")));
     }
 
     #[test]
@@ -488,6 +533,26 @@ mod tests {
     #[test]
     fn scrub_ipv4() {
         assert_eq!(scrub("from 192.168.1.1 blocked"), "from *** blocked");
+    }
+
+    #[test]
+    fn scrub_ipv4_rejects_version_strings() {
+        // Version strings with more than 4 groups or trailing digits should
+        // not be scrubbed — left/right boundary guards prevent false-positives.
+        assert_eq!(
+            scrub("library 1.2.3.4.5 raised an error"),
+            "library 1.2.3.4.5 raised an error"
+        );
+        assert_eq!(scrub("version 10.11.12.13.0"), "version 10.11.12.13.0");
+    }
+
+    #[test]
+    fn scrub_ipv4_rejects_out_of_range_octets() {
+        // 999.999.999.999 isn't a valid IPv4 address.
+        assert_eq!(
+            scrub("bogus 999.999.999.999 ip"),
+            "bogus 999.999.999.999 ip"
+        );
     }
 
     #[test]
