@@ -95,8 +95,10 @@ strsim = "0.11.1"
 
 # Optional Postgres driver for the persistence layer (virtual keys, call audit).
 # Off by default; enable with `--features db`. Pinned to rustls to match reqwest
-# and keep the static-musl release binary working.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "chrono", "uuid", "json", "migrate"], optional = true }
+# and keep the static-musl release binary working. Feature set is intentionally
+# minimal here — `chrono`/`uuid`/`json` get added when later changes start
+# decoding rows or using `query!` macros against typed columns.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate"], optional = true }
 
 [profile.release]
 opt-level = "z"

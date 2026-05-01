@@ -1,12 +1,11 @@
 //! Optional Postgres persistence layer.
 //!
-//! ATI's persistence layer is **opt-in** at compile time (Cargo feature `db`)
-//! and **opt-in** at runtime (env var `ATI_DB_URL`). When either is off, the
-//! proxy works exactly as before — no DB calls, no crashes if Postgres is down.
+//! Opt-in at compile time (Cargo feature `db`) and at runtime (env var
+//! `ATI_DB_URL`). When either is off, the proxy works exactly as before — no
+//! DB calls, no crashes if Postgres is down.
 //!
-//! Subsequent PRs build on top of this:
-//!   - PR 2 writes to `ati_call_log` from the proxy request path
-//!   - PR 3 reads/writes `ati_keys` for virtual-key auth
+//! Future work in this area (call audit log, virtual keys) layers on top of
+//! the pool exposed here.
 //!
 //! ## Operator UX
 //!
@@ -20,8 +19,8 @@
 //!
 //! Connection failures at startup are surfaced loudly so operators notice. Once
 //! the proxy is running, the DB is treated as best-effort: dropping a row is
-//! preferable to dropping a request. PR 2 enforces this via an async write
-//! queue with a bounded channel.
+//! preferable to dropping a request. Downstream writers must use a bounded
+//! channel and swallow DB errors after a single `tracing::warn!`.
 
 use thiserror::Error;
 
@@ -40,7 +39,8 @@ pub enum DbError {
 /// State of the persistence layer.
 ///
 /// `Disabled` is the normal case — no `ATI_DB_URL` set, or built without the
-/// `db` feature. `Connected` carries the live pool that PR 2 / PR 3 will use.
+/// `db` feature. `Connected` carries a live pool that downstream writers borrow
+/// via [`DbState::pool`].
 #[derive(Clone)]
 pub enum DbState {
     Disabled,
@@ -58,7 +58,7 @@ impl DbState {
         }
     }
 
-    /// Borrow the pool if connected. PRs 2 and 3 use this from request handlers.
+    /// Borrow the pool if connected.
     #[cfg(feature = "db")]
     pub fn pool(&self) -> Option<&sqlx::PgPool> {
         match self {
@@ -87,9 +87,9 @@ impl std::fmt::Debug for DbState {
 
 /// Connect to Postgres if `ATI_DB_URL` is set; otherwise return `Disabled`.
 ///
-/// Connection failures are returned as errors so the operator can decide
-/// (fail-fast vs. degrade). The proxy's startup path treats this as fatal —
-/// if you set `ATI_DB_URL` you mean it.
+/// `PgPoolOptions::connect()` opens and validates one connection before
+/// returning, so the operator gets fail-fast semantics without a separate
+/// round-trip from us.
 #[cfg(feature = "db")]
 pub async fn connect_optional() -> Result<DbState, DbError> {
     let Ok(url) = std::env::var("ATI_DB_URL") else {
@@ -104,11 +104,6 @@ pub async fn connect_optional() -> Result<DbState, DbError> {
         .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(&url)
         .await?;
-
-    // Cheap round-trip to confirm the connection is real before we report it
-    // as Connected. PgPool can lazy-connect, which would defer failure until
-    // the first query — surprising for operators.
-    sqlx::query("SELECT 1").execute(&pool).await?;
 
     Ok(DbState::Connected(pool))
 }
@@ -145,42 +140,54 @@ pub async fn run_migrations(_state: &DbState) -> Result<(), DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize env-var mutating tests across the binary.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Snapshot a single env var, run the body, restore on Drop. Panic-safe.
+    /// Tests that touch `ATI_DB_URL` MUST go through this helper, otherwise
+    /// they race with each other under cargo's multi-threaded test runner.
+    fn with_env<R>(key: &str, value: Option<&str>, body: impl FnOnce() -> R) -> R {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        struct Restore<'a> {
+            key: &'a str,
+            prev: Option<String>,
+        }
+        impl<'a> Drop for Restore<'a> {
+            fn drop(&mut self) {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+        let _restore = Restore { key, prev };
+        body()
+    }
 
     #[tokio::test]
     async fn disabled_when_env_unset() {
-        // Save and clear ATI_DB_URL so this test is deterministic.
-        let prev = std::env::var("ATI_DB_URL").ok();
-        // SAFETY: tests in this binary run single-threaded by default for env
-        // mutations; if we ever run them in parallel, gate with a mutex.
-        unsafe {
-            std::env::remove_var("ATI_DB_URL");
-        }
-
-        let state = connect_optional().await.expect("disabled is not an error");
+        let state = with_env("ATI_DB_URL", None, || {
+            futures::executor::block_on(connect_optional())
+        })
+        .expect("disabled is not an error");
         assert!(!state.is_connected());
         assert_eq!(state.status(), "disabled");
-
-        if let Some(v) = prev {
-            unsafe {
-                std::env::set_var("ATI_DB_URL", v);
-            }
-        }
     }
 
     #[tokio::test]
     async fn disabled_when_env_empty() {
-        let prev = std::env::var("ATI_DB_URL").ok();
-        unsafe {
-            std::env::set_var("ATI_DB_URL", "");
-        }
-
-        let state = connect_optional().await.expect("empty is treated as unset");
+        let state = with_env("ATI_DB_URL", Some(""), || {
+            futures::executor::block_on(connect_optional())
+        })
+        .expect("empty is treated as unset");
         assert!(!state.is_connected());
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("ATI_DB_URL", v) },
-            None => unsafe { std::env::remove_var("ATI_DB_URL") },
-        }
     }
 
     #[tokio::test]

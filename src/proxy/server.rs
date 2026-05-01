@@ -44,8 +44,8 @@ pub struct ProxyState {
     pub jwks_json: Option<Value>,
     /// Shared cache for dynamically generated auth credentials.
     pub auth_cache: AuthCache,
-    /// Optional Postgres persistence layer. `Disabled` is the normal path —
-    /// PRs 2 and 3 will start consuming this for call audit + virtual keys.
+    /// Optional Postgres persistence layer. `Disabled` is the normal path;
+    /// downstream writers (call audit, virtual keys) borrow the pool from here.
     pub db: DbState,
 }
 
@@ -2008,8 +2008,7 @@ pub async fn run(
     });
 
     // Optional persistence layer. `Disabled` when ATI_DB_URL is unset or the
-    // build was made without `--features db`. PRs 2 + 3 layer call audit and
-    // virtual keys on top of this.
+    // build was made without `--features db`.
     let db = crate::core::db::connect_optional().await?;
     if migrate {
         crate::core::db::run_migrations(&db).await?;

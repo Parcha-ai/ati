@@ -10,6 +10,10 @@
 -- Migrations are versioned by the timestamp prefix on the filename and tracked
 -- in the `_sqlx_migrations` table that sqlx::migrate! creates automatically.
 
+-- gen_random_uuid() lives in pgcrypto on PostgreSQL <13. CREATE IF NOT EXISTS
+-- so the migration is portable and idempotent.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE IF NOT EXISTS ati_keys (
     token_hash      TEXT PRIMARY KEY,
     key_alias       TEXT NOT NULL,
@@ -25,14 +29,15 @@ CREATE TABLE IF NOT EXISTS ati_keys (
     last_used_at    TIMESTAMPTZ,
     metadata        JSONB NOT NULL DEFAULT '{}',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_by      TEXT
+    created_by      TEXT,
+    -- One alias per user; orchestrators key job-scoped issuance off this so a
+    -- second `issue` for the same alias must intentionally rotate, not
+    -- silently duplicate.
+    UNIQUE (user_id, key_alias)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ati_keys_user
     ON ati_keys(user_id);
-
-CREATE INDEX IF NOT EXISTS idx_ati_keys_alias
-    ON ati_keys(key_alias);
 
 CREATE INDEX IF NOT EXISTS idx_ati_keys_active_expiring
     ON ati_keys(expires_at)
