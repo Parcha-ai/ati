@@ -49,6 +49,7 @@ fn build_app_with_registry(registry: ManifestRegistry, keyring: Keyring) -> axum
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        db: ati::core::db::DbState::Disabled,
     });
     build_router(state)
 }

@@ -151,6 +151,12 @@ pub enum Commands {
         /// Load API keys from environment variables instead of keyring.enc
         #[arg(long)]
         env_keys: bool,
+        /// Apply pending database migrations on startup (no-op if ATI_DB_URL is unset).
+        ///
+        /// Migrations are embedded in the binary; this flag just controls whether
+        /// they auto-apply. In production, prefer running migrations out-of-band.
+        #[arg(long)]
+        migrate: bool,
     },
 }
 
@@ -665,12 +671,13 @@ async fn main() {
             bind,
             ati_dir,
             env_keys,
+            migrate,
         } => {
             let dir = ati_dir
                 .as_deref()
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(cli::common::ati_dir);
-            proxy::server::run(*port, bind.clone(), dir, cli.verbose, *env_keys).await
+            proxy::server::run(*port, bind.clone(), dir, cli.verbose, *env_keys, *migrate).await
         }
     };
 

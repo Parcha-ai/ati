@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth_generator;
 pub mod cli_executor;
+pub mod db;
 pub mod dirs;
 pub mod error;
 pub mod file_manager;
