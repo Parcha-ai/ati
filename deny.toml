@@ -17,6 +17,16 @@ ignore = [
     # to rand 0.9 is a separate ecosystem-wide migration tracked apart
     # from this PR.
     "RUSTSEC-2026-0097",
+    # RUSTSEC-2023-0071: Marvin timing attack in `rsa` 0.x. The `rsa`
+    # crate is pulled in transitively by `sqlx-mysql`, which appears in
+    # Cargo.lock even when the umbrella sqlx crate is built with only
+    # the `postgres` feature (cargo locks all optional deps of sqlx). We
+    # never enable mysql, so sqlx-mysql is NOT compiled into the binary
+    # and `rsa` is never linked or executed. The upstream `rsa` crate
+    # has no fix available since 2023; switching to `rustls`-based MySQL
+    # auth is a sqlx ecosystem migration, not an ATI change. Re-evaluate
+    # if we ever enable a sqlx mysql feature (we will not).
+    "RUSTSEC-2023-0071",
 ]
 
 [licenses]

@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::core::auth_generator::{AuthCache, GenContext};
+use crate::core::db::DbState;
 use crate::core::http;
 use crate::core::jwt::{self, JwtConfig, TokenClaims};
 use crate::core::keyring::Keyring;
@@ -43,6 +44,9 @@ pub struct ProxyState {
     pub jwks_json: Option<Value>,
     /// Shared cache for dynamically generated auth credentials.
     pub auth_cache: AuthCache,
+    /// Optional Postgres persistence layer. `Disabled` is the normal path;
+    /// downstream writers (call audit, virtual keys) borrow the pool from here.
+    pub db: DbState,
 }
 
 // --- Request/Response types ---
@@ -151,6 +155,8 @@ pub struct HealthResponse {
     pub providers: usize,
     pub skills: usize,
     pub auth: String,
+    /// Persistence layer status: "disabled" | "connected".
+    pub db: String,
 }
 
 // --- Skill endpoint types ---
@@ -893,6 +899,7 @@ async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoRespons
         providers: state.registry.list_providers().len(),
         skills: state.skill_registry.skill_count(),
         auth: auth.into(),
+        db: state.db.status().into(),
     })
 }
 
@@ -1877,6 +1884,7 @@ pub async fn run(
     ati_dir: PathBuf,
     _verbose: bool,
     env_keys: bool,
+    migrate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load manifests
     let manifests_dir = ati_dir.join("manifests");
@@ -1999,6 +2007,17 @@ pub async fn run(
             .and_then(|pem| jwt::public_key_to_jwks(pem, config.algorithm, "ati-proxy-1").ok())
     });
 
+    // Optional persistence layer. `Disabled` when ATI_DB_URL is unset or the
+    // build was made without `--features db`.
+    let db = crate::core::db::connect_optional().await?;
+    if migrate {
+        crate::core::db::run_migrations(&db).await?;
+        if db.is_connected() {
+            tracing::info!("applied database migrations");
+        }
+    }
+    let db_status = db.status();
+
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
@@ -2006,6 +2025,7 @@ pub async fn run(
         jwt_config,
         jwks_json,
         auth_cache: AuthCache::new(),
+        db,
     });
 
     let app = build_router(state);
@@ -2027,6 +2047,7 @@ pub async fn run(
         openapi = openapi_count,
         skills = skill_count,
         keyring = keyring_source,
+        db = db_status,
         "ATI proxy server starting"
     );
     for (name, transport) in &mcp_providers {
