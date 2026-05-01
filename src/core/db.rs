@@ -140,53 +140,56 @@ pub async fn run_migrations(_state: &DbState) -> Result<(), DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// Serialize env-var mutating tests across the binary.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// Serialize env-var mutating tests across this binary. Held across .await
+    /// boundaries so async env-mutating tests can't race.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    /// Snapshot a single env var, run the body, restore on Drop. Panic-safe.
-    /// Tests that touch `ATI_DB_URL` MUST go through this helper, otherwise
-    /// they race with each other under cargo's multi-threaded test runner.
-    fn with_env<R>(key: &str, value: Option<&str>, body: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var(key).ok();
-        match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-        struct Restore<'a> {
-            key: &'a str,
-            prev: Option<String>,
-        }
-        impl<'a> Drop for Restore<'a> {
-            fn drop(&mut self) {
-                match &self.prev {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
-                }
+    /// Snapshot one env var, run the async body under the lock, restore on
+    /// Drop. Panic-safe. Held across .await for the entire async body.
+    struct EnvGuard<'a> {
+        _lock: tokio::sync::MutexGuard<'a, ()>,
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl<'a> EnvGuard<'a> {
+        async fn set(key: &str, value: Option<&str>) -> EnvGuard<'a> {
+            let lock = ENV_LOCK.lock().await;
+            let prev = std::env::var(key).ok();
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            EnvGuard {
+                _lock: lock,
+                key: key.to_string(),
+                prev,
             }
         }
-        let _restore = Restore { key, prev };
-        body()
+    }
+
+    impl<'a> Drop for EnvGuard<'a> {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(&self.key, v),
+                None => std::env::remove_var(&self.key),
+            }
+        }
     }
 
     #[tokio::test]
     async fn disabled_when_env_unset() {
-        let state = with_env("ATI_DB_URL", None, || {
-            futures::executor::block_on(connect_optional())
-        })
-        .expect("disabled is not an error");
+        let _guard = EnvGuard::set("ATI_DB_URL", None).await;
+        let state = connect_optional().await.expect("disabled is not an error");
         assert!(!state.is_connected());
         assert_eq!(state.status(), "disabled");
     }
 
     #[tokio::test]
     async fn disabled_when_env_empty() {
-        let state = with_env("ATI_DB_URL", Some(""), || {
-            futures::executor::block_on(connect_optional())
-        })
-        .expect("empty is treated as unset");
+        let _guard = EnvGuard::set("ATI_DB_URL", Some("")).await;
+        let state = connect_optional().await.expect("empty is treated as unset");
         assert!(!state.is_connected());
     }
 

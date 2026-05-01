@@ -336,3 +336,48 @@ pub async fn body_json(body: Body) -> Value {
     let bytes = body.collect().await.expect("collect body").to_bytes();
     serde_json::from_slice(&bytes).expect("parse body as JSON")
 }
+
+// ---------------------------------------------------------------------------
+// Env-var test helper
+// ---------------------------------------------------------------------------
+
+/// Serialize env-var mutating tests across this binary. Cargo runs tests on
+/// multiple OS threads, so two tests touching the same env var would race.
+/// Uses a tokio Mutex so async tests can hold it across `.await` boundaries.
+pub static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Snapshot env vars, run the async body, restore on Drop. Panic-safe.
+///
+/// Hold this guard across the entire async body so the env mutation can't be
+/// observed by another test mid-flight. Drop runs on scope exit (including
+/// panic unwind) and restores the previous value.
+pub struct EnvGuard<'a> {
+    _lock: tokio::sync::MutexGuard<'a, ()>,
+    restores: Vec<(String, Option<String>)>,
+}
+
+impl<'a> EnvGuard<'a> {
+    pub async fn set(key: &str, value: Option<&str>) -> EnvGuard<'a> {
+        let lock = ENV_LOCK.lock().await;
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        EnvGuard {
+            _lock: lock,
+            restores: vec![(key.to_string(), prev)],
+        }
+    }
+}
+
+impl<'a> Drop for EnvGuard<'a> {
+    fn drop(&mut self) {
+        for (key, prev) in self.restores.drain(..) {
+            match prev {
+                Some(v) => std::env::set_var(&key, v),
+                None => std::env::remove_var(&key),
+            }
+        }
+    }
+}

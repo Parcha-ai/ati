@@ -9,10 +9,13 @@
 -- All tables are optional: if ATI_DB_URL is unset, the proxy never touches them.
 -- Migrations are versioned by the timestamp prefix on the filename and tracked
 -- in the `_sqlx_migrations` table that sqlx::migrate! creates automatically.
-
--- gen_random_uuid() lives in pgcrypto on PostgreSQL <13. CREATE IF NOT EXISTS
--- so the migration is portable and idempotent.
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+--
+-- Minimum supported PostgreSQL version: 13. We rely on the built-in
+-- `gen_random_uuid()` (in pg_catalog as of 13), which avoids the pgcrypto
+-- extension — managed Postgres services like RDS / Cloud SQL won't grant the
+-- application user `CREATE EXTENSION` privileges. If we ever need pre-13
+-- support, run `CREATE EXTENSION pgcrypto` out-of-band as a superuser before
+-- applying this migration.
 
 CREATE TABLE IF NOT EXISTS ati_keys (
     token_hash      TEXT PRIMARY KEY,
@@ -54,7 +57,10 @@ CREATE TABLE IF NOT EXISTS ati_call_log (
     request_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     started_at      TIMESTAMPTZ NOT NULL,
     ended_at        TIMESTAMPTZ NOT NULL,
-    latency_ms      INTEGER NOT NULL,
+    -- BIGINT not INTEGER: a hung upstream (LLM streaming, slow network) can
+    -- exceed INT4_MAX milliseconds (24 days) before the request actually
+    -- closes; better to never overflow the audit row.
+    latency_ms      BIGINT NOT NULL,
     token_hash      TEXT,
     user_id         TEXT,
     session_id      TEXT,
