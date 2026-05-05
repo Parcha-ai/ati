@@ -45,6 +45,7 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        call_log: None,
     })
 }
 

@@ -1,5 +1,7 @@
 pub mod audit;
 pub mod auth_generator;
+#[cfg(feature = "db")]
+pub mod call_log;
 pub mod cli_executor;
 pub mod db;
 pub mod dirs;

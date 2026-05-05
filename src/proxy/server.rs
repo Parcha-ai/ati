@@ -21,6 +21,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::core::auth_generator::{AuthCache, GenContext};
+#[cfg(feature = "db")]
+use crate::core::call_log::{self, CallLogEntry, CallLogSink};
 use crate::core::db::DbState;
 use crate::core::http;
 use crate::core::jwt::{self, JwtConfig, TokenClaims};
@@ -32,6 +34,14 @@ use crate::core::scope::ScopeConfig;
 use crate::core::sentry_scope;
 use crate::core::skill::{self, SkillRegistry};
 use crate::core::skillati::{RemoteSkillMeta, SkillAtiClient, SkillAtiError};
+
+/// Cross-feature placeholder for the audit-log sink. When `feature=db` is on,
+/// this is a real `Option<CallLogSink>`; when off, callers see `Option<()>` and
+/// every code path that would consume it short-circuits to no-op.
+#[cfg(feature = "db")]
+pub type OptionalCallLogSink = Option<CallLogSink>;
+#[cfg(not(feature = "db"))]
+pub type OptionalCallLogSink = Option<()>;
 
 /// Shared state for the proxy server.
 pub struct ProxyState {
@@ -47,6 +57,11 @@ pub struct ProxyState {
     /// Optional Postgres persistence layer. `Disabled` is the normal path;
     /// downstream writers (call audit, virtual keys) borrow the pool from here.
     pub db: DbState,
+    /// Optional sink for the per-call audit log. `None` when `ATI_DB_URL` is
+    /// unset, when the binary is built without `--features db`, or in tests
+    /// that don't exercise persistence. Sending here is non-blocking and
+    /// best-effort — see `core::call_log` for the lossiness contract.
+    pub call_log: OptionalCallLogSink,
 }
 
 // --- Request/Response types ---
@@ -157,6 +172,11 @@ pub struct HealthResponse {
     pub auth: String,
     /// Persistence layer status: "disabled" | "connected".
     pub db: String,
+    /// Total audit rows dropped because the writer queue was full. Monotonic
+    /// counter; non-zero values indicate sustained DB backpressure. Always 0
+    /// (and the field omitted) when the audit writer isn't running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_audit_rows: Option<u64>,
 }
 
 // --- Skill endpoint types ---
@@ -355,6 +375,19 @@ async fn handle_call(
     // Extract JWT claims from request extensions (set by auth middleware)
     let claims = req.extensions().get::<TokenClaims>().cloned();
 
+    // Snapshot all request metadata that the audit-log writer needs, before
+    // consuming the body below — `req.into_body()` moves `req`.
+    let token_hash_owned: Option<String> = req.extensions().get::<TokenHash>().map(|h| h.0.clone());
+    let user_agent_owned: Option<String> = req
+        .headers()
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|h| h.to_str().ok())
+        .map(String::from);
+    let requester_ip_opt: Option<std::net::IpAddr> = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip());
+
     // Parse request body. The ceiling must accommodate the worst-case upload
     // payload: `file_manager::MAX_UPLOAD_BYTES` of raw bytes, base64-inflated
     // (~1.34×), plus a few KB of JSON framing. Anti-abuse is enforced
@@ -515,6 +548,11 @@ async fn handle_call(
         "tool call"
     );
     let start = std::time::Instant::now();
+    let started_at_utc = chrono::Utc::now();
+    let handler_kind = handler_kind_for_tool(&state, &call_req.tool_name);
+    let (provider_name, _) = sentry_scope::split_tool_name(&call_req.tool_name);
+    let token_hash_ref: Option<&str> = token_hash_owned.as_deref();
+    let user_agent_ref: Option<&str> = user_agent_owned.as_deref();
 
     let response = match provider.handler.as_str() {
         "mcp" => {
@@ -640,7 +678,25 @@ async fn handle_call(
                         upstream_status = status,
                         "upstream returned no records"
                     );
-                    write_proxy_audit(&call_req, &agent_sub, claims.as_ref(), duration, None);
+                    write_proxy_audit(
+                        &state,
+                        &call_req,
+                        &agent_sub,
+                        claims.as_ref(),
+                        started_at_utc,
+                        duration,
+                        None,
+                        AuditCtx {
+                            endpoint: "/call",
+                            handler: Some(handler_kind),
+                            provider: Some(provider_name.clone()),
+                            upstream_status: Some(status as i32),
+                            response_size: None,
+                            token_hash: token_hash_ref,
+                            requester_ip: requester_ip_opt,
+                            user_agent: user_agent_ref,
+                        },
+                    );
                     return (
                         StatusCode::OK,
                         Json(CallResponse {
@@ -671,11 +727,27 @@ async fn handle_call(
                         error_message.as_deref(),
                     );
                     write_proxy_audit(
+                        &state,
                         &call_req,
                         &agent_sub,
                         claims.as_ref(),
+                        started_at_utc,
                         duration,
                         Some(&e.to_string()),
+                        AuditCtx {
+                            endpoint: "/call",
+                            handler: Some(handler_kind),
+                            provider: Some(provider_name.clone()),
+                            upstream_status: if upstream_status == 0 {
+                                None
+                            } else {
+                                Some(upstream_status as i32)
+                            },
+                            response_size: None,
+                            token_hash: token_hash_ref,
+                            requester_ip: requester_ip_opt,
+                            user_agent: user_agent_ref,
+                        },
                     );
                     return (
                         StatusCode::BAD_GATEWAY,
@@ -693,11 +765,23 @@ async fn handle_call(
                 Err(e) => {
                     let duration = start.elapsed();
                     write_proxy_audit(
+                        &state,
                         &call_req,
                         &agent_sub,
                         claims.as_ref(),
+                        started_at_utc,
                         duration,
                         Some(&e.to_string()),
+                        AuditCtx {
+                            endpoint: "/call",
+                            handler: Some(handler_kind),
+                            provider: Some(provider_name.clone()),
+                            upstream_status: None,
+                            response_size: None,
+                            token_hash: token_hash_ref,
+                            requester_ip: requester_ip_opt,
+                            user_agent: user_agent_ref,
+                        },
                     );
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -721,30 +805,134 @@ async fn handle_call(
 
     let duration = start.elapsed();
     let error_msg = response.1.error.as_deref();
-    write_proxy_audit(&call_req, &agent_sub, claims.as_ref(), duration, error_msg);
+    let response_size = serde_json::to_string(&response.1.result)
+        .ok()
+        .and_then(|s| i32::try_from(s.len()).ok());
+    write_proxy_audit(
+        &state,
+        &call_req,
+        &agent_sub,
+        claims.as_ref(),
+        started_at_utc,
+        duration,
+        error_msg,
+        AuditCtx {
+            endpoint: "/call",
+            handler: Some(handler_kind),
+            provider: Some(provider_name.clone()),
+            upstream_status: None,
+            response_size,
+            token_hash: token_hash_ref,
+            requester_ip: requester_ip_opt,
+            user_agent: user_agent_ref,
+        },
+    );
 
     response
 }
 
 async fn handle_help(
     State(state): State<Arc<ProxyState>>,
-    claims: Option<Extension<TokenClaims>>,
-    Json(req): Json<HelpRequest>,
+    headers: axum::http::HeaderMap,
+    req_parts: HttpRequest<axum::body::Body>,
 ) -> impl IntoResponse {
+    let started_at_utc = chrono::Utc::now();
+    let start = std::time::Instant::now();
+    let claims: Option<TokenClaims> = req_parts.extensions().get::<TokenClaims>().cloned();
+    let token_hash_owned: Option<String> = req_parts
+        .extensions()
+        .get::<TokenHash>()
+        .map(|h| h.0.clone());
+    let requester_ip_opt: Option<std::net::IpAddr> = req_parts
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    let user_agent_owned: Option<String> = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|h| h.to_str().ok())
+        .map(String::from);
+
+    // Now consume the body. We need to do this manually since we took the
+    // raw request to access extensions.
+    let body_bytes = match axum::body::to_bytes(req_parts.into_body(), max_call_body_bytes()).await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(HelpResponse {
+                    content: String::new(),
+                    error: Some(format!("Failed to read request body: {e}")),
+                }),
+            );
+        }
+    };
+    let req: HelpRequest = match serde_json::from_slice(&body_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(HelpResponse {
+                    content: String::new(),
+                    error: Some(format!("Invalid /help body: {e}")),
+                }),
+            );
+        }
+    };
     tracing::debug!(query = %req.query, tool = ?req.tool, "POST /help");
 
-    let claims = claims.map(|Extension(claims)| claims);
     let scopes = scopes_for_request(claims.as_ref(), &state);
+
+    // Helper closure to audit and return — called at every exit path.
+    // Closures capture state/claims/etc. by reference where they're Copy or
+    // by clone where needed.
+    let audit_help = |status_code: StatusCode,
+                      content: String,
+                      error: Option<String>,
+                      response_size: Option<i32>|
+     -> (StatusCode, Json<HelpResponse>) {
+        let duration = start.elapsed();
+        let agent_sub = claims.as_ref().map(|c| c.sub.clone()).unwrap_or_default();
+        // Build a synthetic CallRequest for the JSONL audit (existing format
+        // expects one). For /help, args are the {query, tool} payload.
+        let pseudo_req = CallRequest {
+            tool_name: "_help".to_string(),
+            args: serde_json::json!({"query": req.query, "tool": req.tool}),
+            raw_args: None,
+        };
+        write_proxy_audit(
+            &state,
+            &pseudo_req,
+            &agent_sub,
+            claims.as_ref(),
+            started_at_utc,
+            duration,
+            error.as_deref(),
+            AuditCtx {
+                endpoint: "/help",
+                handler: None,
+                provider: None,
+                upstream_status: None,
+                response_size,
+                token_hash: token_hash_owned.as_deref(),
+                requester_ip: requester_ip_opt,
+                user_agent: user_agent_owned.as_deref(),
+            },
+        );
+        (status_code, Json(HelpResponse { content, error }))
+    };
 
     let (llm_provider, llm_tool) = match state.registry.get_tool("_chat_completion") {
         Some(pt) => pt,
         None => {
-            return (
+            return audit_help(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(HelpResponse {
-                    content: String::new(),
-                    error: Some("No _llm.toml manifest found. Proxy help requires a configured LLM provider.".into()),
-                }),
+                String::new(),
+                Some(
+                    "No _llm.toml manifest found. Proxy help requires a configured LLM provider."
+                        .into(),
+                ),
+                None,
             );
         }
     };
@@ -756,12 +944,11 @@ async fn handle_help(
     {
         Some(key) => key.to_string(),
         None => {
-            return (
+            return audit_help(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(HelpResponse {
-                    content: String::new(),
-                    error: Some("LLM API key not found in keyring".into()),
-                }),
+                String::new(),
+                Some("LLM API key not found in keyring".into()),
+                None,
             );
         }
     };
@@ -791,14 +978,13 @@ async fn handle_help(
         match build_scoped_prompt(tool_name, &visible_tools, &skills_section) {
             Some(prompt) => prompt,
             None => {
-                return (
+                return audit_help(
                     StatusCode::FORBIDDEN,
-                    Json(HelpResponse {
-                        content: String::new(),
-                        error: Some(format!(
-                            "Scope '{tool_name}' is not visible in your current scopes."
-                        )),
-                    }),
+                    String::new(),
+                    Some(format!(
+                        "Scope '{tool_name}' is not visible in your current scopes."
+                    )),
+                    None,
                 );
             }
         }
@@ -835,12 +1021,11 @@ async fn handle_help(
     {
         Ok(r) => r,
         Err(e) => {
-            return (
+            return audit_help(
                 StatusCode::BAD_GATEWAY,
-                Json(HelpResponse {
-                    content: String::new(),
-                    error: Some(format!("LLM request failed: {e}")),
-                }),
+                String::new(),
+                Some(format!("LLM request failed: {e}")),
+                None,
             );
         }
     };
@@ -848,24 +1033,22 @@ async fn handle_help(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return (
+        return audit_help(
             StatusCode::BAD_GATEWAY,
-            Json(HelpResponse {
-                content: String::new(),
-                error: Some(format!("LLM API error ({status}): {body}")),
-            }),
+            String::new(),
+            Some(format!("LLM API error ({status}): {body}")),
+            None,
         );
     }
 
     let body: Value = match response.json().await {
         Ok(b) => b,
         Err(e) => {
-            return (
+            return audit_help(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HelpResponse {
-                    content: String::new(),
-                    error: Some(format!("Failed to parse LLM response: {e}")),
-                }),
+                String::new(),
+                Some(format!("Failed to parse LLM response: {e}")),
+                None,
             );
         }
     };
@@ -875,14 +1058,9 @@ async fn handle_help(
         .and_then(|c| c.as_str())
         .unwrap_or("No response from LLM")
         .to_string();
+    let response_size = i32::try_from(content.len()).ok();
 
-    (
-        StatusCode::OK,
-        Json(HelpResponse {
-            content,
-            error: None,
-        }),
-    )
+    audit_help(StatusCode::OK, content, None, response_size)
 }
 
 async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
@@ -892,6 +1070,11 @@ async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoRespons
         "disabled"
     };
 
+    #[cfg(feature = "db")]
+    let dropped_audit_rows = state.call_log.as_ref().map(|s| s.dropped_count());
+    #[cfg(not(feature = "db"))]
+    let dropped_audit_rows: Option<u64> = None;
+
     Json(HealthResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
@@ -900,6 +1083,7 @@ async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoRespons
         skills: state.skill_registry.skill_count(),
         auth: auth.into(),
         db: state.db.status().into(),
+        dropped_audit_rows,
     })
 }
 
@@ -920,10 +1104,33 @@ async fn handle_jwks(State(state): State<Arc<ProxyState>>) -> impl IntoResponse 
 
 async fn handle_mcp(
     State(state): State<Arc<ProxyState>>,
-    claims: Option<Extension<TokenClaims>>,
-    Json(msg): Json<Value>,
+    headers: axum::http::HeaderMap,
+    req: HttpRequest<axum::body::Body>,
 ) -> impl IntoResponse {
-    let claims = claims.map(|Extension(claims)| claims);
+    let claims: Option<TokenClaims> = req.extensions().get::<TokenClaims>().cloned();
+    let token_hash_owned: Option<String> = req.extensions().get::<TokenHash>().map(|h| h.0.clone());
+    let requester_ip_opt: Option<std::net::IpAddr> = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    let user_agent_owned: Option<String> = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|h| h.to_str().ok())
+        .map(String::from);
+
+    let body_bytes = match axum::body::to_bytes(req.into_body(), max_call_body_bytes()).await {
+        Ok(b) => b,
+        Err(e) => {
+            return jsonrpc_error(None, -32700, &format!("Failed to read request body: {e}"));
+        }
+    };
+    let msg: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            return jsonrpc_error(None, -32700, &format!("Invalid JSON-RPC body: {e}"));
+        }
+    };
+
     let scopes = scopes_for_request(claims.as_ref(), &state);
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
@@ -975,6 +1182,8 @@ async fn handle_mcp(
         }
 
         "tools/call" => {
+            let started_at_utc = chrono::Utc::now();
+            let start = std::time::Instant::now();
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
             let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let arguments: HashMap<String, Value> = params
@@ -982,24 +1191,78 @@ async fn handle_mcp(
                 .and_then(|a| serde_json::from_value(a.clone()).ok())
                 .unwrap_or_default();
 
+            // Closure shared across the early-return paths in this branch.
+            // Builds a synthetic CallRequest (so the JSONL audit format
+            // stays identical to /call) and routes through write_proxy_audit.
+            let audit_mcp = |tool_name: &str,
+                             error: Option<&str>,
+                             upstream_status: Option<i32>,
+                             response_size: Option<i32>,
+                             duration: std::time::Duration| {
+                let agent_sub = claims.as_ref().map(|c| c.sub.clone()).unwrap_or_default();
+                let pseudo_args = serde_json::to_value(&arguments).unwrap_or(Value::Null);
+                let pseudo_req = CallRequest {
+                    tool_name: tool_name.to_string(),
+                    args: pseudo_args,
+                    raw_args: None,
+                };
+                let handler_kind = if tool_name.is_empty() {
+                    "mcp"
+                } else {
+                    handler_kind_for_tool(&state, tool_name)
+                };
+                let (provider_name, _) = sentry_scope::split_tool_name(tool_name);
+                write_proxy_audit(
+                    &state,
+                    &pseudo_req,
+                    &agent_sub,
+                    claims.as_ref(),
+                    started_at_utc,
+                    duration,
+                    error,
+                    AuditCtx {
+                        endpoint: "/mcp",
+                        handler: Some(handler_kind),
+                        provider: Some(provider_name),
+                        upstream_status,
+                        response_size,
+                        token_hash: token_hash_owned.as_deref(),
+                        requester_ip: requester_ip_opt,
+                        user_agent: user_agent_owned.as_deref(),
+                    },
+                );
+            };
+
             if tool_name.is_empty() {
+                audit_mcp(
+                    "",
+                    Some("Missing tool name in params.name"),
+                    None,
+                    None,
+                    start.elapsed(),
+                );
                 return jsonrpc_error(id, -32602, "Missing tool name in params.name");
             }
 
             let (provider, _tool) = match state.registry.get_tool(tool_name) {
                 Some(pt) => pt,
                 None => {
+                    audit_mcp(
+                        tool_name,
+                        Some(&format!("Unknown tool: '{tool_name}'")),
+                        None,
+                        None,
+                        start.elapsed(),
+                    );
                     return jsonrpc_error(id, -32602, &format!("Unknown tool: '{tool_name}'"));
                 }
             };
 
             if let Some(tool_scope) = &_tool.scope {
                 if !scopes.is_allowed(tool_scope) {
-                    return jsonrpc_error(
-                        id,
-                        -32001,
-                        &format!("Access denied: '{}' is not in your scopes", _tool.name),
-                    );
+                    let msg = format!("Access denied: '{}' is not in your scopes", _tool.name);
+                    audit_mcp(tool_name, Some(&msg), None, None, start.elapsed());
+                    return jsonrpc_error(id, -32001, &msg);
                 }
             }
 
@@ -1071,13 +1334,17 @@ async fn handle_mcp(
                         Value::String(s) => s.clone(),
                         other => serde_json::to_string_pretty(other).unwrap_or_default(),
                     };
+                    let response_size = i32::try_from(text.len()).ok();
                     let mcp_result = serde_json::json!({
                         "content": [{"type": "text", "text": text}],
                         "isError": false,
                     });
+                    audit_mcp(tool_name, None, None, response_size, start.elapsed());
                     jsonrpc_success(id, mcp_result)
                 }
                 Err(e) => {
+                    let err_str = e.to_string();
+                    audit_mcp(tool_name, Some(&err_str), None, None, start.elapsed());
                     let mcp_result = serde_json::json!({
                         "content": [{"type": "text", "text": format!("Error: {e}")}],
                         "isError": true,
@@ -1811,10 +2078,17 @@ async fn auth_middleware(
         _ => return Err(StatusCode::UNAUTHORIZED),
     };
 
+    // Hash the bearer token *before* validation so the audit row carries an
+    // identifier even when the validate path short-circuits later (it
+    // currently doesn't, but this avoids a trap for future callers). The hash
+    // is what gets persisted; the raw token never leaves this scope.
+    let token_hash = TokenHash(sha256_hex(token.as_bytes()));
+
     // Validate JWT
     match jwt::validate(token, jwt_config) {
         Ok(claims) => {
             tracing::debug!(sub = %claims.sub, scopes = %claims.scope, "JWT validated");
+            req.extensions_mut().insert(token_hash);
             req.extensions_mut().insert(claims);
             Ok(next.run(req).await)
         }
@@ -1823,6 +2097,20 @@ async fn auth_middleware(
             Err(StatusCode::UNAUTHORIZED)
         }
     }
+}
+
+/// Per-request extension carrying a stable, irreversible identifier of the
+/// bearer token used. Stored in axum request extensions by `auth_middleware`,
+/// read by audit-log writers.
+#[derive(Debug, Clone)]
+pub struct TokenHash(pub String);
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    hex::encode(digest)
 }
 
 // --- Router builder ---
@@ -2018,6 +2306,21 @@ pub async fn run(
     }
     let db_status = db.status();
 
+    // Spawn the per-call audit log writer when the DB is connected. The
+    // returned `JoinHandle` is intentionally dropped — when every clone of
+    // the sink is dropped on shutdown, the channel closes and the task exits
+    // cleanly via its `None` branch.
+    #[cfg(feature = "db")]
+    let call_log: OptionalCallLogSink = if let Some(pool) = db.pool() {
+        let (sink, _handle) = call_log::spawn(pool.clone());
+        tracing::info!("started ati_call_log writer task");
+        Some(sink)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "db"))]
+    let call_log: OptionalCallLogSink = None;
+
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
@@ -2026,6 +2329,7 @@ pub async fn run(
         jwks_json,
         auth_cache: AuthCache::new(),
         db,
+        call_log,
     });
 
     let app = build_router(state);
@@ -2058,7 +2362,13 @@ pub async fn run(
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // `into_make_service_with_connect_info` plumbs the peer SocketAddr into
+    // request extensions so the audit-log writer can record `requester_ip`.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -2105,17 +2415,48 @@ async fn dispatch_file_manager(
     }
 }
 
+/// Optional fields enriching a server-side audit row. The existing on-disk
+/// JSONL audit doesn't need any of these — they're only used when the DB
+/// `ati_call_log` sink is enabled.
+#[derive(Default)]
+struct AuditCtx<'a> {
+    /// "/call" | "/mcp" | "/help"
+    endpoint: &'static str,
+    /// "http" | "mcp" | "openapi" | "cli" | "file_manager", or None for /help.
+    handler: Option<&'static str>,
+    /// Provider name (split from `tool_name` for /call, None for /help).
+    provider: Option<String>,
+    /// Upstream HTTP status when applicable (HTTP/OpenAPI calls).
+    upstream_status: Option<i32>,
+    /// Bytes of the response result JSON.
+    response_size: Option<i32>,
+    /// SHA-256 hex of the bearer token. None for dev mode / no JWT.
+    token_hash: Option<&'a str>,
+    /// Peer IP if extractable (proxy must be served with ConnectInfo).
+    requester_ip: Option<std::net::IpAddr>,
+    /// Request `User-Agent` header.
+    user_agent: Option<&'a str>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn write_proxy_audit(
+    state: &Arc<ProxyState>,
     call_req: &CallRequest,
     agent_sub: &str,
     claims: Option<&TokenClaims>,
+    started_at: chrono::DateTime<chrono::Utc>,
     duration: std::time::Duration,
     error: Option<&str>,
+    ctx: AuditCtx<'_>,
 ) {
+    let sanitized_args = crate::core::audit::sanitize_args(&call_req.args);
+
+    // 1. JSONL on-disk audit (existing behavior, unchanged). Must run first
+    //    so a misbehaving DB enqueue can never regress on-disk auditability.
     let entry = crate::core::audit::AuditEntry {
-        ts: chrono::Utc::now().to_rfc3339(),
+        ts: started_at.to_rfc3339(),
         tool: call_req.tool_name.clone(),
-        args: crate::core::audit::sanitize_args(&call_req.args),
+        args: sanitized_args.clone(),
         status: if error.is_some() {
             crate::core::audit::AuditStatus::Error
         } else {
@@ -2129,6 +2470,133 @@ fn write_proxy_audit(
         exit_code: None,
     };
     let _ = crate::core::audit::append(&entry);
+
+    // 2. DB enqueue (additive). No-op when `--features db` is off or the
+    //    sink isn't configured. Cannot block, cannot panic.
+    enqueue_call_log_row(
+        state,
+        call_req.tool_name.as_str(),
+        sanitized_args,
+        agent_sub,
+        claims,
+        started_at,
+        duration,
+        error,
+        ctx,
+    );
+}
+
+/// Enqueue a single audit row onto the `ati_call_log` writer queue. Called
+/// directly from /help and /mcp tools/call (which don't have a `CallRequest`
+/// shape) and indirectly from `write_proxy_audit` for /call.
+#[allow(clippy::too_many_arguments)]
+fn enqueue_call_log_row(
+    state: &Arc<ProxyState>,
+    tool_name: &str,
+    sanitized_args: serde_json::Value,
+    agent_sub: &str,
+    claims: Option<&TokenClaims>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    duration: std::time::Duration,
+    error: Option<&str>,
+    ctx: AuditCtx<'_>,
+) {
+    #[cfg(feature = "db")]
+    if let Some(sink) = state.call_log.as_ref() {
+        // user_id: JWT sub when present, "system" sentinel otherwise (matches
+        // LiteLLM's master-key convention so operators can `WHERE user_id =
+        // 'system'` to find dev/admin traffic).
+        let user_id = if claims.is_some() && !agent_sub.is_empty() {
+            Some(agent_sub.to_string())
+        } else {
+            Some("system".to_string())
+        };
+
+        let ended_at = started_at + chrono::Duration::from_std(duration).unwrap_or_default();
+        let entry = CallLogEntry {
+            started_at,
+            ended_at,
+            latency_ms: duration.as_millis() as i64,
+            token_hash: ctx.token_hash.map(String::from),
+            user_id,
+            session_id: claims.and_then(|c| c.job_id.clone()),
+            endpoint: if ctx.endpoint.is_empty() {
+                "/call"
+            } else {
+                ctx.endpoint
+            },
+            tool_name: if tool_name.is_empty() {
+                None
+            } else {
+                Some(tool_name.to_string())
+            },
+            provider: ctx.provider,
+            handler: ctx.handler,
+            status: classify_status(error),
+            upstream_status: ctx.upstream_status,
+            error_class: error.map(|m| {
+                let boxed: Box<dyn std::error::Error> = m.to_string().into();
+                crate::core::error::classify_error(boxed.as_ref())
+            }),
+            error_message: error.map(String::from),
+            request_args: sanitized_args,
+            response_size: ctx.response_size,
+            requester_ip: ctx.requester_ip.map(|ip| ip.to_string()),
+            user_agent: ctx.user_agent.map(String::from),
+        };
+        sink.enqueue(entry);
+    }
+
+    // Suppress unused-arg warnings when the feature is off.
+    #[cfg(not(feature = "db"))]
+    {
+        let _ = (
+            state,
+            tool_name,
+            sanitized_args,
+            agent_sub,
+            claims,
+            started_at,
+            duration,
+            error,
+            ctx,
+        );
+    }
+}
+
+/// Map an error message into a status string for the `ati_call_log.status`
+/// column. Buckets: success / auth_error / upstream_error / tool_error.
+#[cfg(feature = "db")]
+fn classify_status(error: Option<&str>) -> &'static str {
+    match error {
+        None => "success",
+        Some(msg) => {
+            let boxed: Box<dyn std::error::Error> = msg.to_string().into();
+            let class = crate::core::error::classify_error(boxed.as_ref());
+            match class.split('.').next().unwrap_or("") {
+                "auth" => "auth_error",
+                "provider" => "upstream_error",
+                _ => "tool_error",
+            }
+        }
+    }
+}
+
+/// Derive the handler kind for a tool by inspecting its provider's manifest
+/// fields. One source of truth — the manifest decides what dispatch path runs.
+fn handler_kind_for_tool(state: &ProxyState, tool_name: &str) -> &'static str {
+    if tool_name.starts_with("file_manager:") {
+        return "file_manager";
+    }
+    let Some((provider, _tool)) = state.registry.get_tool(tool_name) else {
+        return "http";
+    };
+    match provider.handler.as_str() {
+        "mcp" => "mcp",
+        "openapi" => "openapi",
+        _ if provider.cli_command.is_some() => "cli",
+        _ => "http",
+    }
 }
 
 // --- Helpers ---
