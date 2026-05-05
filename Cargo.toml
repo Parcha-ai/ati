@@ -21,6 +21,9 @@ path = "src/main.rs"
 [features]
 default = []
 sentry = ["dep:sentry", "dep:sentry-tracing"]
+# Optional Postgres persistence (virtual keys, call audit log).
+# Enable with --features db. Build remains static-musl-friendly: sqlx uses rustls.
+db = ["dep:sqlx"]
 
 [dependencies]
 # CLI
@@ -89,6 +92,19 @@ thiserror = "2"
 glob = "0.3"
 rand = "0.8"
 strsim = "0.11.1"
+
+# Optional Postgres driver for the persistence layer (virtual keys, call audit).
+# Off by default; enable with `--features db`. Pinned to rustls to match reqwest
+# and keep the static-musl release binary working. Feature set is intentionally
+# minimal here — `chrono`/`uuid`/`json` get added when later changes start
+# decoding rows or using `query!` macros against typed columns.
+#
+# Note: cargo-audit will report RUSTSEC-2023-0071 from the `rsa` crate. That
+# crate is pulled in transitively by sqlx-mysql, which appears in Cargo.lock
+# even when the `mysql` feature is disabled (cargo locks all optional deps
+# of the umbrella sqlx crate). sqlx-mysql is NOT compiled into our binary.
+# The advisory is allowlisted in deny.toml with this justification.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate"], optional = true }
 
 [profile.release]
 opt-level = "z"

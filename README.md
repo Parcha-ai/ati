@@ -1109,6 +1109,28 @@ ati init --proxy --es256                           # Initialize with JWT keys
 
 All endpoints except `/health` and JWKS require `Authorization: Bearer <JWT>` when JWT is configured. Tool and skill listing is scope-filtered — callers only see what their JWT allows.
 
+### Optional persistence (Postgres)
+
+For production deployments that want a per-call audit log and revocable virtual
+keys, ATI can persist to Postgres. **It's opt-in:** if you don't set
+`ATI_DB_URL`, the proxy works exactly as documented above with no DB connection.
+
+```bash
+# Build (or pull) ATI with the `db` feature
+cargo build --release --features db
+
+# Point at any PostgreSQL 13+ database with full DML privileges
+export ATI_DB_URL="postgres://ati:<password>@db:5432/ati"
+
+# `--migrate` applies embedded migrations on startup — safe and idempotent
+ati proxy --port 8090 --migrate
+```
+
+`/health` will report `db: "connected"` once the pool is up. See
+[`docs/PERSISTENCE.md`](docs/PERSISTENCE.md) for the full schema, configuration
+reference, failure semantics, and operational guidance (backups, rolling
+deploys, schema drift).
+
 ---
 
 ## Python SDK

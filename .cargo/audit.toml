@@ -1,0 +1,12 @@
+# cargo-audit configuration — https://docs.rs/cargo-audit
+#
+# This file mirrors the `[advisories].ignore` list in deny.toml so the two
+# tools stay in sync. Keep them aligned if either is updated.
+
+[advisories]
+ignore = [
+    # See deny.toml for the full justification. Triggered by sqlx-mysql being
+    # locked even though the `mysql` sqlx feature is disabled and the crate
+    # is not compiled into the binary.
+    "RUSTSEC-2023-0071",
+]

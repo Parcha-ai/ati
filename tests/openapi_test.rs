@@ -761,6 +761,7 @@ auth_type = "none"
         jwt_config: None,
         jwks_json: None,
         auth_cache: ati::core::auth_generator::AuthCache::new(),
+        db: ati::core::db::DbState::Disabled,
     });
 
     let app = ati::proxy::server::build_router(state);
