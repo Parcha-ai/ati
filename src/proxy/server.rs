@@ -852,30 +852,72 @@ async fn handle_help(
         .and_then(|h| h.to_str().ok())
         .map(String::from);
 
+    // Closure that audits a parse/content-type rejection. We can't reuse the
+    // post-parse `audit_help` closure for these because it needs a parsed
+    // `HelpRequest` to put the {query, tool} payload into the audit args.
+    let audit_help_parse_err = |status_code: StatusCode, error: String| {
+        let duration = start.elapsed();
+        let agent_sub = claims.as_ref().map(|c| c.sub.clone()).unwrap_or_default();
+        let pseudo_req = CallRequest {
+            tool_name: "_help".to_string(),
+            args: serde_json::Value::Null,
+            raw_args: None,
+        };
+        write_proxy_audit(
+            &state,
+            &pseudo_req,
+            &agent_sub,
+            claims.as_ref(),
+            started_at_utc,
+            duration,
+            Some(&error),
+            AuditCtx {
+                endpoint: "/help",
+                handler: None,
+                provider: None,
+                upstream_status: None,
+                response_size: None,
+                token_hash: token_hash_owned.as_deref(),
+                requester_ip: requester_ip_opt,
+                user_agent: user_agent_owned.as_deref(),
+            },
+        );
+        (
+            status_code,
+            Json(HelpResponse {
+                content: String::new(),
+                error: Some(error),
+            }),
+        )
+    };
+
+    // Enforce JSON content-type. axum's Json<T> extractor used to do this for
+    // us; switching to raw HttpRequest<Body> means we need to replicate it.
+    if !is_json_content_type(&headers) {
+        return audit_help_parse_err(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Content-Type must be application/json".to_string(),
+        );
+    }
+
     // Now consume the body. We need to do this manually since we took the
     // raw request to access extensions.
     let body_bytes = match axum::body::to_bytes(req_parts.into_body(), max_call_body_bytes()).await
     {
         Ok(b) => b,
         Err(e) => {
-            return (
+            return audit_help_parse_err(
                 StatusCode::BAD_REQUEST,
-                Json(HelpResponse {
-                    content: String::new(),
-                    error: Some(format!("Failed to read request body: {e}")),
-                }),
+                format!("Failed to read request body: {e}"),
             );
         }
     };
     let req: HelpRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
         Err(e) => {
-            return (
+            return audit_help_parse_err(
                 StatusCode::BAD_REQUEST,
-                Json(HelpResponse {
-                    content: String::new(),
-                    error: Some(format!("Invalid /help body: {e}")),
-                }),
+                format!("Invalid /help body: {e}"),
             );
         }
     };
@@ -1118,16 +1160,59 @@ async fn handle_mcp(
         .and_then(|h| h.to_str().ok())
         .map(String::from);
 
+    // Audit a body-parse / content-type rejection on /mcp. Mirrors the same
+    // closure on /help — body-parse failures must still leave a row.
+    let started_at_utc_for_err = chrono::Utc::now();
+    let start_for_err = std::time::Instant::now();
+    let audit_mcp_parse_err = |error: String| {
+        let duration = start_for_err.elapsed();
+        let agent_sub = claims.as_ref().map(|c| c.sub.clone()).unwrap_or_default();
+        let pseudo_req = CallRequest {
+            tool_name: "_mcp".to_string(),
+            args: serde_json::Value::Null,
+            raw_args: None,
+        };
+        write_proxy_audit(
+            &state,
+            &pseudo_req,
+            &agent_sub,
+            claims.as_ref(),
+            started_at_utc_for_err,
+            duration,
+            Some(&error),
+            AuditCtx {
+                endpoint: "/mcp",
+                handler: None,
+                provider: None,
+                upstream_status: None,
+                response_size: None,
+                token_hash: token_hash_owned.as_deref(),
+                requester_ip: requester_ip_opt,
+                user_agent: user_agent_owned.as_deref(),
+            },
+        );
+    };
+
+    if !is_json_content_type(&headers) {
+        let err = "Content-Type must be application/json".to_string();
+        audit_mcp_parse_err(err.clone());
+        return jsonrpc_error(None, -32700, &err);
+    }
+
     let body_bytes = match axum::body::to_bytes(req.into_body(), max_call_body_bytes()).await {
         Ok(b) => b,
         Err(e) => {
-            return jsonrpc_error(None, -32700, &format!("Failed to read request body: {e}"));
+            let err = format!("Failed to read request body: {e}");
+            audit_mcp_parse_err(err.clone());
+            return jsonrpc_error(None, -32700, &err);
         }
     };
     let msg: Value = match serde_json::from_slice(&body_bytes) {
         Ok(m) => m,
         Err(e) => {
-            return jsonrpc_error(None, -32700, &format!("Invalid JSON-RPC body: {e}"));
+            let err = format!("Invalid JSON-RPC body: {e}");
+            audit_mcp_parse_err(err.clone());
+            return jsonrpc_error(None, -32700, &err);
         }
     };
 
@@ -2113,6 +2198,27 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(digest)
 }
 
+/// Validate that an incoming request advertises JSON content. Mirrors what
+/// `axum::extract::Json` does internally — we lost that gate when /help and
+/// /mcp switched to consuming `HttpRequest<Body>` directly so they could
+/// read JWT claims + peer IP from extensions before parsing the body.
+fn is_json_content_type(headers: &axum::http::HeaderMap) -> bool {
+    let Some(value) = headers.get(axum::http::header::CONTENT_TYPE) else {
+        return false;
+    };
+    let Ok(text) = value.to_str() else {
+        return false;
+    };
+    // application/json, application/json; charset=utf-8, or application/*+json
+    let main = text
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    main == "application/json" || main.ends_with("+json")
+}
+
 // --- Router builder ---
 
 /// Build the axum Router from a pre-constructed ProxyState.
@@ -2516,7 +2622,7 @@ fn enqueue_call_log_row(
         let entry = CallLogEntry {
             started_at,
             ended_at,
-            latency_ms: duration.as_millis() as i64,
+            latency_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
             token_hash: ctx.token_hash.map(String::from),
             user_id,
             session_id: claims.and_then(|c| c.job_id.clone()),

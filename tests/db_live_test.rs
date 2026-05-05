@@ -59,8 +59,12 @@ async fn truncate_call_log(pool: &sqlx::PgPool) {
 }
 
 /// Build a minimal proxy state with a registered HTTP test tool whose upstream
-/// is `mock_uri`. Tool name is `test_provider:get` calling GET /search.
-fn build_state_for_test(mock_uri: &str, sink: CallLogSink) -> Arc<ProxyState> {
+/// is `mock_uri`. Returns the `TempDir` alongside the state so the caller can
+/// keep it alive for the test duration; on drop, the directory is cleaned up
+/// (no leak). `ManifestRegistry::load` reads files into memory and doesn't
+/// retain handles, so the tempdir is technically only needed during this
+/// function — but the explicit return makes the lifetime obvious to readers.
+fn build_state_for_test(mock_uri: &str, sink: CallLogSink) -> (tempfile::TempDir, Arc<ProxyState>) {
     use ati::core::auth_generator::AuthCache;
     use ati::core::keyring::Keyring;
 
@@ -84,9 +88,8 @@ method = "GET"
     );
     std::fs::write(manifests_dir.join("test.toml"), manifest).expect("write manifest");
     let registry = ManifestRegistry::load(&manifests_dir).expect("load manifest");
-    std::mem::forget(dir);
 
-    Arc::new(ProxyState {
+    let state = Arc::new(ProxyState {
         registry,
         skill_registry: SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap(),
         keyring: Keyring::empty(),
@@ -95,7 +98,8 @@ method = "GET"
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         call_log: Some(sink),
-    })
+    });
+    (dir, state)
 }
 
 /// Poll the audit table until at least `min_rows` rows exist or the timeout
@@ -139,7 +143,7 @@ async fn call_log_writes_success_row() {
         .await;
 
     let (sink, _handle) = call_log::spawn(pool.clone());
-    let state = build_state_for_test(&mock.uri(), sink);
+    let (_dir, state) = build_state_for_test(&mock.uri(), sink);
     let app = build_router(state);
 
     let body = json!({"tool_name": "test_get", "args": {}});
@@ -192,7 +196,7 @@ async fn call_log_writes_upstream_error_row() {
         .await;
 
     let (sink, _handle) = call_log::spawn(pool.clone());
-    let state = build_state_for_test(&mock.uri(), sink);
+    let (_dir, state) = build_state_for_test(&mock.uri(), sink);
     let app = build_router(state);
 
     let body = json!({"tool_name": "test_get", "args": {}});
@@ -240,7 +244,7 @@ async fn call_log_args_are_redacted() {
         .await;
 
     let (sink, _handle) = call_log::spawn(pool.clone());
-    let state = build_state_for_test(&mock.uri(), sink);
+    let (_dir, state) = build_state_for_test(&mock.uri(), sink);
     let app = build_router(state);
 
     // `api_key` matches sanitize_args's redaction predicate (substring "key").
