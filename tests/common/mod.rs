@@ -254,6 +254,7 @@ pub fn build_test_app(registry: ManifestRegistry) -> axum::Router {
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        call_log: None,
     });
     build_router(state)
 }
@@ -269,6 +270,7 @@ pub fn build_test_app_with_jwt(registry: ManifestRegistry) -> axum::Router {
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        call_log: None,
     });
     build_router(state)
 }
@@ -288,6 +290,7 @@ pub fn build_test_app_full(
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        call_log: None,
     });
     build_router(state)
 }
