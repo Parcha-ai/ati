@@ -181,6 +181,8 @@ fn build_test_app(upstream_url: &str) -> axum::Router {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
 
     build_router(state)
@@ -213,6 +215,8 @@ fn build_test_app_with_jwt(upstream_url: &str) -> axum::Router {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
 
     build_router(state)
@@ -376,6 +380,8 @@ description = "Query"
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 
@@ -465,6 +471,8 @@ description = "ID to look up"
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 
@@ -554,6 +562,8 @@ description = "Title"
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 
@@ -728,6 +738,8 @@ description = "Query"
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 
@@ -1165,6 +1177,8 @@ description = "Query"
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 
@@ -1269,6 +1283,8 @@ description = "Data"
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 

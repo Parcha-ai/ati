@@ -25,6 +25,8 @@ use crate::core::db::DbState;
 use crate::core::http;
 use crate::core::jwt::{self, JwtConfig, TokenClaims};
 use crate::core::keyring::Keyring;
+#[cfg(feature = "db")]
+use crate::core::keys::KeyStore;
 use crate::core::manifest::{ManifestRegistry, Provider, Tool};
 use crate::core::mcp_client;
 use crate::core::response;
@@ -32,6 +34,15 @@ use crate::core::scope::ScopeConfig;
 use crate::core::sentry_scope;
 use crate::core::skill::{self, SkillRegistry};
 use crate::core::skillati::{RemoteSkillMeta, SkillAtiClient, SkillAtiError};
+
+/// Cross-feature placeholder for the virtual-key store. When `feature=db` is
+/// on, this is `Option<Arc<KeyStore>>`; when off, callers see `Option<()>` and
+/// every code path that would consume it short-circuits to no-op.
+#[cfg(feature = "db")]
+pub type OptionalKeyStore = Option<Arc<KeyStore>>;
+#[cfg(not(feature = "db"))]
+pub type OptionalKeyStore = Option<()>;
+
 
 /// Shared state for the proxy server.
 pub struct ProxyState {
@@ -57,6 +68,16 @@ pub struct ProxyState {
     /// here. Carries an `ArcSwapOption<Vec<u8>>` so a SIGHUP-driven keyring
     /// reload can swap the secret in place without restart.
     pub sig_verify: Arc<crate::core::sig_verify::SigVerifyConfig>,
+    /// Optional ephemeral-key store. `None` when `ATI_DB_URL` is unset, when
+    /// the binary is built without `--features db`, or in tests that don't
+    /// exercise persistence. When `Some`, `auth_middleware` accepts
+    /// `Authorization: Ati-Key <raw>` in addition to the existing JWT path.
+    /// When `None`, only the JWT path works.
+    pub key_store: OptionalKeyStore,
+    /// Plaintext bearer token expected on `/admin/keys/*`. Sourced from the
+    /// `ATI_ADMIN_TOKEN` env var at startup. `None` disables the admin
+    /// endpoints (they return 503).
+    pub admin_token: Option<String>,
 }
 
 // --- Request/Response types ---
@@ -949,6 +970,265 @@ async fn handle_jwks(State(state): State<Arc<ProxyState>>) -> impl IntoResponse 
 }
 
 // ---------------------------------------------------------------------------
+// /admin/keys/* — virtual-key management (master-token gated)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct AdminIssueRequest {
+    user_id: String,
+    alias: String,
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    providers: Vec<String>,
+    #[serde(default)]
+    categories: Vec<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    expires_in_secs: Option<u64>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    created_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminBulkRevokeRequest {
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    alias_prefix: Option<String>,
+    #[serde(default)]
+    hashes: Option<Vec<String>>,
+    #[serde(default)]
+    by: Option<String>,
+}
+
+#[cfg(feature = "db")]
+async fn handle_admin_keys_issue(
+    State(state): State<Arc<ProxyState>>,
+    Json(body): Json<AdminIssueRequest>,
+) -> impl IntoResponse {
+    let store = match state.key_store.as_ref() {
+        Some(s) => s,
+        None => return admin_unavailable(),
+    };
+    let params = crate::core::keys::IssueParams {
+        user_id: body.user_id,
+        key_alias: body.alias,
+        tools: body.tools,
+        providers: body.providers,
+        categories: body.categories,
+        skills: body.skills,
+        expires_in: body.expires_in_secs.map(std::time::Duration::from_secs),
+        metadata: body.metadata.unwrap_or(serde_json::Value::Null),
+        created_by: body.created_by,
+    };
+    match store.issue(params).await {
+        Ok(issued) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "raw_key": issued.raw_key,
+                "hash": issued.hash,
+                "alias": issued.alias,
+                "expires_at": issued.expires_at,
+            })),
+        ),
+        Err(crate::core::keys::KeyStoreError::InvalidParams(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        ),
+        Err(err) => {
+            tracing::warn!(error = %err, "admin keys issue failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+        }
+    }
+}
+
+#[cfg(feature = "db")]
+async fn handle_admin_keys_revoke(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let store = match state.key_store.as_ref() {
+        Some(s) => s,
+        None => return admin_unavailable(),
+    };
+    match store.revoke(&hash, Some("admin")).await {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"revoked": true}))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such key"})),
+        ),
+        Err(err) => {
+            tracing::warn!(error = %err, "admin keys revoke failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+        }
+    }
+}
+
+#[cfg(feature = "db")]
+async fn handle_admin_keys_info(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let store = match state.key_store.as_ref() {
+        Some(s) => s,
+        None => return admin_unavailable(),
+    };
+    match store.lookup(&hash).await {
+        Ok(Some(key)) => (StatusCode::OK, Json(ati_key_to_json(&key))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such key"})),
+        ),
+        Err(err) => {
+            tracing::warn!(error = %err, "admin keys info failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+        }
+    }
+}
+
+#[cfg(feature = "db")]
+async fn handle_admin_keys_bulk_revoke(
+    State(state): State<Arc<ProxyState>>,
+    Json(body): Json<AdminBulkRevokeRequest>,
+) -> impl IntoResponse {
+    let store = match state.key_store.as_ref() {
+        Some(s) => s,
+        None => return admin_unavailable(),
+    };
+    let by = body.by.clone();
+    let filter = crate::core::keys::BulkRevokeFilter {
+        user_id: body.user_id,
+        alias_prefix: body.alias_prefix,
+        hashes: body.hashes,
+    };
+    match store.bulk_revoke(filter, by.as_deref()).await {
+        Ok(count) => (StatusCode::OK, Json(serde_json::json!({"revoked": count}))),
+        Err(crate::core::keys::KeyStoreError::InvalidParams(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        ),
+        Err(err) => {
+            tracing::warn!(error = %err, "admin keys bulk revoke failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+        }
+    }
+}
+
+#[cfg(feature = "db")]
+async fn handle_admin_keys_list(
+    State(state): State<Arc<ProxyState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let store = match state.key_store.as_ref() {
+        Some(s) => s,
+        None => return admin_unavailable(),
+    };
+    let user_id = match params.get("user_id") {
+        Some(u) => u.clone(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "user_id query param required"})),
+            )
+        }
+    };
+    match store.list_user_sessions(&user_id).await {
+        Ok(rows) => {
+            let json: Vec<Value> = rows.iter().map(ati_key_to_json).collect();
+            (StatusCode::OK, Json(serde_json::json!({"sessions": json})))
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "admin keys list failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+        }
+    }
+}
+
+// Stubs when feature=db is off — admin endpoints just 503.
+#[cfg(not(feature = "db"))]
+async fn handle_admin_keys_issue(
+    State(_state): State<Arc<ProxyState>>,
+    Json(_body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    admin_unavailable()
+}
+#[cfg(not(feature = "db"))]
+async fn handle_admin_keys_revoke(
+    State(_state): State<Arc<ProxyState>>,
+    axum::extract::Path(_hash): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    admin_unavailable()
+}
+#[cfg(not(feature = "db"))]
+async fn handle_admin_keys_info(
+    State(_state): State<Arc<ProxyState>>,
+    axum::extract::Path(_hash): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    admin_unavailable()
+}
+#[cfg(not(feature = "db"))]
+async fn handle_admin_keys_bulk_revoke(
+    State(_state): State<Arc<ProxyState>>,
+    Json(_body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    admin_unavailable()
+}
+#[cfg(not(feature = "db"))]
+async fn handle_admin_keys_list(
+    State(_state): State<Arc<ProxyState>>,
+    Query(_params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    admin_unavailable()
+}
+
+fn admin_unavailable() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "admin endpoints require ATI_DB_URL + ATI_ADMIN_TOKEN"})),
+    )
+}
+
+#[cfg(feature = "db")]
+fn ati_key_to_json(key: &crate::core::keys::AtiKey) -> Value {
+    serde_json::json!({
+        "token_hash": key.token_hash,
+        "key_alias": key.key_alias,
+        "user_id": key.user_id,
+        "blocked": key.blocked,
+        "expires_at": key.expires_at,
+        "tools": key.tools,
+        "providers": key.providers,
+        "categories": key.categories,
+        "skills": key.skills,
+        "request_count": key.request_count,
+        "error_count": key.error_count,
+        "last_used_at": key.last_used_at,
+        "metadata": key.metadata,
+        "created_at": key.created_at,
+        "created_by": key.created_by,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // POST /mcp — MCP JSON-RPC proxy endpoint
 // ---------------------------------------------------------------------------
 
@@ -1817,12 +2097,21 @@ fn skillati_error_response(err: SkillAtiError) -> (StatusCode, Json<Value>) {
 
 // --- Auth middleware ---
 
-/// JWT authentication middleware.
+/// Request authentication middleware. Three parallel paths, additive:
 ///
-/// - /health and /.well-known/jwks.json → skip auth
-/// - Passthrough routes → skip JWT (those use HMAC sig-verify, wired in PR 2)
-/// - JWT configured → validate Bearer token, attach claims to request extensions
-/// - No JWT configured → allow all (dev mode)
+///   - `Authorization: Bearer <jwt>` → existing JWT validation, claims into
+///     extensions.
+///   - `Authorization: Ati-Key <raw>` → DB-backed virtual key lookup. Synthesizes
+///     a `TokenClaims` from the row's scope arrays so `scopes_for_request` and
+///     every handler keep working unchanged.
+///   - Passthrough routes → skip JWT entirely (those use HMAC sig-verify, wired
+///     in PR 2) and live in a different identity model (HMAC-signed sandboxes,
+///     not JWT-bearing agents).
+///
+/// Public endpoints (`/health`, `/.well-known/jwks.json`) skip all of the above.
+/// Dev mode (no `jwt_config`) lets unauthenticated requests through *unless*
+/// they explicitly present an `Ati-Key` header — in that case we still try to
+/// validate the key against the DB so the JWT path is never the only option.
 async fn auth_middleware(
     State(state): State<Arc<ProxyState>>,
     mut req: HttpRequest<Body>,
@@ -1830,7 +2119,7 @@ async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path();
 
-    // Skip auth for public endpoints
+    // Skip auth for public endpoints.
     if path == "/health" || path == "/.well-known/jwks.json" {
         return Ok(next.run(req).await);
     }
@@ -1852,19 +2141,33 @@ async fn auth_middleware(
         }
     }
 
-    // If no JWT configured, allow all (dev mode)
+    let auth_header_owned: Option<String> = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    // Ati-Key path takes precedence when present — the orchestrator chose it
+    // for a reason (per-job revocable credential), and we want the audit
+    // trail to reflect that even if the request also happened to carry a JWT.
+    if let Some(raw) = auth_header_owned
+        .as_deref()
+        .and_then(|h| h.strip_prefix("Ati-Key "))
+    {
+        return authenticate_ati_key(state, raw.to_string(), req, next).await;
+    }
+
+    // If no JWT configured, allow all (dev mode). This branch is reached only
+    // when the request did NOT present an Ati-Key (handled above) — so we're
+    // either an unauthenticated dev call or a legacy JWT call that the dev
+    // proxy passes through.
     let jwt_config = match &state.jwt_config {
         Some(c) => c,
         None => return Ok(next.run(req).await),
     };
 
     // Extract Authorization: Bearer <token>
-    let auth_header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
-
-    let token = match auth_header {
+    let token = match auth_header_owned.as_deref() {
         Some(header) if header.starts_with("Bearer ") => &header[7..],
         _ => return Err(StatusCode::UNAUTHORIZED),
     };
@@ -1906,6 +2209,77 @@ fn is_named_route(path: &str) -> bool {
         || path.starts_with("/skillati/")
 }
 
+/// Resolve an `Authorization: Ati-Key <raw>` header against the DB. On
+/// success, synthesizes a `TokenClaims` from the row's scopes so the rest of
+/// the request path (`scopes_for_request`, every handler) is unchanged.
+///
+/// 503 when the build doesn't include the `db` feature or the key store
+/// isn't configured — the caller asked for a feature this proxy doesn't
+/// support, which is different from "key not found" (401).
+#[cfg(feature = "db")]
+async fn authenticate_ati_key(
+    state: Arc<ProxyState>,
+    raw: String,
+    mut req: HttpRequest<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let hash = sha256_hex(raw.as_bytes());
+    let store = match state.key_store.as_ref() {
+        Some(s) => s,
+        None => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    let key = match store.lookup(&hash).await {
+        Ok(Some(k)) if k.is_active() => k,
+        Ok(_) => {
+            tracing::debug!("Ati-Key not found or not active");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "Ati-Key lookup failed");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+    let claims = key.to_synthetic_claims();
+    tracing::debug!(sub = %claims.sub, "Ati-Key validated");
+    req.extensions_mut().insert(TokenHash(hash.clone()));
+    req.extensions_mut().insert(EphemeralKeyMarker { hash });
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
+}
+
+#[cfg(not(feature = "db"))]
+async fn authenticate_ati_key(
+    _state: Arc<ProxyState>,
+    _raw: String,
+    _req: HttpRequest<Body>,
+    _next: Next,
+) -> Result<Response, StatusCode> {
+    Err(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+/// Per-request extension carrying a stable, irreversible identifier of the
+/// bearer token used. Stored in axum request extensions by `auth_middleware`,
+/// read by audit-log writers.
+#[derive(Debug, Clone)]
+pub struct TokenHash(pub String);
+
+/// Marker extension inserted by `auth_middleware` when a request authenticated
+/// via `Authorization: Ati-Key`. Carries the key hash so the post-call audit
+/// path can bump `ati_keys.request_count` without re-hashing or looking up
+/// the row again.
+#[derive(Debug, Clone)]
+pub struct EphemeralKeyMarker {
+    pub hash: String,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    hex::encode(digest)
+}
+
 // --- Router builder ---
 
 /// Build the axum Router from a pre-constructed ProxyState.
@@ -1925,7 +2299,7 @@ fn max_call_body_bytes() -> usize {
 pub fn build_router(state: Arc<ProxyState>) -> Router {
     use axum::extract::DefaultBodyLimit;
 
-    Router::new()
+    let main = Router::new()
         .route("/call", post(handle_call))
         .route("/help", post(handle_help))
         .route("/mcp", post(handle_mcp))
@@ -1975,6 +2349,33 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         // `ati.proxy.requests` counter + `ati.proxy.request_duration_ms`
         // histogram. Cheap no-op when the feature is off.
         .layer(axum::middleware::from_fn(observability_middleware))
+        .with_state(state.clone());
+
+    // Admin sub-router lives behind its own middleware (master bearer
+    // against `state.admin_token`) so the regular `auth_middleware` never
+    // sees these paths and can't accidentally match them on a JWT scope.
+    let admin = build_admin_router(state.clone());
+
+    main.merge(admin)
+}
+
+fn build_admin_router(state: Arc<ProxyState>) -> Router {
+    Router::new()
+        .route("/admin/keys/issue", post(handle_admin_keys_issue))
+        .route(
+            "/admin/keys/bulk-revoke",
+            post(handle_admin_keys_bulk_revoke),
+        )
+        .route("/admin/keys/{hash}", get(handle_admin_keys_info))
+        .route(
+            "/admin/keys/{hash}",
+            axum::routing::delete(handle_admin_keys_revoke),
+        )
+        .route("/admin/keys", get(handle_admin_keys_list))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            admin_auth_middleware,
+        ))
         .with_state(state)
 }
 
@@ -2024,6 +2425,44 @@ pub(crate) struct PassthroughMetricLabelsSlot {
     /// hit a named handler instead, or the slot was never written
     /// (passthrough disabled).
     pub(crate) route: std::sync::Mutex<Option<String>>,
+}
+
+/// Middleware enforcing master-token bearer auth on `/admin/*`. Constant-time
+/// compares the request's `Authorization: Bearer …` against `state.admin_token`.
+/// Returns 503 when no admin token is configured (i.e. don't expose admin
+/// surfaces by accident).
+async fn admin_auth_middleware(
+    State(state): State<Arc<ProxyState>>,
+    req: HttpRequest<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let configured = match state.admin_token.as_ref() {
+        Some(t) => t,
+        None => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    let presented = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if !constant_time_eq(configured.as_bytes(), presented.as_bytes()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(req).await)
+}
+
+/// Constant-time byte slice equality. Branches only on length (the lengths
+/// of admin tokens aren't sensitive — it's the contents that matter).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Per-request observability layer. Always mints a `tracing` span so events
@@ -2451,6 +2890,36 @@ pub async fn run(
         );
     }
 
+    // Build the virtual-key store + LISTEN task when the DB is connected.
+    // Connection is required for the LISTEN side; if it fails we degrade
+    // gracefully (key path returns 503) rather than refusing to start.
+    #[cfg(feature = "db")]
+    let key_store: OptionalKeyStore = if let Some(pool) = db.pool() {
+        match crate::core::keys::KeyStore::new(pool.clone()).await {
+            Ok(store) => {
+                tracing::info!("started ati_keys store + LISTEN task");
+                Some(store)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to start KeyStore; Ati-Key auth will return 503");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(not(feature = "db"))]
+    let key_store: OptionalKeyStore = None;
+
+    // Plain-text admin bearer from env. Required for /admin/keys/* endpoints.
+    // Absent → endpoints return 503 (intentional: no token = no admin surface).
+    let admin_token = std::env::var("ATI_ADMIN_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if key_store.is_some() && admin_token.is_none() {
+        tracing::warn!("DB connected but ATI_ADMIN_TOKEN unset — /admin/keys/* will return 503");
+    }
+
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
@@ -2461,6 +2930,8 @@ pub async fn run(
         db,
         passthrough,
         sig_verify,
+        key_store,
+        admin_token,
     });
 
     // Hot-reload secret on SIGHUP — `ati edge rotate-keyring` (PR 3) re-encrypts
@@ -2853,6 +3324,8 @@ auth_type = "none"
                 )
                 .expect("sig verify"),
             ),
+            key_store: None,
+            admin_token: None,
         });
         (state, manifests_tmp)
     }
@@ -2930,6 +3403,8 @@ deny_paths = ["/denied"]
                 )
                 .expect("sig verify"),
             ),
+            key_store: None,
+            admin_token: None,
         });
         (state, manifests_tmp)
     }

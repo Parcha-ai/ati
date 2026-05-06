@@ -83,6 +83,8 @@ fn build_passthrough_app(manifest_toml: &str, keys: &[(&str, &str)]) -> (axum::R
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
     (app, dir)
@@ -116,6 +118,8 @@ fn build_disabled_app(manifest_toml: &str) -> (axum::Router, TempDir) {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
     (app, dir)
@@ -1025,6 +1029,8 @@ path_prefix = "/sessions"
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 

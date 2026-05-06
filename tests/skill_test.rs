@@ -55,6 +55,8 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     })
 }
 

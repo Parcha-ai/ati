@@ -772,6 +772,8 @@ auth_type = "none"
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
 
     let app = ati::proxy::server::build_router(state);

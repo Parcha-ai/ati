@@ -46,6 +46,8 @@ fn build_minimal_proxy() -> axum::Router {
             )
             .expect("build sig verify config"),
         ),
+        key_store: None,
+        admin_token: None,
     });
     build_router(state)
 }

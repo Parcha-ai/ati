@@ -9,6 +9,8 @@ pub mod gcs;
 pub mod http;
 pub mod jwt;
 pub mod keyring;
+#[cfg(feature = "db")]
+pub mod keys;
 pub mod logging;
 pub mod manifest;
 pub mod mcp_client;

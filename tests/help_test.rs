@@ -171,6 +171,8 @@ async fn test_proxy_help_returns_llm_recommendations() {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 
@@ -242,6 +244,8 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 
@@ -290,6 +294,8 @@ async fn test_proxy_help_missing_llm_key_returns_503() {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 
@@ -349,6 +355,8 @@ async fn test_proxy_help_llm_error_returns_502() {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 
@@ -664,6 +672,8 @@ async fn test_proxy_help_excludes_internal_tools() {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
 

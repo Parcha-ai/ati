@@ -102,6 +102,8 @@ path_prefix = "/api"
         db: ati::core::db::DbState::Disabled,
         passthrough,
         sig_verify,
+        key_store: None,
+        admin_token: None,
     });
     (build_router(state), dir)
 }

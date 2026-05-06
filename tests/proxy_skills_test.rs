@@ -41,6 +41,8 @@ fn build_app_with_skills(
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     build_router(state)
 }
@@ -69,6 +71,8 @@ fn build_app_with_skills_and_jwt(
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     build_router(state)
 }
