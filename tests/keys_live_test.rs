@@ -444,6 +444,54 @@ async fn bulk_revoke_by_user_id_revokes_all_matching() {
 }
 
 #[tokio::test]
+async fn bulk_revoke_alias_prefix_does_not_match_wildcards() {
+    // Regression for the security bug Greptile flagged: passing `%` as the
+    // alias_prefix would previously expand to `LIKE '%%'` and revoke every
+    // row in the table. The fix escapes `%` and `_` so they match literally.
+    let _g = shared_lock().lock().await;
+    let Some(pool) = connect_test_db().await else {
+        eprintln!("SKIP: ATI_DB_URL_TEST not set");
+        return;
+    };
+    truncate_all(&pool).await;
+
+    let store = KeyStore::new(pool.clone()).await.expect("store");
+    // Three keys with non-wildcard aliases.
+    let _a = store
+        .issue(mk_params("user-a", "alpha-1", vec!["test_get"]))
+        .await
+        .expect("a");
+    let _b = store
+        .issue(mk_params("user-a", "beta-1", vec!["test_get"]))
+        .await
+        .expect("b");
+    let _c = store
+        .issue(mk_params("user-b", "gamma-1", vec!["test_get"]))
+        .await
+        .expect("c");
+
+    // Pass `%` as the prefix — should match ZERO rows, not the entire table.
+    let n = store
+        .bulk_revoke(
+            BulkRevokeFilter {
+                alias_prefix: Some("%".into()),
+                ..Default::default()
+            },
+            Some("admin"),
+        )
+        .await
+        .expect("bulk revoke");
+    assert_eq!(n, 0, "alias_prefix='%' must match zero rows after escape");
+
+    // All three keys still present.
+    let remaining: (i64,) = sqlx::query_as("SELECT count(*) FROM ati_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining.0, 3);
+}
+
+#[tokio::test]
 async fn bulk_revoke_with_empty_filter_errors() {
     let _g = shared_lock().lock().await;
     let Some(pool) = connect_test_db().await else {

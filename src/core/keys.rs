@@ -174,11 +174,33 @@ pub struct BulkRevokeFilter {
 }
 
 impl BulkRevokeFilter {
+    /// True when no field would meaningfully constrain the WHERE clause:
+    /// every field is None, an empty string, or an empty hash list. Used as
+    /// a guard inside `bulk_revoke` so we never accidentally revoke every
+    /// row in `ati_keys`.
     fn is_empty(&self) -> bool {
-        self.user_id.is_none()
-            && self.alias_prefix.is_none()
-            && self.hashes.as_ref().is_none_or(|h| h.is_empty())
+        let user_empty = self.user_id.as_ref().is_none_or(|s| s.trim().is_empty());
+        let prefix_empty = self
+            .alias_prefix
+            .as_ref()
+            .is_none_or(|s| s.trim().is_empty());
+        let hashes_empty = self.hashes.as_ref().is_none_or(|h| h.is_empty());
+        user_empty && prefix_empty && hashes_empty
     }
+}
+
+/// Escape `%` and `_` (LIKE wildcards) in an alias_prefix so a caller can't
+/// match every row by passing `"%"` or `"_"`. Pairs with an explicit
+/// `LIKE … ESCAPE '\'` clause in the query.
+fn escape_like(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch == '%' || ch == '_' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Cache-fronted key store. Cheap to clone (interior `Arc`s).
@@ -379,44 +401,70 @@ impl KeyStore {
 
         let mut tx = self.pool.begin().await?;
 
-        // Build a single query that returns the matching hashes so we can
-        // notify per-row and purge the cache after commit.
+        // Build the WHERE clause once and reuse for the single DELETE …
+        // RETURNING. This is the atomic alternative to SELECT-then-DELETE,
+        // which under READ COMMITTED can hard-delete rows inserted between
+        // the two queries with no snapshot, no audit row, and no NOTIFY —
+        // breaking the soft-delete invariant.
         let mut where_clauses: Vec<String> = Vec::new();
         let mut bind_idx = 1usize;
-        if filter.user_id.is_some() {
+        if filter
+            .user_id
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
             where_clauses.push(format!("user_id = ${bind_idx}"));
             bind_idx += 1;
         }
-        if filter.alias_prefix.is_some() {
-            where_clauses.push(format!("key_alias LIKE ${bind_idx}"));
+        if filter
+            .alias_prefix
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            // ESCAPE '\\' so a caller passing `%` or `_` matches literally
+            // instead of as a SQL LIKE wildcard. Without this, `alias_prefix
+            // = "%"` would match every row and silently revoke the table.
+            where_clauses.push(format!("key_alias LIKE ${bind_idx} ESCAPE '\\'"));
             bind_idx += 1;
         }
-        if filter.hashes.is_some() {
+        if filter.hashes.as_ref().is_some_and(|h| !h.is_empty()) {
             where_clauses.push(format!("token_hash = ANY(${bind_idx})"));
         }
         let where_sql = where_clauses.join(" AND ");
 
-        // Snapshot matching rows.
-        let select_sql = format!(
-            "SELECT token_hash, to_jsonb(ati_keys.*) as snap FROM ati_keys WHERE {where_sql}"
+        // DELETE … RETURNING gives us atomic snapshot+removal: any concurrent
+        // INSERT either misses this DELETE entirely or appears in the
+        // returned rows. No silent hard-delete window.
+        let delete_sql = format!(
+            "DELETE FROM ati_keys WHERE {where_sql} \
+             RETURNING token_hash, to_jsonb(ati_keys.*) AS snap"
         );
-        let mut select = sqlx::query_as::<_, (String, serde_json::Value)>(&select_sql);
+        let mut delete = sqlx::query_as::<_, (String, serde_json::Value)>(&delete_sql);
         if let Some(ref u) = filter.user_id {
-            select = select.bind(u);
+            if !u.trim().is_empty() {
+                delete = delete.bind(u);
+            }
         }
         if let Some(ref p) = filter.alias_prefix {
-            select = select.bind(format!("{p}%"));
+            if !p.trim().is_empty() {
+                delete = delete.bind(format!("{}%", escape_like(p)));
+            }
         }
         if let Some(ref h) = filter.hashes {
-            select = select.bind(h);
+            if !h.is_empty() {
+                delete = delete.bind(h);
+            }
         }
-        let rows: Vec<(String, serde_json::Value)> = select.fetch_all(&mut *tx).await?;
+        let rows: Vec<(String, serde_json::Value)> = delete.fetch_all(&mut *tx).await?;
 
         if rows.is_empty() {
+            tx.commit().await?;
             return Ok(0);
         }
 
-        // Move and delete + audit + notify per row. One transaction.
+        // Per-row snapshot + audit + NOTIFY. All inside the same transaction
+        // as the DELETE, so subscribers see the NOTIFYs precisely when the
+        // commit lands — never before.
         for (hash, snap) in &rows {
             sqlx::query(
                 "INSERT INTO ati_deleted_keys (token_hash, snapshot, deleted_by) VALUES ($1, $2, $3)",
@@ -444,20 +492,6 @@ impl KeyStore {
                 .await?;
         }
 
-        // Single DELETE on the same WHERE.
-        let delete_sql = format!("DELETE FROM ati_keys WHERE {where_sql}");
-        let mut delete = sqlx::query(&delete_sql);
-        if let Some(ref u) = filter.user_id {
-            delete = delete.bind(u);
-        }
-        if let Some(ref p) = filter.alias_prefix {
-            delete = delete.bind(format!("{p}%"));
-        }
-        if let Some(ref h) = filter.hashes {
-            delete = delete.bind(h);
-        }
-        let result = delete.execute(&mut *tx).await?;
-
         tx.commit().await?;
 
         // Purge cache for every revoked hash.
@@ -465,7 +499,7 @@ impl KeyStore {
             self.cache.invalidate(hash).await;
         }
 
-        Ok(result.rows_affected())
+        Ok(rows.len() as u64)
     }
 
     /// List active rows for a user. Used by the `ati admin keys list-sessions`
@@ -558,10 +592,15 @@ impl From<AtiKeyRow> for AtiKey {
 
 fn spawn_listener(pool: PgPool, cache: Cache<String, Option<AtiKey>>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut backoff = Duration::from_secs(1);
+        const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+        const MAX_BACKOFF: Duration = Duration::from_secs(30);
+        let mut backoff = INITIAL_BACKOFF;
         let mut warned_once = false;
         loop {
-            match listen_loop(&pool, &cache).await {
+            // listen_loop resets backoff to INITIAL_BACKOFF on first successful
+            // notification — that proves the new connection is live and a
+            // subsequent disconnect should retry quickly, not at the cap.
+            match listen_loop(&pool, &cache, &mut backoff).await {
                 Ok(()) => {
                     // listen_loop only returns Ok on graceful shutdown; we
                     // drop the channel below to break the outer loop.
@@ -575,7 +614,7 @@ fn spawn_listener(pool: PgPool, cache: Cache<String, Option<AtiKey>>) -> JoinHan
                         tracing::debug!(error = %err, "listener reconnect");
                     }
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
             }
         }
@@ -585,9 +624,14 @@ fn spawn_listener(pool: PgPool, cache: Cache<String, Option<AtiKey>>) -> JoinHan
 async fn listen_loop(
     pool: &PgPool,
     cache: &Cache<String, Option<AtiKey>>,
+    backoff: &mut Duration,
 ) -> Result<(), sqlx::Error> {
     let mut listener = PgListener::connect_with(pool).await?;
     listener.listen(NOTIFY_CHANNEL).await?;
+    // Connection is good — reset backoff so a *future* disconnect retries
+    // quickly. Without this, a brief outage after a long-stable session
+    // would wait the cap (30s) instead of the intended 1s.
+    *backoff = Duration::from_secs(1);
     loop {
         let notification = listener.recv().await?;
         let hash = notification.payload();
@@ -740,5 +784,62 @@ mod tests {
             ..Default::default()
         };
         assert!(f.is_empty());
+    }
+
+    #[test]
+    fn bulk_revoke_filter_treats_whitespace_as_empty() {
+        // Whitespace-only fields would previously sneak past the table-wipe
+        // guard. They must be treated as effectively None.
+        let f = BulkRevokeFilter {
+            user_id: Some("   ".into()),
+            ..Default::default()
+        };
+        assert!(f.is_empty());
+        let f = BulkRevokeFilter {
+            alias_prefix: Some("\t\n".into()),
+            ..Default::default()
+        };
+        assert!(f.is_empty());
+        let f = BulkRevokeFilter {
+            user_id: Some("".into()),
+            alias_prefix: Some("".into()),
+            hashes: Some(vec![]),
+        };
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn escape_like_escapes_wildcards_and_backslash() {
+        assert_eq!(escape_like(""), "");
+        assert_eq!(escape_like("plain"), "plain");
+        assert_eq!(escape_like("100%"), "100\\%");
+        assert_eq!(escape_like("a_b"), "a\\_b");
+        assert_eq!(escape_like("c:\\path"), "c:\\\\path");
+        // The most adversarial case: passing `%` alone must not match every
+        // row when concatenated with `%` to form the LIKE pattern.
+        assert_eq!(escape_like("%"), "\\%");
+        // Multi-char prefix with mixed wildcards.
+        assert_eq!(escape_like("foo_%bar"), "foo\\_\\%bar");
+    }
+
+    #[test]
+    fn constant_time_eq_basics() {
+        // Local copy of the proxy helper for unit testing.
+        fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+            let mut diff: u8 = (a.len() ^ b.len()) as u8 | ((a.len() ^ b.len()) >> 8) as u8;
+            let n = a.len();
+            for i in 0..n {
+                let bi = if b.is_empty() { 0u8 } else { b[i % b.len()] };
+                diff |= a[i] ^ bi;
+            }
+            diff == 0
+        }
+        assert!(ct_eq(b"", b""));
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"ab")); // shorter
+        assert!(!ct_eq(b"ab", b"abc")); // longer
+        assert!(!ct_eq(b"abc", b"")); // empty mismatch
+        assert!(!ct_eq(b"", b"abc"));
     }
 }

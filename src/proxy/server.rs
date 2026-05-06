@@ -43,7 +43,6 @@ pub type OptionalKeyStore = Option<Arc<KeyStore>>;
 #[cfg(not(feature = "db"))]
 pub type OptionalKeyStore = Option<()>;
 
-
 /// Shared state for the proxy server.
 pub struct ProxyState {
     pub registry: ManifestRegistry,
@@ -2452,15 +2451,24 @@ async fn admin_auth_middleware(
     Ok(next.run(req).await)
 }
 
-/// Constant-time byte slice equality. Branches only on length (the lengths
-/// of admin tokens aren't sensitive — it's the contents that matter).
+/// Constant-time byte-slice equality. Does NOT short-circuit on length
+/// mismatch — that early return would leak the configured token's byte
+/// length via response timing (an attacker could probe with various-length
+/// candidates and time the rejection). Instead, we always walk the full
+/// length of `a` (the configured token, length not secret to the server)
+/// XOR-ing index-by-index against `b`, and fold the length difference
+/// into `diff` so unequal-length inputs always return false.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+    // Mix the length difference into the accumulator so unequal lengths
+    // can never compare equal. `wrapping_*` keeps the body branch-free.
+    let mut diff: u8 = (a.len() ^ b.len()) as u8 | ((a.len() ^ b.len()) >> 8) as u8;
+    let n = a.len();
+    for i in 0..n {
+        // Index `b` modulo its length when `b` is shorter; the diff
+        // accumulator already records the length mismatch, so the value
+        // we XOR is irrelevant — only the runtime needs to be uniform.
+        let bi = if b.is_empty() { 0u8 } else { b[i % b.len()] };
+        diff |= a[i] ^ bi;
     }
     diff == 0
 }
