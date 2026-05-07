@@ -153,6 +153,8 @@ fn mock_provider(base_url: &str) -> Provider {
         openapi_overrides: HashMap::new(),
         oauth2_token_url: None,
         oauth2_basic_auth: false,
+        oauth_resource: None,
+        oauth_scopes: Vec::new(),
         extra_headers: HashMap::new(),
         auth_generator: None,
         skills: vec![],

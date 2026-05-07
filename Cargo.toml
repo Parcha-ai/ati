@@ -93,6 +93,15 @@ glob = "0.3"
 rand = "0.8"
 strsim = "0.11.1"
 
+# OAuth 2.1 + PKCE for MCP servers (Particle, GitHub, Linear, Atlassian, ...).
+# `open`: cross-platform browser launcher used by `ati provider authorize`.
+# `dashmap`: per-provider tokio::Mutex map used by core::oauth_refresh to
+#   serialize concurrent refresh attempts within a single process.
+# `hostname`: read system hostname for the DCR `client_name` ("ati-<host>").
+open = "5"
+dashmap = "6"
+hostname = "0.4"
+
 # Optional Postgres driver for the persistence layer (virtual keys, call audit).
 # Off by default; enable with `--features db`. Pinned to rustls to match reqwest
 # and keep the static-musl release binary working. Feature set is intentionally

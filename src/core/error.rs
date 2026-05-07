@@ -12,6 +12,16 @@ pub fn classify_error(err: &dyn std::error::Error) -> &'static str {
 
     if msg.contains("unknown tool") || msg.contains("not found") && msg.contains("tool") {
         "tool.not_found"
+    } else if msg.contains("oauth.not_authorized") {
+        "auth.not_authorized"
+    } else if msg.contains("oauth.discovery_failed") {
+        "auth.discovery_failed"
+    } else if msg.contains("oauth.dcr_failed") {
+        "auth.dcr_failed"
+    } else if msg.contains("oauth.exchange_failed") || msg.contains("oauth.refresh_failed") {
+        "auth.expired"
+    } else if msg.contains("oauth.revoke_failed") {
+        "auth.revoke_failed"
     } else if msg.contains("scope") || msg.contains("access denied") {
         "auth.scope_denied"
     } else if msg.contains("expired") {

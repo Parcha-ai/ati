@@ -14,9 +14,20 @@ fn init_directory(
     es256: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Create directory structure
-    let dirs = ["manifests", "specs", "skills"];
+    let dirs = ["manifests", "specs", "skills", "oauth"];
     for dir in &dirs {
         std::fs::create_dir_all(ati_dir.join(dir))?;
+    }
+    // OAuth tokens are sensitive — directory mode 0700 even if they don't run init.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let oauth_dir = ati_dir.join("oauth");
+        if let Ok(meta) = std::fs::metadata(&oauth_dir) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o700);
+            let _ = std::fs::set_permissions(&oauth_dir, perms);
+        }
     }
 
     // Write config.toml — always overwrite when --proxy is specified (explicit user action),
@@ -37,6 +48,7 @@ fn init_directory(
     tracing::info!("  manifests/");
     tracing::info!("  specs/");
     tracing::info!("  skills/");
+    tracing::info!("  oauth/");
     tracing::info!("  config.toml");
 
     tracing::info!("Next steps:");

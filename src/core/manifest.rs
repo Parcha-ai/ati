@@ -32,6 +32,13 @@ pub enum AuthType {
     #[default]
     None,
     Oauth2,
+    /// OAuth 2.1 + PKCE for MCP servers (RFC 7636 + RFC 8707 + RFC 7591).
+    /// Tokens are obtained via `ati provider authorize <name>` (browser flow,
+    /// one-time) and persisted to `~/.ati/oauth/<name>.json`. Refresh is
+    /// race-safe via fcntl file locks; access tokens are auto-refreshed on
+    /// near-expiry and on 401 responses. See `core::oauth_mcp` for the spec
+    /// dance and `core::oauth_refresh` for the runtime hot path.
+    Oauth2Pkce,
     /// API key is embedded in the URL path via `${key_name}` placeholder.
     /// No auth header is sent — the key is resolved from the keyring and
     /// interpolated into the URL at connection time by `resolve_env_value`.
@@ -75,6 +82,17 @@ pub struct Provider {
     /// Some providers (e.g. Sovos) require this per RFC 6749 §2.3.1.
     #[serde(default)]
     pub oauth2_basic_auth: bool,
+    /// RFC 8707 resource indicator. Required when `auth_type = "oauth2_pkce"`.
+    /// Sent on `/authorize`, `/token`, and `/refresh` requests so the issued
+    /// access token is bound to this MCP server (not replayable elsewhere).
+    /// For Particle this is `"https://mcp.particle.pro"`.
+    #[serde(default)]
+    pub oauth_resource: Option<String>,
+    /// OAuth scopes requested in the authorization grant. Joined by space
+    /// into the `scope` query/body param. Common values for MCP servers:
+    /// `["mcp:read"]`, `["mcp:read", "mcp:write"]`. Provider-defined.
+    #[serde(default)]
+    pub oauth_scopes: Vec<String>,
     #[serde(default)]
     pub internal: bool,
     #[serde(default = "default_handler")]
@@ -440,6 +458,7 @@ impl CachedProvider {
             "query" => AuthType::Query,
             "basic" => AuthType::Basic,
             "oauth2" => AuthType::Oauth2,
+            "oauth2_pkce" => AuthType::Oauth2Pkce,
             _ => AuthType::None,
         };
 
@@ -462,6 +481,8 @@ impl CachedProvider {
             oauth2_token_url: None,
             auth_secret_name: None,
             oauth2_basic_auth: false,
+            oauth_resource: None,
+            oauth_scopes: Vec::new(),
             internal: false,
             handler,
             mcp_transport: self.mcp_transport.clone(),
@@ -902,6 +923,8 @@ pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
         oauth2_token_url: None,
         auth_secret_name: None,
         oauth2_basic_auth: false,
+        oauth_resource: None,
+        oauth_scopes: Vec::new(),
         internal: false,
         handler: "file_manager".to_string(),
         mcp_transport: None,

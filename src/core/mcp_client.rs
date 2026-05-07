@@ -105,9 +105,14 @@ pub struct McpToolResult {
 // ---------------------------------------------------------------------------
 
 /// Internal transport enum — stdio or HTTP.
+///
+/// `Http` is boxed because it carries a full `Provider` clone (used by the
+/// 401-retry path for OAuth 2.1 + PKCE force-refresh). Without the box,
+/// every `Transport::Stdio` value would carry the same large stack
+/// footprint as the HTTP variant — `clippy::large_enum_variant` flags this.
 enum Transport {
     Stdio(StdioTransport),
-    Http(HttpTransport),
+    Http(Box<HttpTransport>),
 }
 
 /// Stdio transport: subprocess with stdin/stdout.
@@ -140,6 +145,13 @@ struct HttpTransport {
     auth_header: Option<String>,
     /// Extra headers from provider config.
     extra_headers: HashMap<String, String>,
+    /// Auth type (controls the 401-retry path: only `Oauth2Pkce` triggers
+    /// `oauth_refresh::force_refresh` on a 401 response).
+    auth_type: super::manifest::AuthType,
+    /// Snapshot of the provider used to drive `oauth_refresh::force_refresh`
+    /// on a 401. Cheap clone — `Provider` carries small Strings + Vecs.
+    /// `None` for non-OAuth transports.
+    oauth_provider: Option<Provider>,
 }
 
 // ---------------------------------------------------------------------------
@@ -245,33 +257,49 @@ impl McpClient {
                     McpError::Config("mcp_url required for HTTP transport".into())
                 })?;
 
-                // Build auth header: generator takes priority over static keyring
-                let auth_header = if let Some(gen) = &provider.auth_generator {
-                    let default_ctx = GenContext::default();
-                    let ctx = gen_ctx.unwrap_or(&default_ctx);
-                    let default_cache = AuthCache::new();
-                    let cache = auth_cache.unwrap_or(&default_cache);
-                    match auth_generator::generate(provider, gen, ctx, keyring, cache).await {
-                        Ok(cred) => match &provider.auth_type {
-                            super::manifest::AuthType::Bearer => {
-                                Some(format!("Bearer {}", cred.value))
-                            }
-                            super::manifest::AuthType::Header => {
-                                if let Some(prefix) = &provider.auth_value_prefix {
-                                    Some(format!("{prefix}{}", cred.value))
-                                } else {
-                                    Some(cred.value)
-                                }
-                            }
-                            _ => Some(cred.value),
-                        },
-                        Err(e) => {
-                            return Err(McpError::Config(format!("auth_generator failed: {e}")));
+                // Build auth header: OAuth 2.1 + PKCE > generator > static keyring
+                let auth_header =
+                    if matches!(provider.auth_type, super::manifest::AuthType::Oauth2Pkce) {
+                        // Browser-based OAuth. Tokens were obtained earlier via
+                        // `ati provider authorize`; ensure_fresh_token reads them
+                        // from disk and refreshes if near expiry.
+                        match super::oauth_refresh::ensure_fresh_token(
+                            provider,
+                            std::time::Duration::from_secs(60),
+                        )
+                        .await
+                        {
+                            Ok(token) => Some(format!("Bearer {token}")),
+                            Err(e) => return Err(McpError::Config(e.to_string())),
                         }
-                    }
-                } else {
-                    build_auth_header(provider, keyring)
-                };
+                    } else if let Some(gen) = &provider.auth_generator {
+                        let default_ctx = GenContext::default();
+                        let ctx = gen_ctx.unwrap_or(&default_ctx);
+                        let default_cache = AuthCache::new();
+                        let cache = auth_cache.unwrap_or(&default_cache);
+                        match auth_generator::generate(provider, gen, ctx, keyring, cache).await {
+                            Ok(cred) => match &provider.auth_type {
+                                super::manifest::AuthType::Bearer => {
+                                    Some(format!("Bearer {}", cred.value))
+                                }
+                                super::manifest::AuthType::Header => {
+                                    if let Some(prefix) = &provider.auth_value_prefix {
+                                        Some(format!("{prefix}{}", cred.value))
+                                    } else {
+                                        Some(cred.value)
+                                    }
+                                }
+                                _ => Some(cred.value),
+                            },
+                            Err(e) => {
+                                return Err(McpError::Config(format!(
+                                    "auth_generator failed: {e}"
+                                )));
+                            }
+                        }
+                    } else {
+                        build_auth_header(provider, keyring)
+                    };
 
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(300))
@@ -285,14 +313,23 @@ impl McpClient {
                     .clone()
                     .unwrap_or_else(|| "Authorization".to_string());
 
-                Transport::Http(HttpTransport {
+                let oauth_provider =
+                    if matches!(provider.auth_type, super::manifest::AuthType::Oauth2Pkce) {
+                        Some(provider.clone())
+                    } else {
+                        None
+                    };
+
+                Transport::Http(Box::new(HttpTransport {
                     client,
                     url: resolved_url,
                     session_id: None,
                     auth_header_name,
                     auth_header,
                     extra_headers: provider.extra_headers.clone(),
-                })
+                    auth_type: provider.auth_type.clone(),
+                    oauth_provider,
+                }))
             }
             other => {
                 return Err(McpError::Config(format!(
@@ -598,49 +635,83 @@ async fn send_http_request(
     request: &JsonRpcRequest,
     provider_name: &str,
 ) -> Result<Value, McpError> {
-    let mut req = http
-        .client
-        .post(&http.url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
-        .json(request);
+    // OAuth 2.1 + PKCE: a 401 from the MCP server means the access token is
+    // either expired or revoked. We retry once after `oauth_refresh::force_refresh`
+    // — which holds an fcntl lock around the read-modify-write — before
+    // surfacing the error. Non-OAuth transports surface the 401 immediately.
+    let mut attempted_oauth_retry = false;
+    loop {
+        let mut req = http
+            .client
+            .post(&http.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .json(request);
 
-    // Attach session ID if we have one
-    if let Some(session_id) = &http.session_id {
-        req = req.header("Mcp-Session-Id", session_id.as_str());
-    }
-
-    // Inject auth (using custom header name if configured, e.g. "x-api-key")
-    if let Some(auth) = &http.auth_header {
-        req = req.header(http.auth_header_name.as_str(), auth.as_str());
-    }
-
-    // Inject extra headers from provider config
-    for (name, value) in &http.extra_headers {
-        req = req.header(name.as_str(), value.as_str());
-    }
-
-    let response = req
-        .send()
-        .await
-        .map_err(|e| McpError::Transport(format!("[{provider_name}] HTTP request failed: {e}")))?;
-
-    // Capture session ID from response header (usually set during initialize)
-    if let Some(session_val) = response.headers().get("mcp-session-id") {
-        if let Ok(sid) = session_val.to_str() {
-            http.session_id = Some(sid.to_string());
+        if let Some(session_id) = &http.session_id {
+            req = req.header("Mcp-Session-Id", session_id.as_str());
         }
-    }
 
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(McpError::Transport(format!(
-            "[{provider_name}] HTTP {}: {body}",
-            status.as_u16()
-        )));
-    }
+        if let Some(auth) = &http.auth_header {
+            req = req.header(http.auth_header_name.as_str(), auth.as_str());
+        }
 
+        for (name, value) in &http.extra_headers {
+            req = req.header(name.as_str(), value.as_str());
+        }
+
+        let response = req.send().await.map_err(|e| {
+            McpError::Transport(format!("[{provider_name}] HTTP request failed: {e}"))
+        })?;
+
+        if let Some(session_val) = response.headers().get("mcp-session-id") {
+            if let Ok(sid) = session_val.to_str() {
+                http.session_id = Some(sid.to_string());
+            }
+        }
+
+        let status = response.status();
+        if status.as_u16() == 401
+            && matches!(http.auth_type, super::manifest::AuthType::Oauth2Pkce)
+            && !attempted_oauth_retry
+        {
+            // Force-refresh the access token and retry exactly once. Drop
+            // session_id too — most MCP servers will issue a fresh one on
+            // re-initialize, but a stale 401 doesn't necessarily invalidate
+            // the session, so leave session_id in place and let the next
+            // request decide.
+            if let Some(p) = &http.oauth_provider {
+                let _ = response.text().await; // drain body to free conn
+                match super::oauth_refresh::force_refresh(p).await {
+                    Ok(token) => {
+                        http.auth_header = Some(format!("Bearer {token}"));
+                        attempted_oauth_retry = true;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(McpError::Transport(format!(
+                            "[{provider_name}] HTTP 401 and OAuth refresh failed: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(McpError::Transport(format!(
+                "[{provider_name}] HTTP {}: {body}",
+                status.as_u16()
+            )));
+        }
+        return process_http_response(response, request.id).await;
+    }
+}
+
+async fn process_http_response(
+    response: reqwest::Response,
+    request_id: u64,
+) -> Result<Value, McpError> {
     // Determine response type from Content-Type header
     let content_type = response
         .headers()
@@ -651,11 +722,11 @@ async fn send_http_request(
 
     if content_type.contains("text/event-stream") {
         // SSE stream — parse events to extract our JSON-RPC response
-        parse_sse_response(response, request.id).await
+        parse_sse_response(response, request_id).await
     } else {
         // Plain JSON response
         let body: Value = response.json().await?;
-        extract_jsonrpc_result(&body, request.id)
+        extract_jsonrpc_result(&body, request_id)
     }
 }
 
@@ -960,7 +1031,19 @@ pub async fn discover_all_mcp_tools(
             match result {
                 Ok(Ok(tools)) => Some((name.clone(), tools)),
                 Ok(Err(e)) => {
-                    tracing::warn!(provider = %name, error = %e, "MCP tool discovery failed");
+                    let msg = e.to_string();
+                    if msg.contains("oauth.not_authorized") {
+                        // Resilience: the operator hasn't run `ati provider authorize`
+                        // for this provider yet. Don't fail startup; tools list
+                        // remains empty until they authorize and the proxy
+                        // restarts (or live re-discovery is triggered).
+                        tracing::warn!(
+                            provider = %name,
+                            "MCP provider unauthorized — run `ati provider authorize {name}` to enable"
+                        );
+                    } else {
+                        tracing::warn!(provider = %name, error = %e, "MCP tool discovery failed");
+                    }
                     None
                 }
                 Err(_) => {

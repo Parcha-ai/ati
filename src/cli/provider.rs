@@ -126,6 +126,12 @@ pub async fn execute(
         }
         ProviderCommands::InstallSkills { name } => install_provider_skills(cli, name),
         ProviderCommands::Unload { name } => unload_provider(name),
+        ProviderCommands::Authorize {
+            name,
+            port,
+            no_browser,
+        } => authorize_provider(name, *port, *no_browser).await,
+        ProviderCommands::Deauthorize { name } => deauthorize_provider(name).await,
     }
 }
 
@@ -919,10 +925,58 @@ fn provider_info(cli: &Cli, name: &str) -> Result<(), Box<dyn std::error::Error>
                 );
                 println!("  Install:   ati provider install-skills {}", provider.name);
             }
+            if matches!(
+                provider.auth_type,
+                crate::core::manifest::AuthType::Oauth2Pkce
+            ) {
+                print_oauth_status_block(&provider.name);
+            }
         }
     }
 
     Ok(())
+}
+
+fn print_oauth_status_block(provider: &str) {
+    println!();
+    println!("OAuth 2.1 + PKCE:");
+    match crate::core::oauth_store::load(provider) {
+        Ok(Some(t)) => {
+            let remaining = t.access_remaining();
+            let mins = remaining.num_minutes();
+            let status = if remaining.num_seconds() <= 0 {
+                "expired (will refresh on next call)".to_string()
+            } else {
+                format!("authorized ({} min remaining)", mins)
+            };
+            println!("  Status:    {}", status);
+            println!("  Client ID: {}", t.client_id);
+            println!("  Scopes:    {}", t.scopes.join(" "));
+            println!(
+                "  Refresh:   {}",
+                if t.refresh_token.is_some() {
+                    "available"
+                } else {
+                    "none persisted"
+                }
+            );
+            println!(
+                "  Authorized: {}",
+                t.authorized_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
+            println!(
+                "  Updated:    {}",
+                t.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
+        }
+        Ok(None) => {
+            println!("  Status:    not authorized");
+            println!("  Run:       ati provider authorize {}", provider);
+        }
+        Err(e) => {
+            println!("  Status:    error reading token file ({})", e);
+        }
+    }
 }
 
 // ─── install-skills ──────────────────────────────────────────────────────────
@@ -1514,6 +1568,288 @@ fn read_spec_content(spec_ref: &str) -> Result<String, Box<dyn std::error::Error
     } else {
         Ok(std::fs::read_to_string(spec_ref)?)
     }
+}
+
+// ─── authorize / deauthorize (OAuth 2.1 + PKCE) ─────────────────────────────
+
+async fn authorize_provider(
+    name: &str,
+    requested_port: u16,
+    no_browser: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::core::manifest::AuthType;
+    use crate::core::oauth_mcp;
+    use crate::core::oauth_store;
+
+    let ati_dir = common::ati_dir();
+    let manifests_dir = ati_dir.join("manifests");
+    let registry = ManifestRegistry::load(&manifests_dir)?;
+    let provider = registry
+        .list_providers()
+        .into_iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| format!("Provider '{name}' not found."))?;
+
+    if !matches!(provider.auth_type, AuthType::Oauth2Pkce) {
+        return Err(format!(
+            "Provider '{name}' has auth_type = {:?}; only providers with auth_type = \"oauth2_pkce\" can be authorized this way.",
+            provider.auth_type
+        )
+        .into());
+    }
+
+    let mcp_url = provider
+        .mcp_url
+        .as_deref()
+        .ok_or_else(|| format!("Provider '{name}' has no mcp_url"))?;
+    let resource = provider
+        .oauth_resource
+        .clone()
+        .ok_or_else(|| format!("Provider '{name}' has no oauth_resource"))?;
+
+    println!("→ Discovering authorization server for {name}…");
+    let discovery = oauth_mcp::discover(mcp_url).await?;
+    let as_meta = &discovery.as_meta;
+    println!("  Issuer:   {}", as_meta.issuer);
+    println!("  Authorize: {}", as_meta.authorization_endpoint);
+    println!("  Token:    {}", as_meta.token_endpoint);
+
+    // Bind ephemeral listener so we know the redirect_uri before DCR.
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, requested_port))
+        .await
+        .map_err(|e| format!("bind loopback listener: {e}"))?;
+    let assigned_port = listener.local_addr()?.port();
+    let redirect_uri = format!("http://127.0.0.1:{assigned_port}/callback");
+    println!("  Redirect: {redirect_uri}");
+
+    // DCR (or reuse client_id from prior authorize if redirect_uri matches).
+    let client_id = match oauth_store::load(name).ok().flatten() {
+        Some(prior) if prior.redirect_uri == redirect_uri => {
+            println!(
+                "  Reusing client_id from prior authorization: {}",
+                prior.client_id
+            );
+            prior.client_id
+        }
+        _ => {
+            let reg_url = as_meta
+                .registration_endpoint
+                .as_deref()
+                .ok_or_else(|| "AS metadata missing registration_endpoint (DCR)".to_string())?;
+            let host = hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .unwrap_or_else(|| "unknown".to_string());
+            let client_name = format!("ati-{host}");
+            println!("→ Registering client (DCR) at {reg_url}…");
+            let cid = oauth_mcp::register_client(reg_url, &redirect_uri, &client_name).await?;
+            println!("  client_id: {cid}");
+            cid
+        }
+    };
+
+    let (verifier, challenge) = oauth_mcp::make_pkce_pair();
+    let state = oauth_mcp::make_state();
+
+    let authorize_url = oauth_mcp::build_authorize_url(
+        &as_meta.authorization_endpoint,
+        &client_id,
+        &redirect_uri,
+        &state,
+        &challenge,
+        &resource,
+        &provider.oauth_scopes,
+    )?;
+
+    if no_browser {
+        println!();
+        println!("Open this URL in your browser to authorize:");
+        println!("  {authorize_url}");
+        println!();
+    } else {
+        println!("→ Opening browser…");
+        if let Err(e) = open::that(&authorize_url) {
+            eprintln!("  warning: failed to open browser ({e}); open this URL manually:");
+            eprintln!("  {authorize_url}");
+        }
+    }
+
+    println!("→ Waiting for callback on 127.0.0.1:{assigned_port} (timeout: 5 min)…");
+
+    let (code, returned_state) =
+        wait_for_oauth_callback(listener, std::time::Duration::from_secs(300)).await?;
+
+    if !oauth_mcp::constant_time_eq(&returned_state, &state) {
+        return Err("OAuth callback `state` mismatch (possible CSRF)".into());
+    }
+
+    println!("→ Exchanging code for tokens…");
+    let token_response = oauth_mcp::exchange_code(
+        &as_meta.token_endpoint,
+        &code,
+        &verifier,
+        &redirect_uri,
+        &client_id,
+        &resource,
+    )
+    .await?;
+
+    let now = chrono::Utc::now();
+    let expires_in = i64::try_from(token_response.expires_in).unwrap_or(3600);
+    let scopes_persisted = if let Some(returned) = &token_response.scope {
+        returned
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        provider.oauth_scopes.clone()
+    };
+    let bundle = crate::core::oauth_store::ProviderTokens {
+        provider: name.to_string(),
+        client_id: client_id.clone(),
+        redirect_uri: redirect_uri.clone(),
+        access_token: token_response.access_token.clone(),
+        access_token_expires_at: now + chrono::Duration::seconds(expires_in),
+        refresh_token: token_response.refresh_token.clone(),
+        scopes: scopes_persisted.clone(),
+        resource: resource.clone(),
+        token_endpoint: as_meta.token_endpoint.clone(),
+        revocation_endpoint: as_meta.revocation_endpoint.clone(),
+        authorized_at: now,
+        updated_at: now,
+    };
+    oauth_store::save(&bundle)?;
+
+    println!();
+    println!("✓ Authorized {name}");
+    println!(
+        "  Tokens saved to: {}",
+        oauth_store::path_for(name).display()
+    );
+    println!("  Access token expires in: {} min", expires_in / 60);
+    println!(
+        "  Refresh token: {}",
+        if token_response.refresh_token.is_some() {
+            "persisted (auto-refresh enabled)"
+        } else {
+            "not issued by AS"
+        }
+    );
+    println!("  Scopes: {}", scopes_persisted.join(" "));
+
+    Ok(())
+}
+
+async fn wait_for_oauth_callback(
+    listener: tokio::net::TcpListener,
+    timeout: std::time::Duration,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    use axum::extract::{Query, State};
+    use axum::response::Html;
+    use axum::routing::get;
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
+
+    #[derive(Clone)]
+    struct CbState {
+        tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<Result<(String, String), String>>>>>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CbParams {
+        code: Option<String>,
+        state: Option<String>,
+        error: Option<String>,
+        error_description: Option<String>,
+    }
+
+    async fn callback(State(s): State<CbState>, Query(p): Query<CbParams>) -> Html<&'static str> {
+        let result = match (p.code, p.state, p.error) {
+            (_, _, Some(err)) => Err(format!(
+                "{err}: {}",
+                p.error_description.unwrap_or_default()
+            )),
+            (Some(code), Some(state), _) => Ok((code, state)),
+            _ => Err("callback missing code/state".to_string()),
+        };
+        if let Some(tx) = s.tx.lock().await.take() {
+            let _ = tx.send(result.clone());
+        }
+        match result {
+            Ok(_) => Html(
+                "<!doctype html><html><body style=\"font-family:system-ui;padding:2em\">\
+                 <h2>Authorization complete.</h2>\
+                 <p>You can close this tab and return to your terminal.</p>\
+                 </body></html>",
+            ),
+            Err(_) => Html(
+                "<!doctype html><html><body style=\"font-family:system-ui;padding:2em\">\
+                 <h2>Authorization failed.</h2>\
+                 <p>Check the terminal for details.</p>\
+                 </body></html>",
+            ),
+        }
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let state = CbState {
+        tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
+    };
+    let app = axum::Router::new()
+        .route("/callback", get(callback))
+        .with_state(state);
+
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app.into_make_service()).await;
+    });
+
+    let out = match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(Ok(pair))) => Ok(pair),
+        Ok(Ok(Err(msg))) => Err(format!("OAuth callback error: {msg}").into()),
+        Ok(Err(_)) => Err("OAuth callback channel closed unexpectedly".into()),
+        Err(_) => Err(format!("OAuth callback timed out after {timeout:?}").into()),
+    };
+    server.abort();
+    out
+}
+
+async fn deauthorize_provider(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::core::oauth_mcp;
+    use crate::core::oauth_store;
+
+    let tokens = match oauth_store::load(name)? {
+        Some(t) => t,
+        None => {
+            println!("Provider '{name}' is not authorized — nothing to do.");
+            return Ok(());
+        }
+    };
+
+    if let Some(rev_url) = &tokens.revocation_endpoint {
+        if let Some(rt) = &tokens.refresh_token {
+            match oauth_mcp::revoke(rev_url, rt, &tokens.client_id, Some("refresh_token")).await {
+                Ok(()) => println!("✓ Revoked refresh_token at {rev_url}"),
+                Err(e) => eprintln!("warning: refresh_token revoke failed: {e}"),
+            }
+        }
+        match oauth_mcp::revoke(
+            rev_url,
+            &tokens.access_token,
+            &tokens.client_id,
+            Some("access_token"),
+        )
+        .await
+        {
+            Ok(()) => println!("✓ Revoked access_token at {rev_url}"),
+            Err(e) => eprintln!("warning: access_token revoke failed: {e}"),
+        }
+    } else {
+        eprintln!("(no revocation_endpoint in AS metadata; skipping server-side revoke)");
+    }
+
+    oauth_store::delete(name)?;
+    println!("✓ Deleted local tokens for {name}");
+    Ok(())
 }
 
 #[cfg(test)]
