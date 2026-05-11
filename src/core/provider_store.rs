@@ -354,10 +354,7 @@ fn config_to_provider(
             serde_json::Value::String(hot.description),
         );
         map.insert("base_url".into(), serde_json::Value::String(hot.base_url));
-        map.insert(
-            "auth_type".into(),
-            serde_json::Value::String(hot.auth_type),
-        );
+        map.insert("auth_type".into(), serde_json::Value::String(hot.auth_type));
         if let Some(c) = hot.category {
             map.insert("category".into(), serde_json::Value::String(c));
         }
