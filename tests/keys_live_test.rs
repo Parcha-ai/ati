@@ -121,7 +121,7 @@ method = "GET"
     let state = Arc::new(ProxyState {
         registry,
         skill_registry: SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap(),
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: Some(jwt_config),
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -138,6 +138,9 @@ method = "GET"
         ),
         key_store: Some(store),
         admin_token,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     (dir, state)
 }

@@ -31,7 +31,7 @@ fn build_minimal_proxy() -> axum::Router {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -48,6 +48,9 @@ fn build_minimal_proxy() -> axum::Router {
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     build_router(state)
 }

@@ -26,7 +26,7 @@ fn build_app_with_skills(
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -43,6 +43,9 @@ fn build_app_with_skills(
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     build_router(state)
 }
@@ -56,7 +59,7 @@ fn build_app_with_skills_and_jwt(
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: Some(test_jwt_config()),
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -73,6 +76,9 @@ fn build_app_with_skills_and_jwt(
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     build_router(state)
 }
