@@ -164,7 +164,11 @@ impl LocalKek {
     ///
     /// Resolution rules:
     /// 1. If `ATI_MASTER_KEY_ACTIVE` is set, treat it as the active id and
-    ///    load every `ATI_MASTER_KEY_<id>` env var found.
+    ///    load every `ATI_MASTER_KEY_<id>` env var found. Also load the
+    ///    bare `ATI_MASTER_KEY` as id `m1` if present — this makes the
+    ///    migration path from single-version to multi-version painless
+    ///    (an operator who adds `ATI_MASTER_KEY_ACTIVE=m1` without yet
+    ///    renaming the existing variable still boots cleanly).
     /// 2. Otherwise, if `ATI_MASTER_KEY` is set, load it as id `m1` and use
     ///    `m1` as the active id. (Single-version bootstrap shortcut.)
     /// 3. Otherwise, `Err(Config)` — caller decides whether DB mode is even
@@ -186,32 +190,63 @@ impl LocalKek {
         if let Some(active) = active_explicit {
             let mut versions = HashMap::new();
             let prefix = "ATI_MASTER_KEY_";
+
+            // Honor the bare `ATI_MASTER_KEY` in multi-version mode so an
+            // operator migrating from the single-key shortcut doesn't have
+            // to rename the env var atomically with adding ACTIVE. Loads
+            // as id "m1" — chosen to match the default the single-key
+            // branch below uses, so the wrapped_dek rows from a previous
+            // single-version boot stay decodable.
+            if let Some(bare) = env.get("ATI_MASTER_KEY") {
+                let bytes = decode_master_key(bare).map_err(|e| {
+                    SecretsError::Config(format!(
+                        "ATI_MASTER_KEY (bare) is not a valid 32-byte base64 key: {e}"
+                    ))
+                })?;
+                versions.insert("m1".to_string(), Zeroizing::new(bytes));
+            }
+
             for (k, v) in env {
                 if let Some(id) = k.strip_prefix(prefix) {
                     if id == "ACTIVE" {
                         continue;
                     }
+                    // `ATI_MASTER_KEY_<id>` is interpreted as a KEK version
+                    // key. If you're seeing this error for a variable that
+                    // wasn't meant to be a KEK (e.g. an unrelated
+                    // ATI_MASTER_KEY_PATH set by your orchestrator), rename
+                    // the variable so it doesn't collide with the
+                    // `ATI_MASTER_KEY_*` namespace.
                     let bytes = decode_master_key(v).map_err(|e| {
                         SecretsError::Config(format!(
-                            "{}{} is not a valid 32-byte base64 key: {}",
-                            prefix, id, e
+                            "{prefix}{id} is interpreted as a KEK version but \
+                             could not be parsed as a 32-byte base64 key: {e} \
+                             (rename the variable if it wasn't meant as a KEK)"
                         ))
                     })?;
                     versions.insert(id.to_string(), Zeroizing::new(bytes));
                 }
             }
+
             if !versions.contains_key(&active) {
+                let hint = if env.get("ATI_MASTER_KEY").is_some() && active != "m1" {
+                    format!(
+                        " (bare ATI_MASTER_KEY is loaded as id 'm1'; \
+                         either set ATI_MASTER_KEY_ACTIVE=m1 or also \
+                         set ATI_MASTER_KEY_{active})"
+                    )
+                } else {
+                    String::new()
+                };
                 return Err(SecretsError::Config(format!(
-                    "ATI_MASTER_KEY_ACTIVE='{}' but no ATI_MASTER_KEY_{} env var loaded",
-                    active, active
+                    "ATI_MASTER_KEY_ACTIVE='{active}' but no ATI_MASTER_KEY_{active} env var loaded{hint}"
                 )));
             }
             Ok(Self { versions, active })
         } else if let Some(value) = single {
             let bytes = decode_master_key(&value).map_err(|e| {
                 SecretsError::Config(format!(
-                    "ATI_MASTER_KEY is not a valid 32-byte base64 key: {}",
-                    e
+                    "ATI_MASTER_KEY is not a valid 32-byte base64 key: {e}"
                 ))
             })?;
             Ok(Self::from_bytes("m1", bytes))
@@ -291,12 +326,28 @@ impl Kek for LocalKek {
 /// Stored in PG across four columns (`ciphertext BYTEA`, `nonce BYTEA`,
 /// `wrapped_dek BYTEA`, `kek_id TEXT`) so future schema changes can carry
 /// additional metadata without touching the encrypted payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EnvelopeBlob {
     pub ciphertext: Vec<u8>,
     pub nonce: [u8; NONCE_LEN],
     pub wrapped_dek: Vec<u8>,
     pub kek_id: String,
+}
+
+impl std::fmt::Debug for EnvelopeBlob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact the byte payloads. `wrapped_dek` in particular is the most
+        // sensitive field — an attacker holding it plus a leaked KEK can
+        // recover plaintext. Print sizes and `kek_id` only so traces still
+        // tell you "did the data make it to the database" without leaking
+        // anything that could be exfiltrated by a misconfigured logger.
+        f.debug_struct("EnvelopeBlob")
+            .field("ciphertext_len", &self.ciphertext.len())
+            .field("nonce_len", &self.nonce.len())
+            .field("wrapped_dek_len", &self.wrapped_dek.len())
+            .field("kek_id", &self.kek_id)
+            .finish()
+    }
 }
 
 /// Seal `plaintext` into an `EnvelopeBlob`.
@@ -573,5 +624,132 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("ATI_MASTER_KEY".into(), encoded_url);
         LocalKek::from_env_with(&env).expect("URL-safe base64 should be accepted");
+    }
+
+    // --- Greptile PR #91 follow-ups ----------------------------------------
+
+    #[test]
+    fn bare_master_key_honored_in_multi_version_mode() {
+        // Operator is mid-migration from single-version to multi-version:
+        // they've added ATI_MASTER_KEY_ACTIVE=m1 but haven't renamed the
+        // existing ATI_MASTER_KEY yet. Booting should not fail; the bare
+        // key gets adopted as id "m1" so prior wrapped_dek rows still
+        // decode.
+        let mut env = HashMap::new();
+        env.insert(
+            "ATI_MASTER_KEY".into(),
+            base64::engine::general_purpose::STANDARD.encode([0x11; KEY_LEN]),
+        );
+        env.insert("ATI_MASTER_KEY_ACTIVE".into(), "m1".into());
+        let kek = LocalKek::from_env_with(&env).expect("bare key should be picked up");
+        assert_eq!(kek.active_kek_id(), "m1");
+
+        // The bare key bytes must actually be what 'm1' resolves to —
+        // round-trip through seal/open to prove it.
+        let blob = seal(b"hello", b"aad", &kek).unwrap();
+        let opened = open(&blob, b"aad", &kek).unwrap();
+        assert_eq!(&opened[..], b"hello");
+    }
+
+    #[test]
+    fn bare_master_key_overridden_by_explicit_m1_in_multi_version() {
+        // If both ATI_MASTER_KEY (bare) and ATI_MASTER_KEY_m1 are set,
+        // the explicit version wins. This is the "clean migration done"
+        // state — bare key was left in place but the explicit value is
+        // the source of truth.
+        let mut env = HashMap::new();
+        env.insert(
+            "ATI_MASTER_KEY".into(),
+            base64::engine::general_purpose::STANDARD.encode([0xAA; KEY_LEN]),
+        );
+        env.insert(
+            "ATI_MASTER_KEY_m1".into(),
+            base64::engine::general_purpose::STANDARD.encode([0xBB; KEY_LEN]),
+        );
+        env.insert("ATI_MASTER_KEY_ACTIVE".into(), "m1".into());
+        let kek = LocalKek::from_env_with(&env).unwrap();
+
+        // Seal with the resolved kek, then decode with a single-version
+        // KEK that only knows the [0xBB; 32] bytes — should succeed.
+        let blob = seal(b"x", b"y", &kek).unwrap();
+        let bb_only = LocalKek::from_bytes("m1", [0xBB; KEY_LEN]);
+        assert_eq!(
+            &open(&blob, b"y", &bb_only).unwrap()[..],
+            b"x",
+            "explicit ATI_MASTER_KEY_m1 must shadow bare ATI_MASTER_KEY"
+        );
+    }
+
+    #[test]
+    fn unrelated_prefix_var_error_mentions_kek_interpretation() {
+        // If an orchestrator injects ATI_MASTER_KEY_PATH=/some/path the
+        // parser will try to base64-decode "/some/path" and fail. The
+        // error message must make it obvious that the variable is being
+        // interpreted as a KEK version so the operator knows to rename
+        // it rather than wonder why their PATH is being base64-decoded.
+        let mut env = HashMap::new();
+        env.insert(
+            "ATI_MASTER_KEY_m1".into(),
+            base64::engine::general_purpose::STANDARD.encode([0x11; KEY_LEN]),
+        );
+        env.insert("ATI_MASTER_KEY_ACTIVE".into(), "m1".into());
+        env.insert("ATI_MASTER_KEY_PATH".into(), "/some/path".into());
+
+        let err = LocalKek::from_env_with(&env).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("KEK version"),
+            "error message should mention 'KEK version' so operators understand why the variable was parsed; got: {msg}"
+        );
+        assert!(
+            msg.contains("ATI_MASTER_KEY_PATH"),
+            "error should name the offending variable; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn active_without_matching_key_hints_at_bare_when_present() {
+        // Edge case of the migration: operator sets ATI_MASTER_KEY_ACTIVE=m2
+        // intending to introduce a new version, but the bare key is still
+        // m1. The error message should remind them that bare is m1 so they
+        // don't waste time wondering where their key went.
+        let mut env = HashMap::new();
+        env.insert(
+            "ATI_MASTER_KEY".into(),
+            base64::engine::general_purpose::STANDARD.encode([0x11; KEY_LEN]),
+        );
+        env.insert("ATI_MASTER_KEY_ACTIVE".into(), "m2".into());
+        let err = LocalKek::from_env_with(&env).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("m1") && msg.contains("ATI_MASTER_KEY_m2"),
+            "error should hint that bare ATI_MASTER_KEY is m1; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn envelope_blob_debug_redacts_payloads() {
+        // The wrapped_dek field is the most sensitive thing in the blob;
+        // it must never appear in {:?} output (or any tracing span that
+        // grabs the struct). LocalKek already redacts; mirror here.
+        let kek = LocalKek::from_bytes("m1", [0x42; KEY_LEN]);
+        let blob = seal(b"the quick brown fox", b"aad", &kek).unwrap();
+        let dbg = format!("{:?}", blob);
+
+        // Lengths and kek_id are fine to surface; raw byte contents
+        // (ciphertext / wrapped_dek as hex or arrays) are not.
+        assert!(dbg.contains("EnvelopeBlob"), "got: {dbg}");
+        assert!(dbg.contains("kek_id"), "got: {dbg}");
+        assert!(dbg.contains("wrapped_dek_len"), "got: {dbg}");
+        // Sanity: blob has real bytes, so if Debug were derived, we'd see
+        // numeric byte arrays. The redacted impl never prints them.
+        assert!(
+            !dbg.contains(&format!("{:?}", blob.wrapped_dek)),
+            "wrapped_dek bytes leaked into Debug output: {dbg}"
+        );
+        assert!(
+            !dbg.contains(&format!("{:?}", blob.ciphertext)),
+            "ciphertext bytes leaked into Debug output: {dbg}"
+        );
     }
 }
