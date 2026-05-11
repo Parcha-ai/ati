@@ -21,6 +21,7 @@ pub mod passthrough;
 pub mod rate;
 pub mod response;
 pub mod scope;
+pub mod secrets;
 pub mod sentry_scope;
 pub mod sig_verify;
 pub mod skill;
