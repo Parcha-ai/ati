@@ -57,6 +57,15 @@ toml = "0.8"
 
 # Crypto
 aes-gcm = "0.10"
+# AES-256-GCM-SIV — misuse-resistant AEAD used by `core::secrets` for
+# data-key encryption of OAuth tokens and static credentials. SIV adds a
+# strong belt to the suspenders against nonce reuse; with per-row data keys
+# our nonce reuse risk is essentially zero, but SIV is free insurance.
+aes-gcm-siv = "0.11"
+# AES Key Wrap (RFC 3394) used to wrap per-row DEKs with the master KEK.
+# Deterministic — same KEK + DEK always produces the same wrapped output —
+# which keeps rewrap-after-rotation easy to reason about.
+aes-kw = "0.3"
 hmac = "0.12"
 sha2 = "0.10"
 
