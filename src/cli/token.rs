@@ -143,6 +143,7 @@ fn issue(
         ati: Some(AtiNamespace {
             v: 1,
             rate: rate_map,
+            customer_id: None,
         }),
         job_id: None,
         sandbox_id: None,

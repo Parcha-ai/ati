@@ -231,3 +231,52 @@ class TestAtiNamespace:
         ns = AtiNamespace.from_dict({"v": 1, "rate": {"tool:x": "5/min"}})
         assert ns.v == 1
         assert ns.rate == {"tool:x": "5/min"}
+
+    def test_customer_id_default_none(self):
+        # Control plane PR adds customer_id. Default None keeps existing
+        # callers backwards-compatible.
+        ns = AtiNamespace()
+        assert ns.customer_id is None
+        d = ns.to_dict()
+        assert "customer_id" not in d, (
+            "to_dict must omit customer_id when None so the JWT payload "
+            "stays byte-identical for tokens that don't use this feature"
+        )
+
+    def test_customer_id_roundtrip(self):
+        ns = AtiNamespace(v=1, customer_id="cust_alpha")
+        d = ns.to_dict()
+        assert d["customer_id"] == "cust_alpha"
+        rebuilt = AtiNamespace.from_dict(d)
+        assert rebuilt.customer_id == "cust_alpha"
+
+    def test_customer_id_legacy_decode(self):
+        # JWTs issued before this field existed should still decode cleanly.
+        ns = AtiNamespace.from_dict({"v": 1, "rate": {"tool:x": "5/min"}})
+        assert ns.customer_id is None
+
+
+class TestCustomerIdInIssueToken:
+    SECRET = "00" * 32
+
+    def test_issue_token_with_customer_id(self):
+        # customer_id flows from issue_token kwarg into ati.customer_id.
+        token = issue_token(
+            secret=self.SECRET,
+            sub="sandbox:abc",
+            scope="tool:particle:*",
+            customer_id="cust_alpha",
+        )
+        claims = inspect_token(token)
+        assert claims.ati is not None
+        assert claims.ati.customer_id == "cust_alpha"
+
+    def test_issue_token_no_customer_id(self):
+        token = issue_token(
+            secret=self.SECRET,
+            sub="sandbox:abc",
+            scope="tool:particle:*",
+        )
+        claims = inspect_token(token)
+        assert claims.ati is not None
+        assert claims.ati.customer_id is None

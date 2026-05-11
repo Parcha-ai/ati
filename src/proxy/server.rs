@@ -1877,6 +1877,57 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
 
 // --- Server startup ---
 
+/// Bootstrap the on-disk TOML manifests into the DB-backed
+/// `ati_providers` table. Idempotent — `provider_store::bootstrap_shared`
+/// uses `ON CONFLICT DO NOTHING` against the shared-name partial unique
+/// index, so re-running this on every startup is cheap and never overwrites
+/// operator edits. No-op when the DB pool is `Disabled` (local-mode CLI,
+/// or proxy started without `ATI_DB_URL`).
+///
+/// Per-provider failures are logged at `warn` level rather than returned —
+/// one malformed manifest shouldn't keep the proxy from starting. The
+/// admin surface (PR #4) gives operators a way to inspect and fix what
+/// didn't bootstrap.
+#[cfg(feature = "db")]
+async fn bootstrap_manifests_to_db(db: &crate::core::db::DbState, registry: &ManifestRegistry) {
+    use crate::core::provider_store;
+
+    let Some(pool) = db.pool() else {
+        return;
+    };
+    let providers: Vec<_> = registry
+        .list_providers()
+        .into_iter()
+        .filter(|p| !p.internal)
+        .cloned()
+        .collect();
+    if providers.is_empty() {
+        return;
+    }
+    let mut inserted = 0usize;
+    let mut existed = 0usize;
+    for p in &providers {
+        match provider_store::bootstrap_shared(pool, p).await {
+            Ok(Some(_)) => inserted += 1,
+            Ok(None) => existed += 1,
+            Err(e) => {
+                tracing::warn!(provider = %p.name, error = %e, "bootstrap_shared failed; skipping");
+            }
+        }
+    }
+    tracing::info!(
+        inserted,
+        existed,
+        total = providers.len(),
+        "bootstrapped TOML manifests into ati_providers"
+    );
+}
+
+#[cfg(not(feature = "db"))]
+async fn bootstrap_manifests_to_db(_db: &crate::core::db::DbState, _registry: &ManifestRegistry) {
+    // db feature off — nothing to do.
+}
+
 /// Start the proxy server.
 pub async fn run(
     port: u16,
@@ -2017,6 +2068,15 @@ pub async fn run(
         }
     }
     let db_status = db.status();
+
+    // Bootstrap step: when a DB pool is available, write every disk-loaded
+    // manifest into `ati_providers` (as `source='toml'`). Idempotent — the
+    // partial unique index `uq_ati_providers_shared_name` is the conflict
+    // target, so a manifest the operator has already edited via the admin
+    // UI never gets clobbered. This is the write-only half of the DB-backed
+    // manifest story; the read-side (rebuild registry from DB) lands in the
+    // resolver PR (#3 of the control-plane stack).
+    bootstrap_manifests_to_db(&db, &registry).await;
 
     let state = Arc::new(ProxyState {
         registry,
