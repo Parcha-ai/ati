@@ -64,6 +64,16 @@ pub struct AtiNamespace {
     /// Per-tool-pattern rate limits (e.g. {"tool:github:*": "10/hour"}).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub rate: HashMap<String, String>,
+    /// Customer / tenant the JWT-bearing sandbox belongs to. Set by the
+    /// orchestrator (parcha-backend / ati-client) when provisioning a
+    /// sandbox that needs per-customer credentials. The proxy uses it to
+    /// cascade credential resolution: customer-scoped row → shared row.
+    ///
+    /// `None` means "no tenant" — the resolver only matches shared rows.
+    /// Older JWTs without this claim deserialize as `None` (it's
+    /// serde(default)), so this is a backwards-compatible addition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer_id: Option<String>,
 }
 
 /// JWT claims per RFC 9068.
@@ -353,6 +363,7 @@ mod tests {
             ati: Some(AtiNamespace {
                 v: 1,
                 rate: HashMap::new(),
+                customer_id: None,
             }),
             job_id: None,
             sandbox_id: None,
@@ -540,5 +551,35 @@ mod tests {
         let decoded = validate(&token, &config).unwrap();
         assert!(decoded.ati.is_some());
         assert_eq!(decoded.ati.unwrap().v, 1);
+    }
+
+    #[test]
+    fn test_customer_id_preserved() {
+        // The control-plane resolver depends on customer_id surviving the
+        // issue → validate roundtrip exactly. A regression here would mean
+        // every per-tenant credential lookup silently falls back to shared.
+        let config = hs256_config();
+        let mut claims = make_claims("tool:particle:*");
+        if let Some(ati) = claims.ati.as_mut() {
+            ati.customer_id = Some("cust_alpha".into());
+        }
+
+        let token = issue(&claims, &config).unwrap();
+        let decoded = validate(&token, &config).unwrap();
+        let ati = decoded.ati.expect("ati namespace present");
+        assert_eq!(ati.customer_id.as_deref(), Some("cust_alpha"));
+    }
+
+    #[test]
+    fn test_customer_id_absent_decodes_as_none() {
+        // Older JWTs (issued before this field existed) must still
+        // deserialize cleanly. Construct an ati namespace with no
+        // customer_id, encode, decode — expect None on the way out.
+        let config = hs256_config();
+        let claims = make_claims("tool:web_search"); // make_claims sets customer_id=None
+
+        let token = issue(&claims, &config).unwrap();
+        let decoded = validate(&token, &config).unwrap();
+        assert_eq!(decoded.ati.unwrap().customer_id, None);
     }
 }
