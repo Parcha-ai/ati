@@ -102,6 +102,18 @@ glob = "0.3"
 rand = "0.8"
 strsim = "0.11.1"
 
+# Async-aware TTL cache for the credential resolver. We cache decrypted
+# plaintexts (and resolved OAuth access tokens) for a short window so the
+# proxy hot path doesn't unwrap an envelope or hit Postgres on every
+# `/call`. `future` feature gives us the async-aware Cache type that
+# supports get_with(async).
+moka = { version = "0.12", features = ["future"] }
+
+# `async-trait` is needed because Rust's stable trait system doesn't yet
+# support `async fn` in traits with dyn-compat. CredentialResolver is the
+# first ATI trait that's both async and dyn-dispatched.
+async-trait = "0.1"
+
 # Optional Postgres driver for the persistence layer (virtual keys, call audit).
 # Off by default; enable with `--features db`. Pinned to rustls to match reqwest
 # and keep the static-musl release binary working. Feature set is intentionally

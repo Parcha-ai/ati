@@ -37,7 +37,12 @@ use crate::core::skillati::{RemoteSkillMeta, SkillAtiClient, SkillAtiError};
 pub struct ProxyState {
     pub registry: ManifestRegistry,
     pub skill_registry: SkillRegistry,
-    pub keyring: Keyring,
+    /// Static keyring kept in an `Arc` so the resolver (`KeyringResolver`)
+    /// and legacy `state.keyring` callers can share it without `Clone` on
+    /// `Keyring`. As call sites migrate to the resolver this becomes
+    /// progressively less used; the moka cache + `pg_notify` invalidation
+    /// in PR #5 supersede it entirely for DB-mode deploys.
+    pub keyring: Arc<Keyring>,
     /// JWT validation config (None = auth disabled / dev mode).
     pub jwt_config: Option<JwtConfig>,
     /// Pre-computed JWKS JSON for the /.well-known/jwks.json endpoint.
@@ -47,6 +52,13 @@ pub struct ProxyState {
     /// Optional Postgres persistence layer. `Disabled` is the normal path;
     /// downstream writers (call audit, virtual keys) borrow the pool from here.
     pub db: DbState,
+    /// Credential resolver — every handler that needs a static API key or
+    /// OAuth access token resolves through this trait rather than poking
+    /// `keyring` directly. In local-mode / pre-DB proxies this is a
+    /// `KeyringResolver` (wraps the in-memory keyring); in DB-backed
+    /// proxies it's a `DbResolver` (PG-backed, per-customer cascade,
+    /// envelope-decrypted, with cross-pod refresh via optimistic locking).
+    pub resolver: Arc<dyn crate::core::resolver::CredentialResolver>,
 }
 
 // --- Request/Response types ---
@@ -1815,13 +1827,37 @@ async fn auth_middleware(
     match jwt::validate(token, jwt_config) {
         Ok(claims) => {
             tracing::debug!(sub = %claims.sub, scopes = %claims.scope, "JWT validated");
+            // Stash the tenant identity as a typed extension so handlers
+            // and the resolver can read it without re-parsing JWT claims
+            // or trusting an unsigned header.
+            let customer_id = CustomerId(claims.ati.as_ref().and_then(|n| n.customer_id.clone()));
             req.extensions_mut().insert(claims);
+            req.extensions_mut().insert(customer_id);
             Ok(next.run(req).await)
         }
         Err(e) => {
             tracing::debug!(error = %e, "JWT validation failed");
             Err(StatusCode::UNAUTHORIZED)
         }
+    }
+}
+
+/// Typed request extension carrying the JWT's `ati.customer_id` claim
+/// (if any). Read by handlers + resolver to scope credential lookups
+/// to a tenant. `None` means "no tenant" — the resolver will only match
+/// shared rows.
+///
+/// Sourced exclusively from `claims.ati.customer_id` inside
+/// `auth_middleware` — never from headers, never from query strings —
+/// so a sandbox can't spoof it.
+#[derive(Debug, Clone, Default)]
+pub struct CustomerId(pub Option<String>);
+
+impl CustomerId {
+    /// Borrow the inner string if present. Convenience for the resolver
+    /// trait's `customer_id: Option<&str>` arg shape.
+    pub fn as_deref(&self) -> Option<&str> {
+        self.0.as_deref()
     }
 }
 
@@ -1926,6 +1962,53 @@ async fn bootstrap_manifests_to_db(db: &crate::core::db::DbState, registry: &Man
 #[cfg(not(feature = "db"))]
 async fn bootstrap_manifests_to_db(_db: &crate::core::db::DbState, _registry: &ManifestRegistry) {
     // db feature off — nothing to do.
+}
+
+/// Choose a credential resolver based on what's configured. When the DB
+/// pool is alive AND a master KEK is loaded, return a `DbResolver`; else
+/// fall back to `KeyringResolver` over the in-memory keyring.
+///
+/// The KEK is loaded lazily here rather than at startup so a missing or
+/// malformed `ATI_MASTER_KEY` in an otherwise-DB-enabled proxy logs a
+/// warning and degrades to keyring mode instead of crashing the
+/// process. Operators on the new path will see a loud "ATI_MASTER_KEY
+/// missing" log and know to fix it; operators on the legacy path won't
+/// even notice.
+#[cfg(feature = "db")]
+fn build_resolver(
+    db: &crate::core::db::DbState,
+    keyring: Arc<Keyring>,
+) -> Arc<dyn crate::core::resolver::CredentialResolver> {
+    use crate::core::resolver::{DbResolver, KeyringResolver};
+    use crate::core::secrets::{Kek, LocalKek};
+
+    if let Some(pool) = db.pool() {
+        match LocalKek::from_env() {
+            Ok(kek) => {
+                tracing::info!(kek_id = kek.active_kek_id(), "DbResolver enabled");
+                return Arc::new(DbResolver::new(pool.clone(), Arc::new(kek)));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ATI_DB_URL is set but ATI_MASTER_KEY is missing/invalid \
+                     — falling back to KeyringResolver. \
+                     Set ATI_MASTER_KEY=<base64 32 bytes> to enable \
+                     DB-backed credential resolution.",
+                );
+            }
+        }
+    }
+    Arc::new(KeyringResolver::from_arc(keyring))
+}
+
+#[cfg(not(feature = "db"))]
+fn build_resolver(
+    _db: &crate::core::db::DbState,
+    keyring: Arc<Keyring>,
+) -> Arc<dyn crate::core::resolver::CredentialResolver> {
+    use crate::core::resolver::KeyringResolver;
+    Arc::new(KeyringResolver::from_arc(keyring))
 }
 
 /// Start the proxy server.
@@ -2078,6 +2161,18 @@ pub async fn run(
     // resolver PR (#3 of the control-plane stack).
     bootstrap_manifests_to_db(&db, &registry).await;
 
+    // Build the credential resolver. Selection rule:
+    //   - If `ATI_DB_URL` is set AND `ATI_MASTER_KEY` (or the versioned
+    //     equivalent) is configured AND the build has the `db` feature →
+    //     use a `DbResolver` so the proxy resolves per-customer
+    //     credentials from `ati_provider_credentials` + `ati_oauth_tokens`.
+    //   - Otherwise → `KeyringResolver` wrapping the in-memory `Keyring`.
+    //     This is the existing pre-control-plane behavior; per-customer
+    //     scoping just degrades to "no tenant, shared keys only".
+    let keyring = Arc::new(keyring);
+    let resolver: Arc<dyn crate::core::resolver::CredentialResolver> =
+        build_resolver(&db, keyring.clone());
+
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
@@ -2086,6 +2181,7 @@ pub async fn run(
         jwks_json,
         auth_cache: AuthCache::new(),
         db,
+        resolver,
     });
 
     let app = build_router(state);

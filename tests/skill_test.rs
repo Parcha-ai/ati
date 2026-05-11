@@ -40,11 +40,14 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
     Arc::new(ProxyState {
         registry: manifest_registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     })
 }
 

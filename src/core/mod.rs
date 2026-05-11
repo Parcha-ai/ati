@@ -16,6 +16,7 @@ pub mod mcp_client;
 pub mod openapi;
 pub mod provider_store;
 pub mod rate;
+pub mod resolver;
 pub mod response;
 pub mod scope;
 pub mod secrets;

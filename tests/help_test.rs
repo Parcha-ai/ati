@@ -156,11 +156,14 @@ async fn test_proxy_help_returns_llm_recommendations() {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 
@@ -217,11 +220,14 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 
@@ -255,11 +261,14 @@ async fn test_proxy_help_missing_llm_key_returns_503() {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 
@@ -304,11 +313,14 @@ async fn test_proxy_help_llm_error_returns_502() {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 
@@ -609,11 +621,14 @@ async fn test_proxy_help_excludes_internal_tools() {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 

@@ -184,6 +184,19 @@ impl Keyring {
         }
     }
 
+    /// Build a keyring from an explicit map. Test- and fixture-oriented —
+    /// production code paths flow through `load`, `load_local`, `from_env`,
+    /// or `load_credentials`. The `_raw_json` view is left empty (so
+    /// `read_raw_credentials` returns no entries) which is the right
+    /// default for synthetic keyrings.
+    pub fn from_map(keys: HashMap<String, String>) -> Self {
+        Keyring {
+            keys,
+            _raw_json: Vec::new(),
+            ephemeral: false,
+        }
+    }
+
     /// Merge another keyring's keys into this one (other's keys take precedence).
     pub fn merge(&mut self, other: &Keyring) {
         for (k, v) in &other.keys {

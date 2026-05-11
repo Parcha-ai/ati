@@ -249,11 +249,14 @@ pub fn build_test_app(registry: ManifestRegistry) -> axum::Router {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     build_router(state)
 }
@@ -264,11 +267,14 @@ pub fn build_test_app_with_jwt(registry: ManifestRegistry) -> axum::Router {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: Some(test_jwt_config()),
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     build_router(state)
 }
@@ -283,11 +289,14 @@ pub fn build_test_app_full(
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: if jwt { Some(test_jwt_config()) } else { None },
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     build_router(state)
 }

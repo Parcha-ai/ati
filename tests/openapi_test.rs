@@ -757,11 +757,14 @@ auth_type = "none"
     let state = std::sync::Arc::new(ati::proxy::server::ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: ati::core::auth_generator::AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
 
     let app = ati::proxy::server::build_router(state);
