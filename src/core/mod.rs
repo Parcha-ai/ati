@@ -16,6 +16,7 @@ pub mod openapi;
 pub mod rate;
 pub mod response;
 pub mod scope;
+pub mod secrets;
 pub mod sentry_scope;
 pub mod skill;
 pub mod skillati;
