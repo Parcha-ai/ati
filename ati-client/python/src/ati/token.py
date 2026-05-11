@@ -26,16 +26,27 @@ class AtiNamespace:
 
     v: int = 1
     rate: dict[str, str] = field(default_factory=dict)
+    # Customer / tenant identifier. Set by the orchestrator when
+    # provisioning a sandbox that needs per-customer credentials. The
+    # ATI proxy uses it to cascade credential resolution (customer →
+    # shared). None means "no tenant" — only shared credentials match.
+    customer_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"v": self.v}
         if self.rate:
             d["rate"] = self.rate
+        if self.customer_id is not None:
+            d["customer_id"] = self.customer_id
         return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AtiNamespace:
-        return cls(v=d.get("v", 1), rate=d.get("rate", {}))
+        return cls(
+            v=d.get("v", 1),
+            rate=d.get("rate", {}),
+            customer_id=d.get("customer_id"),
+        )
 
 
 @dataclass
@@ -115,6 +126,7 @@ def issue_token(
     iss: str | None = "ati-orchestrator",
     jti: str | None = None,
     rate: dict[str, str] | None = None,
+    customer_id: str | None = None,
 ) -> str:
     """Issue a signed HS256 JWT compatible with the ATI Rust proxy.
 
@@ -127,6 +139,10 @@ def issue_token(
         iss: Issuer claim (default ``"ati-orchestrator"``).
         jti: Token ID (auto-generated UUID4 if None).
         rate: Optional per-tool rate limits (e.g. ``{"tool:github:*": "10/hour"}``).
+        customer_id: Optional tenant id. When set, the ATI proxy will resolve
+            per-customer credentials (e.g. that customer's own Particle OAuth
+            tokens) instead of the shared Parcha-owned credentials. None
+            means "no tenant" — only shared rows match.
 
     Returns:
         Signed JWT string.
@@ -142,7 +158,7 @@ def issue_token(
         scope=scope,
         iss=iss,
         jti=jti or str(uuid.uuid4()),
-        ati=AtiNamespace(v=1, rate=rate or {}),
+        ati=AtiNamespace(v=1, rate=rate or {}, customer_id=customer_id),
     )
 
     try:

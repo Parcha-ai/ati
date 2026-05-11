@@ -320,6 +320,7 @@ pub fn issue_test_token(scope: &str) -> String {
         ati: Some(AtiNamespace {
             v: 1,
             rate: HashMap::new(),
+            customer_id: None,
         }),
         job_id: None,
         sandbox_id: None,

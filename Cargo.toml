@@ -104,7 +104,7 @@ strsim = "0.11.1"
 # even when the `mysql` feature is disabled (cargo locks all optional deps
 # of the umbrella sqlx crate). sqlx-mysql is NOT compiled into our binary.
 # The advisory is allowlisted in deny.toml with this justification.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate", "chrono", "uuid", "json"], optional = true }
 
 [profile.release]
 opt-level = "z"
