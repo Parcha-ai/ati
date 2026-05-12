@@ -337,7 +337,10 @@ auth_key_name = "my_token"
     );
 
     let (app, _dir) = build_passthrough_app(&manifest, &[("my_token", "SUPERSECRET")]);
-    let req = Request::builder().uri("/api/me").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/api/me")
+        .body(Body::empty())
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
@@ -368,7 +371,10 @@ auth_key_name = "bb_key"
     );
 
     let (app, _dir) = build_passthrough_app(&manifest, &[("bb_key", "BB123")]);
-    let req = Request::builder().uri("/bb/v1").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/bb/v1")
+        .body(Body::empty())
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
@@ -674,7 +680,9 @@ max_response_bytes = 0
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
-        resp.headers().get("content-length").map(|v| v.to_str().unwrap()),
+        resp.headers()
+            .get("content-length")
+            .map(|v| v.to_str().unwrap()),
         Some("5"),
         "content-length must be preserved when no response cap is active"
     );
@@ -818,8 +826,7 @@ async fn passthrough_returns_redirects_to_client_unchanged() {
     Mock::given(method("GET"))
         .and(path("/start"))
         .respond_with(
-            ResponseTemplate::new(302)
-                .insert_header("location", "https://attacker.example/steal"),
+            ResponseTemplate::new(302).insert_header("location", "https://attacker.example/steal"),
         )
         .mount(&upstream)
         .await;
@@ -848,9 +855,7 @@ X-Secret-Token = "should-not-leak"
     // The 302 must be returned to the client, not followed.
     assert_eq!(resp.status(), StatusCode::FOUND);
     assert_eq!(
-        resp.headers()
-            .get("location")
-            .and_then(|v| v.to_str().ok()),
+        resp.headers().get("location").and_then(|v| v.to_str().ok()),
         Some("https://attacker.example/steal"),
         "Location header must propagate verbatim"
     );
@@ -1088,7 +1093,10 @@ path_prefix = "/"
     // Health endpoint returns JSON; passthrough would return upstream's response.
     // Asserting on body's shape proves which handler ran.
     let body = body_text(resp.into_body()).await;
-    assert!(body.contains("\"status\""), "expected health JSON, got: {body}");
+    assert!(
+        body.contains("\"status\""),
+        "expected health JSON, got: {body}"
+    );
 }
 
 // --- Bad gateway on upstream failure -------------------------------------
@@ -1136,7 +1144,10 @@ forward_websockets = true
     )
     .unwrap();
 
-    let err = match ManifestRegistry::load(&manifests_dir) { Ok(_) => panic!("expected load to fail"), Err(e) => e };
+    let err = match ManifestRegistry::load(&manifests_dir) {
+        Ok(_) => panic!("expected load to fail"),
+        Err(e) => e,
+    };
     let msg = format!("{err}");
     assert!(msg.contains("forward_websockets"), "got: {msg}");
     assert!(
@@ -1162,12 +1173,12 @@ base_url = "http://x"
     )
     .unwrap();
 
-    let err = match ManifestRegistry::load(&manifests_dir) { Ok(_) => panic!("expected load to fail"), Err(e) => e };
+    let err = match ManifestRegistry::load(&manifests_dir) {
+        Ok(_) => panic!("expected load to fail"),
+        Err(e) => e,
+    };
     let msg = format!("{err}");
-    assert!(
-        msg.contains("host_match or path_prefix"),
-        "got: {msg}"
-    );
+    assert!(msg.contains("host_match or path_prefix"), "got: {msg}");
 }
 
 #[tokio::test]
@@ -1187,7 +1198,10 @@ path_prefix = "/x"
     )
     .unwrap();
 
-    let err = match ManifestRegistry::load(&manifests_dir) { Ok(_) => panic!("expected load to fail"), Err(e) => e };
+    let err = match ManifestRegistry::load(&manifests_dir) {
+        Ok(_) => panic!("expected load to fail"),
+        Err(e) => e,
+    };
     let msg = format!("{err}");
     assert!(msg.contains("base_url"), "got: {msg}");
 }
@@ -1210,7 +1224,10 @@ path_prefix = "no-leading-slash"
     )
     .unwrap();
 
-    let err = match ManifestRegistry::load(&manifests_dir) { Ok(_) => panic!("expected load to fail"), Err(e) => e };
+    let err = match ManifestRegistry::load(&manifests_dir) {
+        Ok(_) => panic!("expected load to fail"),
+        Err(e) => e,
+    };
     let msg = format!("{err}");
     assert!(msg.contains("start with '/'"), "got: {msg}");
 }
@@ -1363,5 +1380,8 @@ X-Templated = "Bearer ${example_token}"
 
     let _ = PathBuf::from(&manifests_dir);
     let registry = ManifestRegistry::load(&manifests_dir).expect("should load");
-    assert_eq!(registry.list_providers().len(), 1 + 1 /* file_manager virtual */);
+    assert_eq!(
+        registry.list_providers().len(),
+        1 + 1 /* file_manager virtual */
+    );
 }

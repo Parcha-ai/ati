@@ -1947,17 +1947,17 @@ pub async fn run(
     // `--allow-unauthenticated-passthrough`. Removing this gate is part of
     // PR 2's diff (once sig-verify is mandatory for passthrough routes).
     if enable_passthrough && !allow_unauthenticated_passthrough {
-        return Err("--enable-passthrough requires --allow-unauthenticated-passthrough \
+        return Err(
+            "--enable-passthrough requires --allow-unauthenticated-passthrough \
             until HMAC sig-verify lands in PR 2. Until then, passthrough routes have NO \
             ATI-level authentication — every request reaching a passthrough route bypasses \
             JWT validation, leaving only the upstream's own auth in place. If you understand \
             and accept that, pass both flags. Otherwise, run without --enable-passthrough."
-            .into());
+                .into(),
+        );
     }
     if enable_passthrough && allow_unauthenticated_passthrough {
-        tracing::error!(
-            "*** PASSTHROUGH IS RUNNING UNAUTHENTICATED ***"
-        );
+        tracing::error!("*** PASSTHROUGH IS RUNNING UNAUTHENTICATED ***");
         tracing::error!(
             "Passthrough routes bypass JWT validation. ATI-level auth (HMAC sig-verify) \
              arrives in PR 2. Until then, network access to this proxy = access to every \
@@ -2104,10 +2104,7 @@ pub async fn run(
     let passthrough = if enable_passthrough {
         match crate::core::passthrough::PassthroughRouter::build(&registry, &keyring) {
             Ok(router) => {
-                tracing::info!(
-                    routes = router.len(),
-                    "passthrough router built"
-                );
+                tracing::info!(routes = router.len(), "passthrough router built");
                 Some(Arc::new(router))
             }
             Err(e) => {

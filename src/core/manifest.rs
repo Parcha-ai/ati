@@ -705,7 +705,9 @@ impl ManifestRegistry {
                     if !prefix.starts_with('/') {
                         return Err(ManifestError::Invalid(
                             path.display().to_string(),
-                            format!("passthrough path_prefix must start with '/' (got: '{prefix}')"),
+                            format!(
+                                "passthrough path_prefix must start with '/' (got: '{prefix}')"
+                            ),
                         ));
                     }
                     // Normalize: drop trailing slash so '/litellm' and '/litellm/'

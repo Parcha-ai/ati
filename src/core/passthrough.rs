@@ -119,7 +119,8 @@ impl PassthroughRouter {
         //   3. None path_prefix (= root) sorts last within its host class.
         routes.sort_by(|a, b| {
             let host_rank = |r: &PassthroughRoute| if r.host_match.is_some() { 0 } else { 1 };
-            let prefix_len = |r: &PassthroughRoute| r.path_prefix.as_deref().map(|s| s.len()).unwrap_or(0);
+            let prefix_len =
+                |r: &PassthroughRoute| r.path_prefix.as_deref().map(|s| s.len()).unwrap_or(0);
             host_rank(a)
                 .cmp(&host_rank(b))
                 .then_with(|| prefix_len(b).cmp(&prefix_len(a)))
@@ -214,7 +215,10 @@ fn matches_prefix(prefix: Option<&str>, path: &str) -> bool {
     }
 }
 
-fn compile_route(p: &Provider, keyring: &Keyring) -> Result<PassthroughRoute, PassthroughBuildError> {
+fn compile_route(
+    p: &Provider,
+    keyring: &Keyring,
+) -> Result<PassthroughRoute, PassthroughBuildError> {
     // Validate the base_url parses as an absolute URL. We don't store the
     // parsed url::Url because we build the upstream URL from string concat —
     // but the parse step catches typos at startup instead of at first call.
@@ -234,18 +238,14 @@ fn compile_route(p: &Provider, keyring: &Keyring) -> Result<PassthroughRoute, Pa
     for pattern in &p.deny_paths {
         for expanded in expand_deny_pattern(pattern) {
             let glob = Glob::new(&expanded).map_err(|e| {
-                PassthroughBuildError::BadDenyGlob(
-                    p.name.clone(),
-                    expanded.clone(),
-                    e.to_string(),
-                )
+                PassthroughBuildError::BadDenyGlob(p.name.clone(), expanded.clone(), e.to_string())
             })?;
             deny_builder.add(glob);
         }
     }
-    let deny_globs = deny_builder
-        .build()
-        .map_err(|e| PassthroughBuildError::BadDenyGlob(p.name.clone(), String::new(), e.to_string()))?;
+    let deny_globs = deny_builder.build().map_err(|e| {
+        PassthroughBuildError::BadDenyGlob(p.name.clone(), String::new(), e.to_string())
+    })?;
 
     // Resolve credentials at startup.
     let (auth_header, auth_query) = resolve_auth(p, keyring)?;
@@ -301,10 +301,7 @@ fn compile_route(p: &Provider, keyring: &Keyring) -> Result<PassthroughRoute, Pa
 /// Either an injected header (bearer/header/basic auth) or a query-string
 /// parameter (`auth_type = "query"`). Returned by `resolve_auth` so the
 /// per-request handler can apply whichever the provider configured.
-type ResolvedAuth = (
-    Option<(HeaderName, HeaderValue)>,
-    Option<(String, String)>,
-);
+type ResolvedAuth = (Option<(HeaderName, HeaderValue)>, Option<(String, String)>);
 
 fn resolve_auth(p: &Provider, keyring: &Keyring) -> Result<ResolvedAuth, PassthroughBuildError> {
     match p.auth_type {
@@ -348,7 +345,10 @@ fn resolve_auth(p: &Provider, keyring: &Keyring) -> Result<ResolvedAuth, Passthr
                 Some(k) => k,
                 None => return Ok((None, None)),
             };
-            let query_name = p.auth_query_name.clone().unwrap_or_else(|| "api_key".to_string());
+            let query_name = p
+                .auth_query_name
+                .clone()
+                .unwrap_or_else(|| "api_key".to_string());
             let value = keyring.get(key).unwrap_or("").to_string();
             Ok((None, Some((query_name, value))))
         }
@@ -363,9 +363,13 @@ fn resolve_auth(p: &Provider, keyring: &Keyring) -> Result<ResolvedAuth, Passthr
             use base64::Engine;
             let creds = keyring.get(key).unwrap_or("");
             let encoded = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
-            let header_value = HeaderValue::from_str(&format!("Basic {encoded}")).map_err(|_| {
-                PassthroughBuildError::BadHeaderValue(p.name.clone(), "Authorization".to_string())
-            })?;
+            let header_value =
+                HeaderValue::from_str(&format!("Basic {encoded}")).map_err(|_| {
+                    PassthroughBuildError::BadHeaderValue(
+                        p.name.clone(),
+                        "Authorization".to_string(),
+                    )
+                })?;
             Ok((
                 Some((HeaderName::from_static("authorization"), header_value)),
                 None,
@@ -432,7 +436,10 @@ const STRIP_DOWNSTREAM: &[&str] = &[
 /// Returns true if `name` matches a header we always strip from inbound
 /// requests before forwarding upstream.
 fn is_sandbox_internal_header(name: &str) -> bool {
-    if STRIP_DOWNSTREAM.iter().any(|h| h.eq_ignore_ascii_case(name)) {
+    if STRIP_DOWNSTREAM
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(name))
+    {
         return true;
     }
     // Strip ALL `x-sandbox-*` headers, not just the two we name. This
@@ -654,7 +661,9 @@ pub async fn handle_passthrough(
 
     // Build the upstream URL: base_url + rewritten path + query.
     let mut upstream_url = String::with_capacity(
-        route.base_url.len() + upstream_path.len() + query.as_deref().map(|q| q.len() + 1).unwrap_or(0),
+        route.base_url.len()
+            + upstream_path.len()
+            + query.as_deref().map(|q| q.len() + 1).unwrap_or(0),
     );
     upstream_url.push_str(&route.base_url);
     if !upstream_path.starts_with('/') {
@@ -667,9 +676,7 @@ pub async fn handle_passthrough(
     }
 
     // Reqwest builder.
-    let mut builder = route
-        .client
-        .request(reqwest_method(&method), &upstream_url);
+    let mut builder = route.client.request(reqwest_method(&method), &upstream_url);
 
     for (name, value) in req_headers.iter() {
         builder = builder.header(name.clone(), value.clone());
@@ -754,7 +761,10 @@ fn reqwest_status_to_axum(s: reqwest::StatusCode) -> StatusCode {
 }
 
 fn accepts_body(m: &Method) -> bool {
-    !matches!(*m, Method::GET | Method::HEAD | Method::DELETE | Method::OPTIONS)
+    !matches!(
+        *m,
+        Method::GET | Method::HEAD | Method::DELETE | Method::OPTIONS
+    )
 }
 
 fn not_found(reason: &str) -> Response<Body> {
@@ -1020,11 +1030,11 @@ mod tests {
         let route = compile_route(&p, &dummy_keyring()).unwrap();
         assert!(route.deny_globs.is_match("/config/x"), "single segment");
         assert!(route.deny_globs.is_match("/config/x/y"), "two segments");
+        assert!(route.deny_globs.is_match("/config/x/y/z"), "deeply nested");
         assert!(
-            route.deny_globs.is_match("/config/x/y/z"),
-            "deeply nested"
+            !route.deny_globs.is_match("/configuration"),
+            "no false-positive on prefix without /"
         );
-        assert!(!route.deny_globs.is_match("/configuration"), "no false-positive on prefix without /");
         assert!(!route.deny_globs.is_match("/v1"));
     }
 
@@ -1084,7 +1094,8 @@ mod tests {
         let mut routes = routes;
         routes.sort_by(|a, b| {
             let host_rank = |r: &PassthroughRoute| if r.host_match.is_some() { 0 } else { 1 };
-            let prefix_len = |r: &PassthroughRoute| r.path_prefix.as_deref().map(|s| s.len()).unwrap_or(0);
+            let prefix_len =
+                |r: &PassthroughRoute| r.path_prefix.as_deref().map(|s| s.len()).unwrap_or(0);
             host_rank(a)
                 .cmp(&host_rank(b))
                 .then_with(|| prefix_len(b).cmp(&prefix_len(a)))
@@ -1112,8 +1123,11 @@ mod tests {
                     Arc::new(compile_route(&p2, &kr).unwrap()),
                 ];
                 r.sort_by(|a, b| {
-                    let host_rank = |r: &PassthroughRoute| if r.host_match.is_some() { 0 } else { 1 };
-                    let prefix_len = |r: &PassthroughRoute| r.path_prefix.as_deref().map(|s| s.len()).unwrap_or(0);
+                    let host_rank =
+                        |r: &PassthroughRoute| if r.host_match.is_some() { 0 } else { 1 };
+                    let prefix_len = |r: &PassthroughRoute| {
+                        r.path_prefix.as_deref().map(|s| s.len()).unwrap_or(0)
+                    };
                     host_rank(a)
                         .cmp(&host_rank(b))
                         .then_with(|| prefix_len(b).cmp(&prefix_len(a)))
@@ -1122,10 +1136,14 @@ mod tests {
             },
         };
 
-        let hit_bb = router.match_request("bb.example.com", "/v1/sessions").unwrap();
+        let hit_bb = router
+            .match_request("bb.example.com", "/v1/sessions")
+            .unwrap();
         assert_eq!(hit_bb.name, "bb");
 
-        let hit_default = router.match_request("api.example.com", "/v1/sessions").unwrap();
+        let hit_default = router
+            .match_request("api.example.com", "/v1/sessions")
+            .unwrap();
         assert_eq!(hit_default.name, "default");
     }
 
@@ -1142,8 +1160,10 @@ mod tests {
     #[tokio::test]
     async fn max_bytes_stream_trips_over_cap() {
         use futures::stream;
-        let chunks: Vec<Result<Bytes, std::io::Error>> =
-            vec![Ok(Bytes::from(vec![0u8; 100])), Ok(Bytes::from(vec![0u8; 100]))];
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+            Ok(Bytes::from(vec![0u8; 100])),
+            Ok(Bytes::from(vec![0u8; 100])),
+        ];
         let s = stream::iter(chunks);
         let mut capped = MaxBytesStream::new(s, 150);
         // First chunk fits.
@@ -1237,7 +1257,10 @@ mod tests {
         h.insert("content-type", "application/octet-stream".parse().unwrap());
         h.insert("content-length", "999999".parse().unwrap());
         let out = filter_response_headers(&h, true);
-        assert!(out.get("content-length").is_none(), "content-length must be stripped when cap is active");
+        assert!(
+            out.get("content-length").is_none(),
+            "content-length must be stripped when cap is active"
+        );
         assert!(out.get("content-type").is_some());
     }
 }

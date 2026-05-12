@@ -1,0 +1,1451 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ATTOM Property Data API",
+    "description": "ATTOM property data for 155M+ US properties \u2014 ownership, tax assessments, sales history, mortgages, valuations, rental AVMs, and building details.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.gateway.attomdata.com"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "apikey"
+      }
+    }
+  },
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "paths": {
+    "/propertyapi/v1.0.0/property/detail": {
+      "get": {
+        "operationId": "propertyDetail",
+        "summary": "Property characteristics \u2014 lot size, building details, utilities. Query first for foundational data.",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/property/basicprofile": {
+      "get": {
+        "operationId": "propertyBasicProfile",
+        "summary": "Property + assessment + sale summary in one call. Good starting point for quick overview.",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/property/expandedprofile": {
+      "get": {
+        "operationId": "propertyExpandedProfile",
+        "summary": "Full property profile \u2014 assessment, sale, building, lot, utilities combined.",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/property/detailowner": {
+      "get": {
+        "operationId": "propertyDetailOwner",
+        "summary": "Property details + owner name, mailing address, corporate indicator.",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/property/detailmortgage": {
+      "get": {
+        "operationId": "propertyDetailMortgage",
+        "summary": "Property details + active mortgage \u2014 lender, amount, term, due date, loan type.",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/property/detailmortgageowner": {
+      "get": {
+        "operationId": "propertyDetailMortgageOwner",
+        "summary": "Property + mortgage + owner combined in one call.",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/property/detailwithschools": {
+      "get": {
+        "operationId": "propertyDetailWithSchools",
+        "summary": "Property details + school attendance zones (school names, districts, ratings).",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/property/id": {
+      "get": {
+        "operationId": "propertyId",
+        "summary": "Look up ATTOM property ID by address. Use to get attomid for subsequent queries.",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/property/address": {
+      "get": {
+        "operationId": "propertyAddress",
+        "summary": "Search properties by area \u2014 ZIP code, radius, or coordinates. Returns address list with attomIds.",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "postalcode",
+            "in": "query",
+            "description": "5-digit US ZIP code for area searches",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "latitude",
+            "in": "query",
+            "description": "Center latitude for radius search",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "longitude",
+            "in": "query",
+            "description": "Center longitude for radius search",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "radius",
+            "in": "query",
+            "description": "Radius in miles for geographic search",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "minbeds",
+            "in": "query",
+            "description": "Minimum bedrooms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxbeds",
+            "in": "query",
+            "description": "Maximum bedrooms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "minyearbuilt",
+            "in": "query",
+            "description": "Minimum year built",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxyearbuilt",
+            "in": "query",
+            "description": "Maximum year built",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "minuniversalsize",
+            "in": "query",
+            "description": "Minimum building square footage",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxuniversalsize",
+            "in": "query",
+            "description": "Maximum building square footage",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default 1)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pagesize",
+            "in": "query",
+            "description": "Results per page (default 10, max 10000)",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          },
+          {
+            "name": "orderby",
+            "in": "query",
+            "description": "Sort field with direction (e.g. 'saleamt+desc')",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/property/snapshot": {
+      "get": {
+        "operationId": "propertySnapshot",
+        "summary": "Compact property records for area search \u2014 returns basic info for many properties.",
+        "tags": [
+          "Property"
+        ],
+        "parameters": [
+          {
+            "name": "postalcode",
+            "in": "query",
+            "description": "5-digit US ZIP code for area searches",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "latitude",
+            "in": "query",
+            "description": "Center latitude for radius search",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "longitude",
+            "in": "query",
+            "description": "Center longitude for radius search",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "radius",
+            "in": "query",
+            "description": "Radius in miles for geographic search",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "minbeds",
+            "in": "query",
+            "description": "Minimum bedrooms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxbeds",
+            "in": "query",
+            "description": "Maximum bedrooms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "minyearbuilt",
+            "in": "query",
+            "description": "Minimum year built",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxyearbuilt",
+            "in": "query",
+            "description": "Maximum year built",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default 1)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pagesize",
+            "in": "query",
+            "description": "Results per page (default 10, max 10000)",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          },
+          {
+            "name": "orderby",
+            "in": "query",
+            "description": "Sort field with direction (e.g. 'saleamt+desc')",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/sale/detail": {
+      "get": {
+        "operationId": "saleDetail",
+        "summary": "Last sale transaction \u2014 price, date, type (resale/new), price per sqft, price per bed.",
+        "tags": [
+          "Sale"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/sale/snapshot": {
+      "get": {
+        "operationId": "saleSnapshot",
+        "summary": "Sales records for an area \u2014 filter by price, date, bedrooms. Great for finding comps.",
+        "tags": [
+          "Sale"
+        ],
+        "parameters": [
+          {
+            "name": "postalcode",
+            "in": "query",
+            "description": "5-digit US ZIP code for area searches",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "latitude",
+            "in": "query",
+            "description": "Center latitude for radius search",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "longitude",
+            "in": "query",
+            "description": "Center longitude for radius search",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "radius",
+            "in": "query",
+            "description": "Radius in miles for geographic search",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "minsaleamt",
+            "in": "query",
+            "description": "Minimum sale amount filter",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxsaleamt",
+            "in": "query",
+            "description": "Maximum sale amount filter",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "minbeds",
+            "in": "query",
+            "description": "Minimum bedrooms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxbeds",
+            "in": "query",
+            "description": "Maximum bedrooms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "minyearbuilt",
+            "in": "query",
+            "description": "Minimum year built",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxyearbuilt",
+            "in": "query",
+            "description": "Maximum year built",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default 1)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pagesize",
+            "in": "query",
+            "description": "Results per page (default 10, max 10000)",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          },
+          {
+            "name": "orderby",
+            "in": "query",
+            "description": "Sort field with direction (e.g. 'saleamt+desc')",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/saleshistory/detail": {
+      "get": {
+        "operationId": "salesHistoryDetail",
+        "summary": "Complete sales transaction history for a property.",
+        "tags": [
+          "Sale"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/saleshistory/snapshot": {
+      "get": {
+        "operationId": "salesHistorySnapshot",
+        "summary": "Sales history records for an area search.",
+        "tags": [
+          "Sale"
+        ],
+        "parameters": [
+          {
+            "name": "postalcode",
+            "in": "query",
+            "description": "5-digit US ZIP code for area searches",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "minsaleamt",
+            "in": "query",
+            "description": "Minimum sale amount filter",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxsaleamt",
+            "in": "query",
+            "description": "Maximum sale amount filter",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default 1)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pagesize",
+            "in": "query",
+            "description": "Results per page (default 10, max 10000)",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/saleshistory/basichistory": {
+      "get": {
+        "operationId": "salesHistoryBasic",
+        "summary": "Basic historical sales for a property \u2014 dates and amounts.",
+        "tags": [
+          "Sale"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/saleshistory/expandedhistory": {
+      "get": {
+        "operationId": "salesHistoryExpanded",
+        "summary": "Expanded sales history \u2014 includes transaction type, deed type, buyer/seller details.",
+        "tags": [
+          "Sale"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/assessment/detail": {
+      "get": {
+        "operationId": "assessmentDetail",
+        "summary": "Tax assessment \u2014 assessed value (land + improvement), tax amount, tax year.",
+        "tags": [
+          "Assessment"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/assessment/snapshot": {
+      "get": {
+        "operationId": "assessmentSnapshot",
+        "summary": "Assessment records for an area \u2014 filter by value ranges.",
+        "tags": [
+          "Assessment"
+        ],
+        "parameters": [
+          {
+            "name": "postalcode",
+            "in": "query",
+            "description": "5-digit US ZIP code for area searches",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "minmktttlvalue",
+            "in": "query",
+            "description": "Minimum market total value",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxmktttlvalue",
+            "in": "query",
+            "description": "Maximum market total value",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default 1)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pagesize",
+            "in": "query",
+            "description": "Results per page (default 10, max 10000)",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/assessmenthistory/detail": {
+      "get": {
+        "operationId": "assessmentHistoryDetail",
+        "summary": "Historical tax assessments \u2014 track assessed value changes over years.",
+        "tags": [
+          "Assessment"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/attomavm/detail": {
+      "get": {
+        "operationId": "attomAvmDetail",
+        "summary": "ATTOM automated valuation model \u2014 estimated value, confidence score, value range.",
+        "tags": [
+          "Valuation"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/avm/snapshot": {
+      "get": {
+        "operationId": "avmSnapshot",
+        "summary": "AVM records for an area \u2014 filter by value range.",
+        "tags": [
+          "Valuation"
+        ],
+        "parameters": [
+          {
+            "name": "postalcode",
+            "in": "query",
+            "description": "5-digit US ZIP code for area searches",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "minavmvalue",
+            "in": "query",
+            "description": "Minimum AVM value",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxavmvalue",
+            "in": "query",
+            "description": "Maximum AVM value",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default 1)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pagesize",
+            "in": "query",
+            "description": "Results per page (default 10, max 10000)",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/valuation/rentalavm": {
+      "get": {
+        "operationId": "rentalAvm",
+        "summary": "Rental AVM \u2014 estimated rental value, min/max rental range.",
+        "tags": [
+          "Valuation"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/allevents/detail": {
+      "get": {
+        "operationId": "allEventsDetail",
+        "summary": "Everything in one call \u2014 property + assessment + AVM + sale + building. Most comprehensive endpoint.",
+        "tags": [
+          "Combined"
+        ],
+        "parameters": [
+          {
+            "name": "address1",
+            "in": "query",
+            "description": "Street address (e.g. '216 Encounter Bay')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "address2",
+            "in": "query",
+            "description": "City, state, and ZIP (e.g. 'Alameda, CA 94502')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attomid",
+            "in": "query",
+            "description": "ATTOM property identifier (from any prior response)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/propertyapi/v1.0.0/allevents/snapshot": {
+      "get": {
+        "operationId": "allEventsSnapshot",
+        "summary": "All events for an area \u2014 combined property + assessment + sale records.",
+        "tags": [
+          "Combined"
+        ],
+        "parameters": [
+          {
+            "name": "postalcode",
+            "in": "query",
+            "description": "5-digit US ZIP code for area searches",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "minsaleamt",
+            "in": "query",
+            "description": "Minimum sale amount filter",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxsaleamt",
+            "in": "query",
+            "description": "Maximum sale amount filter",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default 1)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pagesize",
+            "in": "query",
+            "description": "Results per page (default 10, max 10000)",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
