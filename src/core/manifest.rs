@@ -160,19 +160,31 @@ pub struct Provider {
     /// different leading path than the public-facing one.
     #[serde(default)]
     pub path_replace: Option<(String, String)>,
-    /// Override the upstream `Host` header (and TLS SNI). When `None`, the
-    /// hostname embedded in `base_url` is used.
+    /// Override the upstream `Host` header. When `None`, reqwest's default
+    /// Host header (derived from `base_url`) is used.
+    ///
+    /// Note: this controls the HTTP `Host` header only. TLS SNI follows the
+    /// host embedded in `base_url` (reqwest derives SNI from the URL host,
+    /// not from the Host header). If you need a different SNI, change
+    /// `base_url`; if you just need the upstream to *see* a different
+    /// virtual host, use `host_override`.
     #[serde(default)]
     pub host_override: Option<String>,
     /// Whether to upgrade the connection to a WebSocket when the request asks
-    /// for it. Always rejected at manifest-load time today — tracking issue:
-    /// https://github.com/Parcha-ai/ati/issues/95.
+    /// for it. Always rejected at manifest-load time today — WebSocket
+    /// support is tracked as a follow-up to PR 1.
     #[serde(default)]
     pub forward_websockets: bool,
-    /// Glob patterns matched against the *post-prefix-strip* path. Any match
-    /// returns 403 without forwarding upstream. Used for blocking admin
-    /// endpoints exposed by upstreams we don't want sandboxes to reach
-    /// (e.g. LiteLLM `/config/*`, `/model/*`).
+    /// Glob patterns matched against the path the upstream *would* see —
+    /// i.e. the path *after* `strip_prefix` and `path_replace` have been
+    /// applied. Any match returns 403 without forwarding upstream. Used
+    /// for blocking admin endpoints exposed by upstreams we don't want
+    /// sandboxes to reach (e.g. LiteLLM `/config/*`, `/model/*`).
+    ///
+    /// `*` does not cross `/`, so write `/config/*` and the load-time
+    /// expansion will also register `/config/**` so nested paths like
+    /// `/config/a/b` are caught too. Operators who want fine-grained
+    /// matching can write explicit `**` patterns.
     #[serde(default)]
     pub deny_paths: Vec<String>,
     /// TCP connect timeout for the upstream call.
@@ -714,8 +726,9 @@ impl ManifestRegistry {
                 if p.forward_websockets {
                     return Err(ManifestError::Invalid(
                         path.display().to_string(),
-                        "forward_websockets is not yet supported — tracking issue \
-                         https://github.com/Parcha-ai/ati/issues/95"
+                        "forward_websockets is not yet supported — WebSocket \
+                         passthrough is tracked as a follow-up to PR 1 of \
+                         issue #94"
                             .to_string(),
                     ));
                 }

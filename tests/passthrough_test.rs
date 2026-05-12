@@ -1140,8 +1140,8 @@ forward_websockets = true
     let msg = format!("{err}");
     assert!(msg.contains("forward_websockets"), "got: {msg}");
     assert!(
-        msg.contains("issues/95"),
-        "should reference tracking issue: {msg}"
+        msg.contains("#94") || msg.contains("WebSocket"),
+        "should reference tracking issue or feature name: {msg}"
     );
 }
 
