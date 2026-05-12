@@ -758,6 +758,109 @@ deny_paths = ["/config/*", "/model/*"]
 }
 
 #[tokio::test]
+async fn passthrough_deny_paths_block_nested_subpaths() {
+    // Greptile review #2 P1: deny_paths `/config/*` must block `/config/a/b`
+    // too — globset's `*` doesn't cross `/`. Without the expansion helper,
+    // a sandbox could escape the LiteLLM admin denylist with a sub-segment.
+    let upstream = MockServer::start().await;
+    // No mock — if the request leaks to upstream, wiremock will 404, but
+    // the test asserts 403 directly so we'd catch it either way.
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/litellm"
+deny_paths = ["/config/*", "/model/*"]
+"#,
+        upstream.uri()
+    );
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+
+    // Each of these must return 403 — previously /config/a/b silently
+    // skipped the denylist.
+    for forbidden_path in &[
+        "/litellm/config/x",
+        "/litellm/config/x/y",
+        "/litellm/config/deeply/nested/secret",
+        "/litellm/model/list/all",
+    ] {
+        let req = Request::builder()
+            .uri(*forbidden_path)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "expected 403 for {forbidden_path}; got {}",
+            resp.status()
+        );
+    }
+
+    // Upstream must NEVER have been called.
+    assert!(
+        upstream.received_requests().await.unwrap().is_empty(),
+        "denied requests must not reach upstream"
+    );
+}
+
+#[tokio::test]
+async fn passthrough_returns_redirects_to_client_unchanged() {
+    // Greptile review #2 P1: passthrough must NOT follow redirects internally.
+    // Following them would forward keyring-derived `extra_headers` to whatever
+    // host the upstream redirects to. The fix is `redirect::Policy::none()`.
+    // This test verifies a 3xx upstream response propagates verbatim.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "https://attacker.example/steal"),
+        )
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+
+[provider.extra_headers]
+X-Secret-Token = "should-not-leak"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/start")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    // The 302 must be returned to the client, not followed.
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    assert_eq!(
+        resp.headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok()),
+        Some("https://attacker.example/steal"),
+        "Location header must propagate verbatim"
+    );
+    // Upstream should have received exactly ONE request — no automatic
+    // follow-the-redirect call to attacker.example.
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "passthrough must not follow redirects");
+}
+
+#[tokio::test]
 async fn passthrough_deny_paths_does_not_block_unrelated_routes() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))

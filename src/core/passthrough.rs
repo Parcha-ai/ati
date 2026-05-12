@@ -156,6 +156,47 @@ impl PassthroughRouter {
     }
 }
 
+/// Expand a single operator-supplied `deny_paths` pattern into one or more
+/// globs that, together, cover the *intent* of "block this URL prefix and
+/// everything under it." This closes the `/config/*` → `/config/a/b` bypass
+/// reported by Greptile.
+///
+/// Rules:
+/// - Already-recursive patterns (`**` anywhere) pass through unchanged.
+/// - Patterns ending in `/*` get a recursive twin: `/foo/*` → `[/foo/*, /foo/**]`.
+/// - Patterns ending with a path segment but no glob (e.g. `/foo`) get both
+///   the literal AND a `/foo/**` recursive twin.
+/// - Patterns not anchored at `/` (`*.json`) are left alone — those are
+///   genuine single-segment wildcards.
+///
+/// Always returns at least the original pattern. Operators who *deliberately*
+/// want single-segment matching (rare for HTTP paths) can write `[!/]*`-style
+/// negations; the expansion still adds a recursive twin but that's strictly
+/// more conservative.
+fn expand_deny_pattern(pattern: &str) -> Vec<String> {
+    let mut out = vec![pattern.to_string()];
+    // Already recursive (contains `**` anywhere) — operator was explicit.
+    if pattern.contains("**") {
+        return out;
+    }
+    // Not anchored as an HTTP path prefix — don't touch (could be *.json etc).
+    if !pattern.starts_with('/') {
+        return out;
+    }
+    // `/foo/*` → also add `/foo/**`.
+    if let Some(stripped) = pattern.strip_suffix("/*") {
+        out.push(format!("{stripped}/**"));
+        return out;
+    }
+    // `/foo` (no trailing wildcard) → also add `/foo/**` so sub-paths are
+    // caught. The literal `/foo` is already matched by the original entry.
+    if !pattern.contains('*') {
+        out.push(format!("{}/**", pattern.trim_end_matches('/')));
+        return out;
+    }
+    out
+}
+
 fn matches_prefix(prefix: Option<&str>, path: &str) -> bool {
     match prefix {
         None | Some("/") => true,
@@ -181,13 +222,26 @@ fn compile_route(p: &Provider, keyring: &Keyring) -> Result<PassthroughRoute, Pa
         .map_err(|e| PassthroughBuildError::BadBaseUrl(p.name.clone(), e.to_string()))?;
     let base_url = p.base_url.trim_end_matches('/').to_string();
 
-    // Build the deny-paths GlobSet.
+    // Build the deny-paths GlobSet. Glob `*` does NOT cross `/`, so a naive
+    // `/config/*` would silently miss `/config/a/b` — a sandbox could escape
+    // the LiteLLM admin denylist by appending a sub-segment. We therefore
+    // expand every pattern to also match recursively below the prefix:
+    //   /config/*  → /config/*  AND /config/**
+    //   /config    → /config    AND /config/**   (also blocks the literal path)
+    //   /config/** → /config/** (already recursive — passed through)
+    // Plain non-anchored patterns (e.g. "*.json") are left alone.
     let mut deny_builder = GlobSetBuilder::new();
     for pattern in &p.deny_paths {
-        let glob = Glob::new(pattern).map_err(|e| {
-            PassthroughBuildError::BadDenyGlob(p.name.clone(), pattern.clone(), e.to_string())
-        })?;
-        deny_builder.add(glob);
+        for expanded in expand_deny_pattern(pattern) {
+            let glob = Glob::new(&expanded).map_err(|e| {
+                PassthroughBuildError::BadDenyGlob(
+                    p.name.clone(),
+                    expanded.clone(),
+                    e.to_string(),
+                )
+            })?;
+            deny_builder.add(glob);
+        }
     }
     let deny_globs = deny_builder
         .build()
@@ -215,9 +269,14 @@ fn compile_route(p: &Provider, keyring: &Keyring) -> Result<PassthroughRoute, Pa
         .pool_idle_timeout(Duration::from_secs(p.idle_timeout_seconds))
         .timeout(Duration::from_secs(p.read_timeout_seconds))
         .connect_timeout(Duration::from_secs(p.connect_timeout_seconds))
-        // Caddy followed redirects by default; ATI passthrough follows the
-        // 8-hop browser convention. Loop detection comes free with reqwest.
-        .redirect(reqwest::redirect::Policy::limited(8))
+        // DO NOT follow redirects. Passthrough is a transparent reverse proxy:
+        // 3xx responses must be returned to the client unchanged so the client
+        // (sandbox runner) can decide whether to follow. Following them inside
+        // the proxy would forward keyring-derived `extra_headers` to whatever
+        // host the upstream redirects to — reqwest strips `Authorization` on
+        // cross-origin hops but does NOT strip arbitrary custom headers. That's
+        // a credential-leak vector flagged by Greptile review #2 on PR #95.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| PassthroughBuildError::ClientBuild(p.name.clone(), e))?;
 
@@ -948,6 +1007,62 @@ mod tests {
         assert!(route.deny_globs.is_match("/config/secrets"));
         assert!(route.deny_globs.is_match("/model/list"));
         assert!(!route.deny_globs.is_match("/v1/chat"));
+    }
+
+    #[test]
+    fn deny_globs_block_nested_subpaths_not_just_one_segment() {
+        // Greptile review #2 P1: `/config/*` must also block `/config/a/b`
+        // because `*` doesn't cross `/`. Without the expand_deny_pattern
+        // helper, a sandbox could bypass the LiteLLM admin denylist by
+        // appending a sub-segment.
+        let mut p = passthrough_provider("t");
+        p.deny_paths = vec!["/config/*".to_string()];
+        let route = compile_route(&p, &dummy_keyring()).unwrap();
+        assert!(route.deny_globs.is_match("/config/x"), "single segment");
+        assert!(route.deny_globs.is_match("/config/x/y"), "two segments");
+        assert!(
+            route.deny_globs.is_match("/config/x/y/z"),
+            "deeply nested"
+        );
+        assert!(!route.deny_globs.is_match("/configuration"), "no false-positive on prefix without /");
+        assert!(!route.deny_globs.is_match("/v1"));
+    }
+
+    #[test]
+    fn expand_deny_pattern_rules() {
+        // /config/*  →  [/config/*, /config/**]
+        let exp = expand_deny_pattern("/config/*");
+        assert!(exp.contains(&"/config/*".to_string()));
+        assert!(exp.contains(&"/config/**".to_string()));
+
+        // /admin  →  [/admin, /admin/**]
+        let exp = expand_deny_pattern("/admin");
+        assert!(exp.contains(&"/admin".to_string()));
+        assert!(exp.contains(&"/admin/**".to_string()));
+
+        // /admin/  →  [/admin/, /admin/**]  (trailing slash normalized)
+        let exp = expand_deny_pattern("/admin/");
+        assert!(exp.contains(&"/admin/**".to_string()));
+
+        // /config/**  →  [/config/**]  (operator was already explicit)
+        let exp = expand_deny_pattern("/config/**");
+        assert_eq!(exp, vec!["/config/**".to_string()]);
+
+        // *.json  →  [*.json]  (not anchored — non-HTTP-path pattern)
+        let exp = expand_deny_pattern("*.json");
+        assert_eq!(exp, vec!["*.json".to_string()]);
+    }
+
+    #[test]
+    fn deny_globs_match_literal_root_when_no_glob() {
+        // /admin (no trailing wildcard) blocks both /admin and /admin/anything
+        let mut p = passthrough_provider("t");
+        p.deny_paths = vec!["/admin".to_string()];
+        let route = compile_route(&p, &dummy_keyring()).unwrap();
+        assert!(route.deny_globs.is_match("/admin"));
+        assert!(route.deny_globs.is_match("/admin/users"));
+        assert!(route.deny_globs.is_match("/admin/users/list"));
+        assert!(!route.deny_globs.is_match("/administrator"));
     }
 
     #[test]
