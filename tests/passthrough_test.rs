@@ -538,6 +538,149 @@ path_prefix = "/api"
 }
 
 #[tokio::test]
+async fn passthrough_strips_all_x_sandbox_prefix_headers_end_to_end() {
+    // Greptile flagged that the original strip list named only two specific
+    // x-sandbox-* headers. The fix broadens to a prefix match. This test
+    // exercises that round-trip through the real handler.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/anything")
+        .header("x-sandbox-signature", "t=1,s=deadbeef")
+        .header("x-sandbox-job-id", "job-123")
+        .header("x-sandbox-trace-id", "tr-xyz")
+        .header("x-sandbox-attempt", "2")
+        .header("x-sandbox-custom-future-header", "value")
+        .header("x-not-sandbox", "keep-me")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let received = upstream.received_requests().await.unwrap();
+    let r = received.last().unwrap();
+    for h in &[
+        "x-sandbox-signature",
+        "x-sandbox-job-id",
+        "x-sandbox-trace-id",
+        "x-sandbox-attempt",
+        "x-sandbox-custom-future-header",
+    ] {
+        assert!(
+            r.headers.get(*h).is_none(),
+            "expected {h} to be stripped from upstream request"
+        );
+    }
+    // Headers that don't start with x-sandbox- must pass through.
+    assert_eq!(
+        r.headers.get("x-not-sandbox").map(|v| v.to_str().unwrap()),
+        Some("keep-me")
+    );
+}
+
+#[tokio::test]
+async fn passthrough_strips_content_length_when_response_cap_active() {
+    // Greptile P1: when MaxBytesStream may truncate the body mid-stream, the
+    // upstream's Content-Length is a lie. Strip it so the downstream client
+    // frames the response via chunked transfer-encoding instead.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/blob"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-length", "1000")
+                .set_body_bytes(vec![b'A'; 1000]),
+        )
+        .mount(&upstream)
+        .await;
+
+    // max_response_bytes > 0 → cap_active is true → Content-Length must be stripped.
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+max_response_bytes = 10000
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/blob")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers().get("content-length").is_none(),
+        "content-length must be stripped when response cap is active; got {:?}",
+        resp.headers().get("content-length")
+    );
+}
+
+#[tokio::test]
+async fn passthrough_keeps_content_length_when_cap_disabled() {
+    // max_response_bytes = 0 → unlimited → no truncation risk → keep CL.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/blob"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-length", "5")
+                .set_body_bytes(b"hello".to_vec()),
+        )
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+max_response_bytes = 0
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/blob")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-length").map(|v| v.to_str().unwrap()),
+        Some("5"),
+        "content-length must be preserved when no response cap is active"
+    );
+}
+
+#[tokio::test]
 async fn passthrough_strips_host_header_uses_override() {
     let upstream = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1034,6 +1177,45 @@ max_response_bytes = 1000000
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = body_bytes(resp.into_body()).await;
     assert_eq!(bytes.len(), 50_000);
+}
+
+// --- Startup gate: refuse-to-start without the unauth ack --------------
+
+#[test]
+fn ati_proxy_refuses_passthrough_without_unauth_ack() {
+    // PR 1 ships passthrough WITHOUT authentication (sig-verify is PR 2).
+    // The startup gate refuses to start with --enable-passthrough unless
+    // --allow-unauthenticated-passthrough is also supplied. Tests the actual
+    // binary so we exercise the wired-up flag parsing + run() entry.
+    let dir = TempDir::new().unwrap();
+    let manifests = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+
+    let mut cmd = assert_cmd::Command::cargo_bin("ati").unwrap();
+    let output = cmd
+        .arg("proxy")
+        .arg("--port")
+        .arg("0") // ephemeral port — we won't get that far anyway
+        .arg("--ati-dir")
+        .arg(dir.path())
+        .arg("--enable-passthrough")
+        // NOTE: deliberately NOT passing --allow-unauthenticated-passthrough
+        .timeout(std::time::Duration::from_secs(10))
+        .output()
+        .expect("run ati");
+    assert!(
+        !output.status.success(),
+        "ati proxy --enable-passthrough should refuse to start without the unauth ack"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--allow-unauthenticated-passthrough"),
+        "stderr should explain how to unblock; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("PR 2"),
+        "stderr should reference PR 2; got: {stderr}"
+    );
 }
 
 // --- Sanity: `ati_dir`-based bootstrap parses our manifests --------------

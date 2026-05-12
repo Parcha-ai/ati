@@ -359,12 +359,29 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
+/// Headers stripped from inbound requests before forwarding upstream. Either
+/// because we set them explicitly (`host`), because forwarding sandbox-side
+/// auth would leak it across trust boundaries (`authorization`), or because
+/// upstream has no business knowing the sandbox identity (`x-sandbox-*`
+/// prefix — match prefix, not specific names, so future signing headers we
+/// haven't named yet are also filtered).
 const STRIP_DOWNSTREAM: &[&str] = &[
     "host",
     "authorization", // upstream-specific auth comes from the manifest
-    "x-sandbox-signature",
-    "x-sandbox-job-id",
 ];
+
+/// Returns true if `name` matches a header we always strip from inbound
+/// requests before forwarding upstream.
+fn is_sandbox_internal_header(name: &str) -> bool {
+    if STRIP_DOWNSTREAM.iter().any(|h| h.eq_ignore_ascii_case(name)) {
+        return true;
+    }
+    // Strip ALL `x-sandbox-*` headers, not just the two we name. This
+    // future-proofs against new signing or telemetry headers introduced
+    // by the sandbox runner (e.g. `x-sandbox-trace-id`, `x-sandbox-attempt`).
+    let n = name.to_ascii_lowercase();
+    n.starts_with("x-sandbox-")
+}
 
 fn filter_request_headers(src: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::with_capacity(src.len());
@@ -373,7 +390,7 @@ fn filter_request_headers(src: &HeaderMap) -> HeaderMap {
         if HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(n)) {
             continue;
         }
-        if STRIP_DOWNSTREAM.iter().any(|h| h.eq_ignore_ascii_case(n)) {
+        if is_sandbox_internal_header(n) {
             continue;
         }
         out.append(name.clone(), value.clone());
@@ -381,11 +398,23 @@ fn filter_request_headers(src: &HeaderMap) -> HeaderMap {
     out
 }
 
-fn filter_response_headers(src: &HeaderMap) -> HeaderMap {
+/// Filter response headers before forwarding to the downstream client.
+///
+/// When `cap_active = true` (i.e. `max_response_bytes > 0`), `Content-Length`
+/// is *also* stripped — because the cap may truncate the body mid-stream and
+/// any `Content-Length` we'd forward would be a lie. The downstream client
+/// then frames using chunked transfer-encoding, which axum/hyper applies
+/// automatically when no `Content-Length` is set. Compressed responses are
+/// fine: the cap is on transferred (post-encoding) bytes, so `Content-Encoding`
+/// stays valid even when truncation happens.
+fn filter_response_headers(src: &HeaderMap, cap_active: bool) -> HeaderMap {
     let mut out = HeaderMap::with_capacity(src.len());
     for (name, value) in src.iter() {
         let n = name.as_str();
         if HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(n)) {
+            continue;
+        }
+        if cap_active && n.eq_ignore_ascii_case("content-length") {
             continue;
         }
         out.append(name.clone(), value.clone());
@@ -630,7 +659,12 @@ pub async fn handle_passthrough(
     };
 
     let status = upstream_resp.status();
-    let resp_headers = filter_response_headers(upstream_resp.headers());
+    // Strip Content-Length when a response cap is in play: MaxBytesStream
+    // can truncate the body mid-stream, and forwarding the upstream's CL
+    // would frame the response as a lie. Without CL, axum/hyper falls back
+    // to chunked transfer-encoding which handles truncation cleanly.
+    let cap_active = route.max_response_bytes > 0;
+    let resp_headers = filter_response_headers(upstream_resp.headers(), cap_active);
     // reqwest::Response::bytes_stream gives us Result<Bytes, reqwest::Error>;
     // axum::body::Body::from_stream wants the same shape modulo error type.
     let upstream_stream = upstream_resp.bytes_stream();
@@ -1035,16 +1069,60 @@ mod tests {
     }
 
     #[test]
-    fn filter_response_strips_only_hop_by_hop() {
+    fn filter_request_strips_all_x_sandbox_prefix_headers() {
+        // Greptile pointed out that the original strip list named only
+        // x-sandbox-signature and x-sandbox-job-id — but the sandbox runner
+        // can add any number of x-sandbox-* telemetry/tracing headers. The
+        // filter must catch all of them by prefix.
+        let mut h = HeaderMap::new();
+        h.insert("x-sandbox-signature", "t=1,s=ab".parse().unwrap());
+        h.insert("x-sandbox-job-id", "job-123".parse().unwrap());
+        h.insert("x-sandbox-trace-id", "tr-xyz".parse().unwrap());
+        h.insert("x-sandbox-attempt", "2".parse().unwrap());
+        h.insert("x-keep", "yes".parse().unwrap());
+        let out = filter_request_headers(&h);
+        for sandbox_hdr in &[
+            "x-sandbox-signature",
+            "x-sandbox-job-id",
+            "x-sandbox-trace-id",
+            "x-sandbox-attempt",
+        ] {
+            assert!(
+                out.get(*sandbox_hdr).is_none(),
+                "expected {sandbox_hdr} to be stripped"
+            );
+        }
+        assert_eq!(out.get("x-keep").unwrap().to_str().unwrap(), "yes");
+    }
+
+    #[test]
+    fn filter_response_strips_hop_by_hop_keeps_content_length_when_no_cap() {
+        // cap_active=false → Content-Length is preserved (no truncation risk).
         let mut h = HeaderMap::new();
         h.insert("connection", "close".parse().unwrap());
         h.insert("content-type", "application/json".parse().unwrap());
+        h.insert("content-length", "42".parse().unwrap());
         h.insert("authorization", "Bearer upstream".parse().unwrap());
-        let out = filter_response_headers(&h);
+        let out = filter_response_headers(&h, false);
         assert!(out.get("connection").is_none());
         // We don't strip authorization on responses — upstream may legitimately
         // set it (e.g. an OAuth-flow handshake).
         assert!(out.get("authorization").is_some());
+        assert!(out.get("content-type").is_some());
+        assert_eq!(out.get("content-length").unwrap().to_str().unwrap(), "42");
+    }
+
+    #[test]
+    fn filter_response_strips_content_length_when_cap_active() {
+        // cap_active=true → Content-Length is dropped. MaxBytesStream can
+        // truncate the body mid-stream; forwarding the original CL would
+        // tell the client to expect more bytes than it'll receive, breaking
+        // HTTP framing.
+        let mut h = HeaderMap::new();
+        h.insert("content-type", "application/octet-stream".parse().unwrap());
+        h.insert("content-length", "999999".parse().unwrap());
+        let out = filter_response_headers(&h, true);
+        assert!(out.get("content-length").is_none(), "content-length must be stripped when cap is active");
         assert!(out.get("content-type").is_some());
     }
 }

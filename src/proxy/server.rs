@@ -1930,6 +1930,7 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
 // --- Server startup ---
 
 /// Start the proxy server.
+#[allow(clippy::too_many_arguments)] // call sites are all in main.rs and stay readable
 pub async fn run(
     port: u16,
     bind_addr: Option<String>,
@@ -1938,7 +1939,33 @@ pub async fn run(
     env_keys: bool,
     migrate: bool,
     enable_passthrough: bool,
+    allow_unauthenticated_passthrough: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY GATE — passthrough has no ATI-level auth until PR 2 wires HMAC
+    // sig-verify middleware. Refuse to start with `--enable-passthrough`
+    // unless the operator explicitly acknowledges this via
+    // `--allow-unauthenticated-passthrough`. Removing this gate is part of
+    // PR 2's diff (once sig-verify is mandatory for passthrough routes).
+    if enable_passthrough && !allow_unauthenticated_passthrough {
+        return Err("--enable-passthrough requires --allow-unauthenticated-passthrough \
+            until HMAC sig-verify lands in PR 2. Until then, passthrough routes have NO \
+            ATI-level authentication — every request reaching a passthrough route bypasses \
+            JWT validation, leaving only the upstream's own auth in place. If you understand \
+            and accept that, pass both flags. Otherwise, run without --enable-passthrough."
+            .into());
+    }
+    if enable_passthrough && allow_unauthenticated_passthrough {
+        tracing::error!(
+            "*** PASSTHROUGH IS RUNNING UNAUTHENTICATED ***"
+        );
+        tracing::error!(
+            "Passthrough routes bypass JWT validation. ATI-level auth (HMAC sig-verify) \
+             arrives in PR 2. Until then, network access to this proxy = access to every \
+             upstream a passthrough manifest forwards to. Bind to a private interface, \
+             allowlist source IPs, or wait for PR 2 before using --enable-passthrough."
+        );
+    }
+
     // Load manifests
     let manifests_dir = ati_dir.join("manifests");
     let mut registry = ManifestRegistry::load(&manifests_dir)?;

@@ -164,8 +164,18 @@ pub enum Commands {
         /// When enabled the proxy becomes an edge-mode reverse proxy on top
         /// of the existing tool-call API. Used for absorbing parcha-proxy's
         /// role on the static-IP egress VM.
+        ///
+        /// **Until PR 2 lands (HMAC sig-verify middleware), passthrough has
+        /// no ATI-level authentication.** Starting with `--enable-passthrough`
+        /// will refuse unless `--allow-unauthenticated-passthrough` is also
+        /// set, to prevent accidental open exposure of upstream services.
         #[arg(long)]
         enable_passthrough: bool,
+        /// Explicit acknowledgment that passthrough is running without ATI
+        /// authentication. Required during the PR 1 → PR 2 window. Once
+        /// PR 2 ships sig-verify, this flag is removed.
+        #[arg(long)]
+        allow_unauthenticated_passthrough: bool,
     },
 }
 
@@ -682,6 +692,7 @@ async fn main() {
             env_keys,
             migrate,
             enable_passthrough,
+            allow_unauthenticated_passthrough,
         } => {
             let dir = ati_dir
                 .as_deref()
@@ -695,6 +706,7 @@ async fn main() {
                 *env_keys,
                 *migrate,
                 *enable_passthrough,
+                *allow_unauthenticated_passthrough,
             )
             .await
         }
