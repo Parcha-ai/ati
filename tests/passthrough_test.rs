@@ -1,0 +1,1082 @@
+//! End-to-end integration tests for `handler = "passthrough"` providers.
+//!
+//! Builds the axum router in-process (no TCP binding), points a passthrough
+//! manifest at a `wiremock` upstream, and drives the whole pipeline via
+//! `tower::ServiceExt::oneshot`. Every test here exercises the *full*
+//! middleware stack: auth-bypass detection, fallback dispatch, header
+//! filtering, body streaming, and per-route limits.
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tempfile::TempDir;
+use tower::ServiceExt;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use ati::core::auth_generator::AuthCache;
+use ati::core::keyring::Keyring;
+use ati::core::manifest::ManifestRegistry;
+use ati::core::passthrough::PassthroughRouter;
+use ati::core::skill::SkillRegistry;
+use ati::proxy::server::{build_router, ProxyState};
+
+/// Process-wide mutex around env-var manipulation. `Keyring::from_env` scans
+/// the process environment, so two concurrent tests setting `ATI_KEY_*` would
+/// race. Use this guard whenever a test populates env vars to construct a
+/// keyring.
+fn env_mutex() -> &'static std::sync::Mutex<()> {
+    static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+// --- Test rig --------------------------------------------------------------
+
+/// Build an ATI router with a passthrough manifest pointing at `upstream_url`.
+/// Uses the in-memory keyring populated from `keys` (key_name → value).
+fn build_passthrough_app(manifest_toml: &str, keys: &[(&str, &str)]) -> (axum::Router, TempDir) {
+    let dir = TempDir::new().expect("tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+    std::fs::write(manifests_dir.join("test.toml"), manifest_toml).unwrap();
+
+    let registry = ManifestRegistry::load(&manifests_dir).expect("load test manifest");
+
+    // Build the keyring via ATI_KEY_* env vars so we don't reach into private
+    // internals. The Keyring::from_env path is the same one production uses.
+    // Hold env_mutex for the whole set/build/clear cycle: scanning the env is
+    // not concurrency-safe.
+    let keyring = {
+        let _guard = env_mutex().lock().unwrap_or_else(|p| p.into_inner());
+        let mut to_clear: Vec<String> = Vec::new();
+        for (k, v) in keys {
+            let env_key = format!("ATI_KEY_{}", k.to_uppercase());
+            std::env::set_var(&env_key, v);
+            to_clear.push(env_key);
+        }
+        let kr = Keyring::from_env();
+        for k in to_clear {
+            std::env::remove_var(k);
+        }
+        kr
+    };
+
+    let passthrough = PassthroughRouter::build(&registry, &keyring).expect("build router");
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring,
+        jwt_config: None,
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+        db: ati::core::db::DbState::Disabled,
+        passthrough: Some(Arc::new(passthrough)),
+    });
+    let app = build_router(state);
+    (app, dir)
+}
+
+/// Build an ATI router with passthrough explicitly DISABLED (the fallback
+/// then 404s every request). Used to assert the gating works.
+fn build_disabled_app(manifest_toml: &str) -> (axum::Router, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+    std::fs::write(manifests_dir.join("test.toml"), manifest_toml).unwrap();
+
+    let registry = ManifestRegistry::load(&manifests_dir).expect("load test manifest");
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring: Keyring::empty(),
+        jwt_config: None,
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+        db: ati::core::db::DbState::Disabled,
+        passthrough: None,
+    });
+    let app = build_router(state);
+    (app, dir)
+}
+
+async fn body_bytes(body: Body) -> Vec<u8> {
+    body.collect().await.unwrap().to_bytes().to_vec()
+}
+
+async fn body_text(body: Body) -> String {
+    String::from_utf8(body_bytes(body).await).unwrap()
+}
+
+// --- Basic forwarding ------------------------------------------------------
+
+#[tokio::test]
+async fn passthrough_forwards_get_request_and_returns_body() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/foo"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("hello from upstream"))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "test passthrough"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/test"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/test/v1/foo")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_text(resp.into_body()).await;
+    assert_eq!(body, "hello from upstream");
+}
+
+#[tokio::test]
+async fn passthrough_strips_prefix_by_default() {
+    let upstream = MockServer::start().await;
+    // Upstream must see /v1/chat — NOT /test/v1/chat.
+    Mock::given(method("GET"))
+        .and(path("/v1/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/test"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/test/v1/chat")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn passthrough_keeps_prefix_when_strip_prefix_false() {
+    let upstream = MockServer::start().await;
+    // strip_prefix=false → upstream sees /root/something untouched.
+    Mock::given(method("GET"))
+        .and(path("/root/something"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "devpi"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/root"
+strip_prefix = false
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/root/something")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn passthrough_applies_path_replace() {
+    let upstream = MockServer::start().await;
+    // Incoming: /otel/v1/traces → strip /otel → /v1/traces → replace / with /otlp/ → /otlp/v1/traces
+    Mock::given(method("POST"))
+        .and(path("/otlp/v1/traces"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "otel"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/otel"
+path_replace = ["/", "/otlp/"]
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/otel/v1/traces")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn passthrough_preserves_query_string() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .and(wiremock::matchers::query_param("q", "rust"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/search?q=rust")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// --- Method round-trip + body --------------------------------------------
+
+#[tokio::test]
+async fn passthrough_forwards_post_with_body() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/echo"))
+        .and(wiremock::matchers::body_string("payload-body"))
+        .respond_with(ResponseTemplate::new(201).set_body_string("created"))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/echo")
+        .header("content-type", "text/plain")
+        .body(Body::from("payload-body"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(body_text(resp.into_body()).await, "created");
+}
+
+// --- Auth injection -------------------------------------------------------
+
+#[tokio::test]
+async fn passthrough_injects_bearer_token() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .and(header("authorization", "Bearer SUPERSECRET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+auth_type = "bearer"
+auth_key_name = "my_token"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[("my_token", "SUPERSECRET")]);
+    let req = Request::builder().uri("/api/me").body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn passthrough_injects_custom_auth_header() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1"))
+        .and(header("x-bb-api-key", "BB123"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/bb"
+auth_type = "header"
+auth_header_name = "x-bb-api-key"
+auth_key_name = "bb_key"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[("bb_key", "BB123")]);
+    let req = Request::builder().uri("/bb/v1").body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn passthrough_extra_headers_expand_keyring_vars() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ingest"))
+        .and(header("authorization", "Basic dGVzdC1jcmVk"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/otel"
+[provider.extra_headers]
+Authorization = "Basic ${{otlp_creds}}"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[("otlp_creds", "dGVzdC1jcmVk")]);
+    let req = Request::builder()
+        .uri("/otel/ingest")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn passthrough_strips_inbound_authorization() {
+    // The sandbox-side Authorization header (a JWT) must NOT leak upstream —
+    // upstream auth comes from the manifest. We assert by configuring the
+    // upstream to reject Bearer tokens it doesn't recognize.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1"))
+        .and(header("authorization", "Bearer UPSTREAM_TOKEN"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+auth_type = "bearer"
+auth_key_name = "upstream_tok"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[("upstream_tok", "UPSTREAM_TOKEN")]);
+    // Send a *different* Authorization on the way in.
+    let req = Request::builder()
+        .uri("/api/v1")
+        .header("authorization", "Bearer SANDBOX_JWT_SHOULD_BE_STRIPPED")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    // Upstream only matched because the sandbox token was stripped and replaced.
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// --- Hop-by-hop header filtering -----------------------------------------
+
+#[tokio::test]
+async fn passthrough_strips_hop_by_hop_request_headers() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        // Verify connection header didn't leak upstream by asserting it's absent.
+        // wiremock's matchers don't have a "header-absent" directly, but we can
+        // verify by accepting + checking the request log.
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/x")
+        .header("connection", "keep-alive, upgrade")
+        .header("upgrade", "websocket")
+        .header("x-keep-me", "yes")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Inspect the upstream's received request log.
+    let received = upstream.received_requests().await.unwrap();
+    let r = received.last().unwrap();
+    // Hop-by-hop headers must NOT have been forwarded.
+    assert!(
+        r.headers.get("connection").is_none(),
+        "connection header leaked upstream"
+    );
+    assert!(
+        r.headers.get("upgrade").is_none(),
+        "upgrade header leaked upstream"
+    );
+    // Non-hop-by-hop headers MUST be forwarded.
+    assert_eq!(
+        r.headers.get("x-keep-me").map(|v| v.to_str().unwrap()),
+        Some("yes")
+    );
+}
+
+#[tokio::test]
+async fn passthrough_strips_sandbox_signature_headers() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/anything")
+        .header("x-sandbox-signature", "t=1,s=deadbeef")
+        .header("x-sandbox-job-id", "job-123")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let received = upstream.received_requests().await.unwrap();
+    let r = received.last().unwrap();
+    assert!(r.headers.get("x-sandbox-signature").is_none());
+    assert!(r.headers.get("x-sandbox-job-id").is_none());
+}
+
+#[tokio::test]
+async fn passthrough_strips_host_header_uses_override() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+host_override = "api.upstream.example"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/x")
+        .header("host", "proxy.greppy3.parcha.dev")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let received = upstream.received_requests().await.unwrap();
+    let r = received.last().unwrap();
+    // Upstream sees the override, not the inbound host.
+    assert_eq!(
+        r.headers.get("host").map(|v| v.to_str().unwrap()),
+        Some("api.upstream.example")
+    );
+}
+
+// --- deny_paths -----------------------------------------------------------
+
+#[tokio::test]
+async fn passthrough_deny_paths_returns_403_without_upstream_call() {
+    let upstream = MockServer::start().await;
+    // No mock — if upstream is ever called, the test fails because wiremock
+    // returns 404 by default.
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/litellm"
+deny_paths = ["/config/*", "/model/*"]
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/litellm/config/secret")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = body_text(resp.into_body()).await;
+    assert!(
+        body.contains("forbidden"),
+        "expected forbidden body, got: {body}"
+    );
+
+    // Upstream must not have received the request.
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn passthrough_deny_paths_does_not_block_unrelated_routes() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/litellm"
+deny_paths = ["/config/*", "/model/*"]
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/litellm/v1/chat/completions")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// --- Body size caps -------------------------------------------------------
+
+#[tokio::test]
+async fn passthrough_request_content_length_over_cap_returns_413() {
+    let upstream = MockServer::start().await;
+    // No mock body — upstream must not be hit.
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+max_request_bytes = 100
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let big_payload = vec![0u8; 500];
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/upload")
+        .header("content-length", "500")
+        .body(Body::from(big_payload))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    // Upstream must not have been called.
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+// --- Hostname routing -----------------------------------------------------
+
+#[tokio::test]
+async fn passthrough_host_match_routes_correctly() {
+    let bb_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("from-bb"))
+        .mount(&bb_upstream)
+        .await;
+
+    let default_upstream = MockServer::start().await;
+    // strip_prefix=true on "/sessions" → upstream sees "/" (root).
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("from-default"))
+        .mount(&default_upstream)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    std::fs::write(
+        manifests_dir.join("bb.toml"),
+        format!(
+            r#"
+[provider]
+name = "browserbase"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+host_match = "bb.greppy.example"
+"#,
+            bb_upstream.uri()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        manifests_dir.join("default.toml"),
+        format!(
+            r#"
+[provider]
+name = "default"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/sessions"
+"#,
+            default_upstream.uri()
+        ),
+    )
+    .unwrap();
+
+    let registry = ManifestRegistry::load(&manifests_dir).unwrap();
+    let keyring = Keyring::empty();
+    let passthrough = PassthroughRouter::build(&registry, &keyring).unwrap();
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring,
+        jwt_config: None,
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+        db: ati::core::db::DbState::Disabled,
+        passthrough: Some(Arc::new(passthrough)),
+    });
+    let app = build_router(state);
+
+    // Hit bb.greppy.example — should route to bb_upstream.
+    let req = Request::builder()
+        .uri("/sessions")
+        .header("host", "bb.greppy.example")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_text(resp.into_body()).await, "from-bb");
+
+    // Hit default host — should route to default_upstream.
+    let req = Request::builder()
+        .uri("/sessions")
+        .header("host", "other.example")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_text(resp.into_body()).await, "from-default");
+}
+
+// --- Disabled + no-match behavior ----------------------------------------
+
+#[tokio::test]
+async fn fallback_returns_404_when_passthrough_disabled() {
+    let manifest = r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "http://127.0.0.1:1"
+path_prefix = "/api"
+"#;
+    let (app, _dir) = build_disabled_app(manifest);
+    let req = Request::builder()
+        .uri("/api/anything")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = body_text(resp.into_body()).await;
+    assert!(body.contains("passthrough disabled"));
+}
+
+#[tokio::test]
+async fn fallback_returns_404_when_no_route_matches() {
+    let upstream = MockServer::start().await;
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+"#,
+        upstream.uri()
+    );
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/unknown/path")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn named_routes_still_win_over_fallback() {
+    // Even with passthrough enabled, /health must serve the named handler.
+    let upstream = MockServer::start().await;
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/"
+"#,
+        upstream.uri()
+    );
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Health endpoint returns JSON; passthrough would return upstream's response.
+    // Asserting on body's shape proves which handler ran.
+    let body = body_text(resp.into_body()).await;
+    assert!(body.contains("\"status\""), "expected health JSON, got: {body}");
+}
+
+// --- Bad gateway on upstream failure -------------------------------------
+
+#[tokio::test]
+async fn passthrough_returns_502_on_upstream_connection_failure() {
+    // base_url points at a port nothing is listening on.
+    let manifest = r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "http://127.0.0.1:1"
+path_prefix = "/api"
+connect_timeout_seconds = 1
+"#;
+
+    let (app, _dir) = build_passthrough_app(manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/x")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}
+
+// --- Manifest-load-time validation ---------------------------------------
+
+#[tokio::test]
+async fn passthrough_rejects_forward_websockets_true_at_load() {
+    let dir = TempDir::new().unwrap();
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+    std::fs::write(
+        manifests_dir.join("ws.toml"),
+        r#"
+[provider]
+name = "ws"
+description = "t"
+handler = "passthrough"
+base_url = "http://x"
+path_prefix = "/ws"
+forward_websockets = true
+"#,
+    )
+    .unwrap();
+
+    let err = match ManifestRegistry::load(&manifests_dir) { Ok(_) => panic!("expected load to fail"), Err(e) => e };
+    let msg = format!("{err}");
+    assert!(msg.contains("forward_websockets"), "got: {msg}");
+    assert!(
+        msg.contains("issues/95"),
+        "should reference tracking issue: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn passthrough_rejects_missing_host_and_prefix_at_load() {
+    let dir = TempDir::new().unwrap();
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+    std::fs::write(
+        manifests_dir.join("bad.toml"),
+        r#"
+[provider]
+name = "bad"
+description = "t"
+handler = "passthrough"
+base_url = "http://x"
+"#,
+    )
+    .unwrap();
+
+    let err = match ManifestRegistry::load(&manifests_dir) { Ok(_) => panic!("expected load to fail"), Err(e) => e };
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("host_match or path_prefix"),
+        "got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn passthrough_rejects_empty_base_url_at_load() {
+    let dir = TempDir::new().unwrap();
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+    std::fs::write(
+        manifests_dir.join("bad.toml"),
+        r#"
+[provider]
+name = "bad"
+description = "t"
+handler = "passthrough"
+path_prefix = "/x"
+"#,
+    )
+    .unwrap();
+
+    let err = match ManifestRegistry::load(&manifests_dir) { Ok(_) => panic!("expected load to fail"), Err(e) => e };
+    let msg = format!("{err}");
+    assert!(msg.contains("base_url"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn passthrough_rejects_path_prefix_without_leading_slash() {
+    let dir = TempDir::new().unwrap();
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+    std::fs::write(
+        manifests_dir.join("bad.toml"),
+        r#"
+[provider]
+name = "bad"
+description = "t"
+handler = "passthrough"
+base_url = "http://x"
+path_prefix = "no-leading-slash"
+"#,
+    )
+    .unwrap();
+
+    let err = match ManifestRegistry::load(&manifests_dir) { Ok(_) => panic!("expected load to fail"), Err(e) => e };
+    let msg = format!("{err}");
+    assert!(msg.contains("start with '/'"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn passthrough_normalizes_trailing_slash_on_prefix() {
+    // `/litellm/` should load successfully and behave like `/litellm`.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/litellm/"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/litellm/x")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// --- Streaming a large response (body cap) -------------------------------
+
+#[tokio::test]
+async fn passthrough_response_within_cap_streams_through() {
+    let upstream = MockServer::start().await;
+    let big = vec![b'A'; 50_000];
+    Mock::given(method("GET"))
+        .and(path("/big"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(big.clone()))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+max_response_bytes = 1000000
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/big")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = body_bytes(resp.into_body()).await;
+    assert_eq!(bytes.len(), 50_000);
+}
+
+// --- Sanity: `ati_dir`-based bootstrap parses our manifests --------------
+
+#[tokio::test]
+async fn manifest_loads_from_disk_with_all_passthrough_fields() {
+    // Smoke test that a "full" passthrough manifest with every option set
+    // parses successfully — sanity check for serde defaults.
+    let dir = TempDir::new().unwrap();
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+    std::fs::write(
+        manifests_dir.join("full.toml"),
+        r#"
+[provider]
+name = "full"
+description = "every field set"
+handler = "passthrough"
+base_url = "https://api.example.com"
+host_match = "api.example.com"
+host_override = "internal.example.com"
+path_prefix = "/v1"
+strip_prefix = true
+path_replace = ["/", "/api/"]
+forward_websockets = false
+deny_paths = ["/admin/*", "/internal/*"]
+connect_timeout_seconds = 5
+read_timeout_seconds = 60
+idle_timeout_seconds = 30
+max_request_bytes = 10485760
+max_response_bytes = 52428800
+auth_type = "header"
+auth_header_name = "x-api-key"
+auth_key_name = "example_key"
+
+[provider.extra_headers]
+X-Custom = "value"
+X-Templated = "Bearer ${example_token}"
+"#,
+    )
+    .unwrap();
+
+    let _ = PathBuf::from(&manifests_dir);
+    let registry = ManifestRegistry::load(&manifests_dir).expect("should load");
+    assert_eq!(registry.list_providers().len(), 1 + 1 /* file_manager virtual */);
+}

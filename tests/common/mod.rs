@@ -76,6 +76,18 @@ pub fn test_provider(name: &str, base_url: &str) -> Provider {
         openapi_exclude_operations: vec![],
         openapi_max_operations: None,
         openapi_overrides: HashMap::new(),
+        host_match: None,
+        path_prefix: None,
+        strip_prefix: true,
+        path_replace: None,
+        host_override: None,
+        forward_websockets: false,
+        deny_paths: Vec::new(),
+        connect_timeout_seconds: 5,
+        read_timeout_seconds: 300,
+        idle_timeout_seconds: 60,
+        max_request_bytes: 100 * 1024 * 1024,
+        max_response_bytes: 500 * 1024 * 1024,
         auth_generator: None,
         category: None,
         skills: vec![],
@@ -254,6 +266,7 @@ pub fn build_test_app(registry: ManifestRegistry) -> axum::Router {
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     build_router(state)
 }
@@ -269,6 +282,7 @@ pub fn build_test_app_with_jwt(registry: ManifestRegistry) -> axum::Router {
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     build_router(state)
 }
@@ -288,6 +302,7 @@ pub fn build_test_app_full(
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     build_router(state)
 }

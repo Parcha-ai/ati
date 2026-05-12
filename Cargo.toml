@@ -90,6 +90,14 @@ futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 glob = "0.3"
+# Compiled glob set for passthrough deny_paths matching (faster than Glob-per-path
+# at request time; built once at startup).
+globset = "0.4"
+# Used to pin-project the MaxBytesStream wrapper in core/passthrough.rs.
+pin-project-lite = "0.2"
+# URL parsing — already pulled transitively via reqwest, named explicitly so the
+# passthrough builder can validate base_url at manifest load.
+url = "2"
 rand = "0.8"
 strsim = "0.11.1"
 

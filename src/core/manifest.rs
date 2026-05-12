@@ -136,6 +136,61 @@ pub struct Provider {
     #[serde(default)]
     pub upload_default_destination: Option<String>,
 
+    // --- Passthrough provider fields (handler = "passthrough") ---
+    /// Hostname this route claims. When set, only requests whose `Host` header
+    /// matches (case-insensitive) are dispatched here. `None` means the route
+    /// applies to the default (catch-all) host.
+    ///
+    /// Either `host_match` or `path_prefix` (or both) MUST be set for a
+    /// passthrough provider — that's enforced at load time.
+    #[serde(default)]
+    pub host_match: Option<String>,
+    /// URL path prefix this route claims. Must begin with `/`. Longer prefixes
+    /// win over shorter ones (longest-match dispatch).
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    /// Whether to strip `path_prefix` from the URI before forwarding upstream.
+    /// Defaults to true. Set to false when the upstream expects to see the
+    /// full original path (devpi cares about this — its mirror behaviour
+    /// keys off `/root/...`).
+    #[serde(default = "default_strip_prefix")]
+    pub strip_prefix: bool,
+    /// Optional `(from, to)` path rewrite applied after prefix stripping.
+    /// Used for `/otel → /otlp` style remapping where the upstream uses a
+    /// different leading path than the public-facing one.
+    #[serde(default)]
+    pub path_replace: Option<(String, String)>,
+    /// Override the upstream `Host` header (and TLS SNI). When `None`, the
+    /// hostname embedded in `base_url` is used.
+    #[serde(default)]
+    pub host_override: Option<String>,
+    /// Whether to upgrade the connection to a WebSocket when the request asks
+    /// for it. Always rejected at manifest-load time today — tracking issue:
+    /// https://github.com/Parcha-ai/ati/issues/95.
+    #[serde(default)]
+    pub forward_websockets: bool,
+    /// Glob patterns matched against the *post-prefix-strip* path. Any match
+    /// returns 403 without forwarding upstream. Used for blocking admin
+    /// endpoints exposed by upstreams we don't want sandboxes to reach
+    /// (e.g. LiteLLM `/config/*`, `/model/*`).
+    #[serde(default)]
+    pub deny_paths: Vec<String>,
+    /// TCP connect timeout for the upstream call.
+    #[serde(default = "default_passthrough_connect_timeout_s")]
+    pub connect_timeout_seconds: u64,
+    /// Total response-read timeout (per request — not per-byte).
+    #[serde(default = "default_passthrough_read_timeout_s")]
+    pub read_timeout_seconds: u64,
+    /// Pool idle timeout for the per-route reqwest client.
+    #[serde(default = "default_passthrough_idle_timeout_s")]
+    pub idle_timeout_seconds: u64,
+    /// Inbound request body cap. 0 = unlimited (use for git clones).
+    #[serde(default = "default_passthrough_max_req_bytes")]
+    pub max_request_bytes: usize,
+    /// Outbound response body cap. 0 = unlimited.
+    #[serde(default = "default_passthrough_max_resp_bytes")]
+    pub max_response_bytes: usize,
+
     // --- OpenAPI provider fields (handler = "openapi") ---
     /// Path (relative to ~/.ati/specs/) or URL to OpenAPI spec (JSON or YAML)
     #[serde(default)]
@@ -178,6 +233,32 @@ pub struct Provider {
 
 fn default_handler() -> String {
     "http".to_string()
+}
+
+fn default_strip_prefix() -> bool {
+    true
+}
+
+fn default_passthrough_connect_timeout_s() -> u64 {
+    5
+}
+
+fn default_passthrough_read_timeout_s() -> u64 {
+    300
+}
+
+fn default_passthrough_idle_timeout_s() -> u64 {
+    60
+}
+
+fn default_passthrough_max_req_bytes() -> usize {
+    // 100 MB
+    100 * 1024 * 1024
+}
+
+fn default_passthrough_max_resp_bytes() -> usize {
+    // 500 MB
+    500 * 1024 * 1024
 }
 
 /// Per-operationId overrides for OpenAPI-discovered tools.
@@ -484,6 +565,21 @@ impl CachedProvider {
             cli_output_positional: HashMap::new(),
             upload_destinations: HashMap::new(),
             upload_default_destination: None,
+            // Passthrough fields — cached providers never carry passthrough
+            // config; they're tools, not raw routes. Defaults keep the struct
+            // literal valid without surfacing any passthrough behaviour.
+            host_match: None,
+            path_prefix: None,
+            strip_prefix: default_strip_prefix(),
+            path_replace: None,
+            host_override: None,
+            forward_websockets: false,
+            deny_paths: Vec::new(),
+            connect_timeout_seconds: default_passthrough_connect_timeout_s(),
+            read_timeout_seconds: default_passthrough_read_timeout_s(),
+            idle_timeout_seconds: default_passthrough_idle_timeout_s(),
+            max_request_bytes: default_passthrough_max_req_bytes(),
+            max_response_bytes: default_passthrough_max_resp_bytes(),
             auth_generator: None,
             category: None,
             skills: self.skills.clone(),
@@ -569,6 +665,66 @@ impl ManifestRegistry {
                             path.display().to_string(),
                             format!(
                                 "upload_default_destination '{default}' is not present in [provider.upload_destinations]"
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            // For passthrough providers, validate the route definition. These
+            // are raw HTTP forwarders with no `[[tools]]` — they live or die
+            // by their schema being well-formed at load time.
+            if manifest.provider.is_passthrough() {
+                let p = &mut manifest.provider;
+                if p.base_url.trim().is_empty() {
+                    return Err(ManifestError::Invalid(
+                        path.display().to_string(),
+                        "passthrough provider requires non-empty base_url".to_string(),
+                    ));
+                }
+                if p.host_match.is_none() && p.path_prefix.is_none() {
+                    return Err(ManifestError::Invalid(
+                        path.display().to_string(),
+                        "passthrough provider requires at least one of host_match or path_prefix"
+                            .to_string(),
+                    ));
+                }
+                if let Some(ref prefix) = p.path_prefix {
+                    if !prefix.starts_with('/') {
+                        return Err(ManifestError::Invalid(
+                            path.display().to_string(),
+                            format!("passthrough path_prefix must start with '/' (got: '{prefix}')"),
+                        ));
+                    }
+                    // Normalize: drop trailing slash so '/litellm' and '/litellm/'
+                    // match identically. Keep '/' alone unchanged.
+                    if prefix.len() > 1 && prefix.ends_with('/') {
+                        let trimmed = prefix.trim_end_matches('/').to_string();
+                        p.path_prefix = Some(trimmed);
+                    }
+                }
+                if let Some(ref host) = p.host_match {
+                    if host.trim().is_empty() {
+                        return Err(ManifestError::Invalid(
+                            path.display().to_string(),
+                            "passthrough host_match must be non-empty when set".to_string(),
+                        ));
+                    }
+                }
+                if p.forward_websockets {
+                    return Err(ManifestError::Invalid(
+                        path.display().to_string(),
+                        "forward_websockets is not yet supported — tracking issue \
+                         https://github.com/Parcha-ai/ati/issues/95"
+                            .to_string(),
+                    ));
+                }
+                if let Some((ref from, _)) = p.path_replace {
+                    if !from.starts_with('/') {
+                        return Err(ManifestError::Invalid(
+                            path.display().to_string(),
+                            format!(
+                                "passthrough path_replace source must start with '/' (got: '{from}')"
                             ),
                         ));
                     }
@@ -727,6 +883,13 @@ impl ManifestRegistry {
         self.manifests.iter().map(|m| &m.provider).collect()
     }
 
+    /// Raw view of all loaded manifests. Used by `core::passthrough` to walk
+    /// every provider — including `internal = true` ones — when building the
+    /// passthrough router.
+    pub fn manifests(&self) -> &[Manifest] {
+        &self.manifests
+    }
+
     /// List all non-internal tools (excludes providers marked internal=true).
     pub fn list_public_tools(&self) -> Vec<(&Provider, &Tool)> {
         self.manifests
@@ -857,6 +1020,11 @@ impl Provider {
     pub fn is_file_manager(&self) -> bool {
         self.handler == "file_manager"
     }
+
+    /// Returns true if this provider is a raw HTTP passthrough route.
+    pub fn is_passthrough(&self) -> bool {
+        self.handler == "passthrough"
+    }
 }
 
 /// Register the virtual `file_manager` provider (download + upload tools).
@@ -917,6 +1085,18 @@ pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
         cli_output_positional: HashMap::new(),
         upload_destinations: HashMap::new(),
         upload_default_destination: None,
+        host_match: None,
+        path_prefix: None,
+        strip_prefix: default_strip_prefix(),
+        path_replace: None,
+        host_override: None,
+        forward_websockets: false,
+        deny_paths: Vec::new(),
+        connect_timeout_seconds: default_passthrough_connect_timeout_s(),
+        read_timeout_seconds: default_passthrough_read_timeout_s(),
+        idle_timeout_seconds: default_passthrough_idle_timeout_s(),
+        max_request_bytes: default_passthrough_max_req_bytes(),
+        max_response_bytes: default_passthrough_max_resp_bytes(),
         openapi_spec: None,
         openapi_include_tags: Vec::new(),
         openapi_exclude_tags: Vec::new(),

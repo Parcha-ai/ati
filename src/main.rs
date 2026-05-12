@@ -157,6 +157,15 @@ pub enum Commands {
         /// they auto-apply. In production, prefer running migrations out-of-band.
         #[arg(long)]
         migrate: bool,
+        /// Enable raw HTTP passthrough routes from `handler = "passthrough"`
+        /// manifests. Off by default — the proxy only serves named ATI routes
+        /// (/call, /mcp, /skills*, etc.) unless this is set.
+        ///
+        /// When enabled the proxy becomes an edge-mode reverse proxy on top
+        /// of the existing tool-call API. Used for absorbing parcha-proxy's
+        /// role on the static-IP egress VM.
+        #[arg(long)]
+        enable_passthrough: bool,
     },
 }
 
@@ -672,12 +681,22 @@ async fn main() {
             ati_dir,
             env_keys,
             migrate,
+            enable_passthrough,
         } => {
             let dir = ati_dir
                 .as_deref()
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(cli::common::ati_dir);
-            proxy::server::run(*port, bind.clone(), dir, cli.verbose, *env_keys, *migrate).await
+            proxy::server::run(
+                *port,
+                bind.clone(),
+                dir,
+                cli.verbose,
+                *env_keys,
+                *migrate,
+                *enable_passthrough,
+            )
+            .await
         }
     };
 
