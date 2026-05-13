@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::core::auth_generator::{AuthCache, GenContext};
@@ -49,9 +49,14 @@ pub struct ProxyState {
     pub db: DbState,
     /// Compiled passthrough router. `None` when `--enable-passthrough` is off
     /// (the fallback handler returns 404 immediately in that case). The router
-    /// is built once at startup; rebuilding requires a process restart (or in
-    /// PR 2's world, a SIGHUP).
+    /// is built once at startup; rebuilding requires a process restart (or a
+    /// SIGHUP once `ati edge rotate-keyring` lands in PR 3).
     pub passthrough: Option<Arc<crate::core::passthrough::PassthroughRouter>>,
+    /// HMAC sig-verify config. Always present (mode defaults to `Log` which is
+    /// a no-op). The middleware wraps every non-exempt request and reads from
+    /// here. Carries an `ArcSwapOption<Vec<u8>>` so a SIGHUP-driven keyring
+    /// reload can swap the secret in place without restart.
+    pub sig_verify: Arc<crate::core::sig_verify::SigVerifyConfig>,
 }
 
 // --- Request/Response types ---
@@ -1920,11 +1925,74 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         // handler runs. `handle_call` still enforces its own
         // `max_call_body_bytes()` cap when streaming the body to bytes.
         .layer(DefaultBodyLimit::max(max_call_body_bytes()))
+        // Layers run *outermost-first* on inbound. Order in code below =
+        // inner→outer (axum reverses). We want:
+        //   incoming → sig_verify → auth → handler
+        // so a 403 in enforce mode never reaches JWT validation. That means
+        // `.layer(auth)` is listed FIRST (inner), `.layer(sig_verify)` SECOND
+        // (outer; runs first on the wire).
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::core::sig_verify::sig_verify_middleware,
+        ))
         .with_state(state)
+}
+
+/// Install a SIGHUP handler that re-reads the keyring and hot-swaps the
+/// sig-verify secret. Lets `ati edge rotate-keyring` (PR 3) replace the
+/// signing secret without restarting the proxy.
+///
+/// Why not also reload `passthrough`? Passthrough's per-route auth headers
+/// are also keyring-derived; full reload there means rebuilding
+/// `PassthroughRouter`. Out of scope for PR 2 — when the rotate-keyring
+/// command lands we'll extend this handler.
+fn install_sighup_reload_handler(state: Arc<ProxyState>, ati_dir: PathBuf, env_keys: bool) {
+    use tokio::signal::unix::{signal, SignalKind};
+    tokio::spawn(async move {
+        let mut sig = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGHUP handler — keyring rotation will require restart");
+                return;
+            }
+        };
+        while sig.recv().await.is_some() {
+            tracing::info!("SIGHUP received — reloading keyring and sig-verify secret");
+            let kr = reload_keyring(&ati_dir, env_keys);
+            state.sig_verify.reload(&kr);
+        }
+    });
+}
+
+/// Re-read the keyring from disk (or environment, with `--env-keys`).
+/// Mirrors the cascade in `run()`. Logs but doesn't fail on errors — a
+/// transient read failure during SIGHUP shouldn't take the proxy down.
+fn reload_keyring(ati_dir: &Path, env_keys: bool) -> Keyring {
+    if env_keys {
+        return Keyring::from_env();
+    }
+    let keyring_path = ati_dir.join("keyring.enc");
+    if keyring_path.exists() {
+        if let Ok(kr) = Keyring::load(&keyring_path) {
+            return kr;
+        }
+        if let Ok(kr) = Keyring::load_local(&keyring_path, ati_dir) {
+            return kr;
+        }
+        tracing::warn!("keyring.enc exists but could not be decrypted on SIGHUP");
+        return Keyring::empty();
+    }
+    let creds_path = ati_dir.join("credentials");
+    if creds_path.exists() {
+        if let Ok(kr) = Keyring::load_credentials(&creds_path) {
+            return kr;
+        }
+    }
+    Keyring::empty()
 }
 
 // --- Server startup ---
@@ -1939,32 +2007,13 @@ pub async fn run(
     env_keys: bool,
     migrate: bool,
     enable_passthrough: bool,
-    allow_unauthenticated_passthrough: bool,
+    sig_verify_mode: crate::core::sig_verify::SigVerifyMode,
+    sig_drift_seconds: i64,
+    sig_exempt_paths: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // SAFETY GATE — passthrough has no ATI-level auth until PR 2 wires HMAC
-    // sig-verify middleware. Refuse to start with `--enable-passthrough`
-    // unless the operator explicitly acknowledges this via
-    // `--allow-unauthenticated-passthrough`. Removing this gate is part of
-    // PR 2's diff (once sig-verify is mandatory for passthrough routes).
-    if enable_passthrough && !allow_unauthenticated_passthrough {
-        return Err(
-            "--enable-passthrough requires --allow-unauthenticated-passthrough \
-            until HMAC sig-verify lands in PR 2. Until then, passthrough routes have NO \
-            ATI-level authentication — every request reaching a passthrough route bypasses \
-            JWT validation, leaving only the upstream's own auth in place. If you understand \
-            and accept that, pass both flags. Otherwise, run without --enable-passthrough."
-                .into(),
-        );
-    }
-    if enable_passthrough && allow_unauthenticated_passthrough {
-        tracing::error!("*** PASSTHROUGH IS RUNNING UNAUTHENTICATED ***");
-        tracing::error!(
-            "Passthrough routes bypass JWT validation. ATI-level auth (HMAC sig-verify) \
-             arrives in PR 2. Until then, network access to this proxy = access to every \
-             upstream a passthrough manifest forwards to. Bind to a private interface, \
-             allowlist source IPs, or wait for PR 2 before using --enable-passthrough."
-        );
-    }
+    use crate::core::sig_verify::{
+        SigVerifyConfig, SigVerifyMode, DEFAULT_EXEMPT_PATHS, SECRET_KEY_NAME,
+    };
 
     // Load manifests
     let manifests_dir = ati_dir.join("manifests");
@@ -2117,6 +2166,47 @@ pub async fn run(
     };
     let passthrough_count = passthrough.as_ref().map(|r| r.len()).unwrap_or(0);
 
+    // Build the sig-verify config. Always built (even when passthrough is
+    // disabled): the middleware wraps every non-exempt request regardless of
+    // route type so that the eventual passthrough rollout doesn't need a
+    // second wiring change. In `Log` mode the middleware is effectively a
+    // no-op except for the structured log line.
+    let exempt_owned: Vec<String> = match &sig_exempt_paths {
+        Some(csv) => crate::core::sig_verify::parse_exempt_paths(csv),
+        None => DEFAULT_EXEMPT_PATHS.iter().map(|s| s.to_string()).collect(),
+    };
+    let exempt_refs: Vec<&str> = exempt_owned.iter().map(|s| s.as_str()).collect();
+    let sig_verify = Arc::new(SigVerifyConfig::build(
+        sig_verify_mode,
+        sig_drift_seconds,
+        &exempt_refs,
+        &keyring,
+    )?);
+    let sig_secret_loaded = sig_verify.has_secret();
+
+    // Fail-closed gate: in Enforce mode, missing secret means every request
+    // would 403. Refuse to start instead of silently breaking traffic.
+    if sig_verify_mode == SigVerifyMode::Enforce && !sig_secret_loaded {
+        return Err(format!(
+            "--sig-verify-mode enforce requires the keyring entry '{SECRET_KEY_NAME}' \
+             to be present. Without it every signed request fails closed. Either \
+             populate the keyring (typically via `ati edge bootstrap-keyring` in PR 3, \
+             or by setting ATI_KEY_SANDBOX_SIGNING_SHARED_SECRET if running with \
+             --env-keys), or drop back to `--sig-verify-mode log` during rollout."
+        )
+        .into());
+    }
+    // Soft warning: passthrough enabled but sig-verify in Log mode + no secret
+    // = wide open. Mirror PR 1's loud warning so we don't regress.
+    if enable_passthrough && (sig_verify_mode == SigVerifyMode::Log) && !sig_secret_loaded {
+        tracing::error!(
+            "*** SIG-VERIFY IS LOG-ONLY AND NO SECRET IS CONFIGURED — passthrough is \
+             effectively unauthenticated. Flip to --sig-verify-mode enforce + load \
+             the keyring entry '{SECRET_KEY_NAME}' before exposing this to untrusted \
+             networks."
+        );
+    }
+
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
@@ -2126,7 +2216,14 @@ pub async fn run(
         auth_cache: AuthCache::new(),
         db,
         passthrough,
+        sig_verify,
     });
+
+    // Hot-reload secret on SIGHUP — `ati edge rotate-keyring` (PR 3) re-encrypts
+    // the keyring then signals us. Spawned before `axum::serve` so a HUP that
+    // races startup isn't lost. The handler clones a weak Arc-handle to state
+    // so it doesn't keep the proxy alive past natural shutdown.
+    install_sighup_reload_handler(state.clone(), ati_dir.clone(), env_keys);
 
     let app = build_router(state);
 
@@ -2149,6 +2246,8 @@ pub async fn run(
         keyring = keyring_source,
         db = db_status,
         passthrough = passthrough_count,
+        sig_verify_mode = ?sig_verify_mode,
+        sig_verify_secret = sig_secret_loaded,
         "ATI proxy server starting"
     );
     for (name, transport) in &mcp_providers {

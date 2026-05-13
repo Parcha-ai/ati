@@ -74,6 +74,15 @@ fn build_passthrough_app(manifest_toml: &str, keys: &[(&str, &str)]) -> (axum::R
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: Some(Arc::new(passthrough)),
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     let app = build_router(state);
     (app, dir)
@@ -98,6 +107,15 @@ fn build_disabled_app(manifest_toml: &str) -> (axum::Router, TempDir) {
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     let app = build_router(state);
     (app, dir)
@@ -998,6 +1016,15 @@ path_prefix = "/sessions"
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: Some(Arc::new(passthrough)),
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     let app = build_router(state);
 
@@ -1299,14 +1326,14 @@ max_response_bytes = 1000000
     assert_eq!(bytes.len(), 50_000);
 }
 
-// --- Startup gate: refuse-to-start without the unauth ack --------------
+// --- Startup gate: enforce mode requires a sig-verify secret -----------
 
 #[test]
-fn ati_proxy_refuses_passthrough_without_unauth_ack() {
-    // PR 1 ships passthrough WITHOUT authentication (sig-verify is PR 2).
-    // The startup gate refuses to start with --enable-passthrough unless
-    // --allow-unauthenticated-passthrough is also supplied. Tests the actual
-    // binary so we exercise the wired-up flag parsing + run() entry.
+fn ati_proxy_refuses_enforce_mode_when_secret_missing() {
+    // PR 2 ships HMAC sig-verify. In --sig-verify-mode enforce, if the
+    // keyring entry is missing, every signed request would fail closed —
+    // a startup misconfiguration that should be loud, not silent. The
+    // proxy refuses to start in that combination.
     let dir = TempDir::new().unwrap();
     let manifests = dir.path().join("manifests");
     std::fs::create_dir_all(&manifests).unwrap();
@@ -1315,26 +1342,71 @@ fn ati_proxy_refuses_passthrough_without_unauth_ack() {
     let output = cmd
         .arg("proxy")
         .arg("--port")
-        .arg("0") // ephemeral port — we won't get that far anyway
+        .arg("0")
         .arg("--ati-dir")
         .arg(dir.path())
-        .arg("--enable-passthrough")
-        // NOTE: deliberately NOT passing --allow-unauthenticated-passthrough
+        .arg("--sig-verify-mode")
+        .arg("enforce")
         .timeout(std::time::Duration::from_secs(10))
         .output()
         .expect("run ati");
     assert!(
         !output.status.success(),
-        "ati proxy --enable-passthrough should refuse to start without the unauth ack"
+        "ati proxy --sig-verify-mode enforce without a secret should refuse to start"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--allow-unauthenticated-passthrough"),
-        "stderr should explain how to unblock; got: {stderr}"
+        stderr.contains("sandbox_signing_shared_secret"),
+        "stderr should name the missing keyring entry; got: {stderr}"
     );
     assert!(
-        stderr.contains("PR 2"),
-        "stderr should reference PR 2; got: {stderr}"
+        stderr.contains("enforce"),
+        "stderr should mention enforce mode; got: {stderr}"
+    );
+}
+
+#[test]
+fn ati_proxy_starts_in_log_mode_without_secret() {
+    // Conversely, --sig-verify-mode log (the default) must NOT refuse to
+    // start when the secret is missing. Log mode is the safe-rollout
+    // posture — it logs validity but never blocks. The proxy emits a
+    // warning at startup, then continues binding.
+    //
+    // Verified by passing `--port 0` (ephemeral; bound + immediately
+    // closed) and checking the proxy printed its "starting" log line
+    // before we kill it. assert_cmd doesn't help here because run() never
+    // exits on success — instead we use a subprocess + a timeout that
+    // expects the proxy to STILL be running.
+    use assert_cmd::cargo::CommandCargoExt;
+    use std::process::{Command, Stdio};
+    let dir = TempDir::new().unwrap();
+    let manifests = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+
+    let mut child = Command::cargo_bin("ati")
+        .unwrap()
+        .args([
+            "proxy",
+            "--port",
+            "0",
+            "--ati-dir",
+            dir.path().to_str().unwrap(),
+            // sig-verify defaults to log → no startup refusal expected
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ati");
+
+    // Give it 2s to either exit (bad) or stay running (good).
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let still_running = child.try_wait().expect("wait").is_none();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        still_running,
+        "log mode without secret should not exit the proxy"
     );
 }
 

@@ -18,5 +18,6 @@ pub mod rate;
 pub mod response;
 pub mod scope;
 pub mod sentry_scope;
+pub mod sig_verify;
 pub mod skill;
 pub mod skillati;
