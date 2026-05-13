@@ -122,10 +122,19 @@ jobs:
         with:
           generate_release_notes: true
           files: release/*
+          # SemVer prerelease tags (anything with a hyphen — `v0.8.0-rc.1`,
+          # `v0.8.0-beta.2`, etc.) are flagged as prerelease on GH so they
+          # don't show up as "Latest" and don't trigger downstream tooling
+          # that pins to "latest stable."
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   publish-crates:
     name: Publish to crates.io
     needs: release
+    # Skip on SemVer prereleases (`v0.8.0-rc.1`, `v0.8.0-beta.2`, …).
+    # `cargo install agent-tools-interface` keeps resolving the last
+    # stable release until we cut a non-prerelease tag.
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment:
       name: crates-io
@@ -145,6 +154,12 @@ jobs:
   publish-pypi:
     name: Publish ati-client to PyPI
     needs: release
+    # Same prerelease gate as publish-crates. `pip install ati-client`
+    # keeps resolving the last stable release. To deliberately try a
+    # prerelease, callers can use `pip install --pre ati-client==X.Y.Z-rc.N`
+    # — but only AFTER it lands on PyPI via a future stable cut, which
+    # is by design: prereleases stay on GH Releases only.
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
