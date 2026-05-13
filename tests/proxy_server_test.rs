@@ -171,6 +171,7 @@ fn build_test_app(upstream_url: &str) -> axum::Router {
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
 
     build_router(state)
@@ -193,6 +194,7 @@ fn build_test_app_with_jwt(upstream_url: &str) -> axum::Router {
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
 
     build_router(state)
@@ -346,6 +348,7 @@ description = "Query"
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     let app = build_router(state);
 
@@ -425,6 +428,7 @@ description = "ID to look up"
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     let app = build_router(state);
 
@@ -504,6 +508,7 @@ description = "Title"
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     let app = build_router(state);
 
@@ -668,6 +673,7 @@ description = "Query"
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     let app = build_router(state);
 
@@ -1095,6 +1101,7 @@ description = "Query"
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     let app = build_router(state);
 
@@ -1189,6 +1196,7 @@ description = "Data"
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     let app = build_router(state);
 

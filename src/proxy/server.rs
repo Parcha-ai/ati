@@ -47,6 +47,11 @@ pub struct ProxyState {
     /// Optional Postgres persistence layer. `Disabled` is the normal path;
     /// downstream writers (call audit, virtual keys) borrow the pool from here.
     pub db: DbState,
+    /// Compiled passthrough router. `None` when `--enable-passthrough` is off
+    /// (the fallback handler returns 404 immediately in that case). The router
+    /// is built once at startup; rebuilding requires a process restart (or in
+    /// PR 2's world, a SIGHUP).
+    pub passthrough: Option<Arc<crate::core::passthrough::PassthroughRouter>>,
 }
 
 // --- Request/Response types ---
@@ -1780,6 +1785,7 @@ fn skillati_error_response(err: SkillAtiError) -> (StatusCode, Json<Value>) {
 /// JWT authentication middleware.
 ///
 /// - /health and /.well-known/jwks.json → skip auth
+/// - Passthrough routes → skip JWT (those use HMAC sig-verify, wired in PR 2)
 /// - JWT configured → validate Bearer token, attach claims to request extensions
 /// - No JWT configured → allow all (dev mode)
 async fn auth_middleware(
@@ -1792,6 +1798,23 @@ async fn auth_middleware(
     // Skip auth for public endpoints
     if path == "/health" || path == "/.well-known/jwks.json" {
         return Ok(next.run(req).await);
+    }
+
+    // Skip JWT for passthrough routes — they're authenticated by sig-verify
+    // (PR 2) and live in a different identity model (HMAC-signed sandboxes,
+    // not JWT-bearing agents). The passthrough router is only consulted when
+    // the incoming path doesn't match any named ATI route, so this check is
+    // cheap and only kicks in when relevant.
+    if let Some(ref router) = state.passthrough {
+        let host = req
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .map(|h| h.split(':').next().unwrap_or(h).to_string())
+            .unwrap_or_default();
+        if router.match_request(&host, path).is_some() && !is_named_route(path) {
+            return Ok(next.run(req).await);
+        }
     }
 
     // If no JWT configured, allow all (dev mode)
@@ -1823,6 +1846,29 @@ async fn auth_middleware(
             Err(StatusCode::UNAUTHORIZED)
         }
     }
+}
+
+/// Returns true if `path` is one of ATI's own named routes (vs. a passthrough
+/// route that should bypass JWT and run through the catch-all fallback).
+///
+/// Kept conservative — when in doubt we treat it as a named route, which
+/// means JWT applies. The set is small and stable.
+fn is_named_route(path: &str) -> bool {
+    matches!(
+        path,
+        "/call"
+            | "/help"
+            | "/mcp"
+            | "/tools"
+            | "/skills"
+            | "/skills/resolve"
+            | "/skills/bundle"
+            | "/skillati/catalog"
+            | "/health"
+            | "/.well-known/jwks.json"
+    ) || path.starts_with("/tools/")
+        || path.starts_with("/skills/")
+        || path.starts_with("/skillati/")
 }
 
 // --- Router builder ---
@@ -1863,6 +1909,12 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/skillati/{name}/ref/{reference}", get(handle_skillati_ref))
         .route("/health", get(handle_health))
         .route("/.well-known/jwks.json", get(handle_jwks))
+        // Fallback handles raw HTTP passthrough — runs only when no named
+        // route matched. Returns 404 when `state.passthrough` is `None`
+        // (passthrough disabled) or when no manifest claims the request's
+        // host+path. The fallback is mounted *before* the layers so the
+        // auth + body-limit middlewares wrap it like every other route.
+        .fallback(crate::core::passthrough::handle_passthrough)
         // Raise axum's default 2 MB body-extractor limit so request bodies
         // carrying base64-encoded upload payloads aren't rejected before the
         // handler runs. `handle_call` still enforces its own
@@ -1878,6 +1930,7 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
 // --- Server startup ---
 
 /// Start the proxy server.
+#[allow(clippy::too_many_arguments)] // call sites are all in main.rs and stay readable
 pub async fn run(
     port: u16,
     bind_addr: Option<String>,
@@ -1885,7 +1938,34 @@ pub async fn run(
     _verbose: bool,
     env_keys: bool,
     migrate: bool,
+    enable_passthrough: bool,
+    allow_unauthenticated_passthrough: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY GATE — passthrough has no ATI-level auth until PR 2 wires HMAC
+    // sig-verify middleware. Refuse to start with `--enable-passthrough`
+    // unless the operator explicitly acknowledges this via
+    // `--allow-unauthenticated-passthrough`. Removing this gate is part of
+    // PR 2's diff (once sig-verify is mandatory for passthrough routes).
+    if enable_passthrough && !allow_unauthenticated_passthrough {
+        return Err(
+            "--enable-passthrough requires --allow-unauthenticated-passthrough \
+            until HMAC sig-verify lands in PR 2. Until then, passthrough routes have NO \
+            ATI-level authentication — every request reaching a passthrough route bypasses \
+            JWT validation, leaving only the upstream's own auth in place. If you understand \
+            and accept that, pass both flags. Otherwise, run without --enable-passthrough."
+                .into(),
+        );
+    }
+    if enable_passthrough && allow_unauthenticated_passthrough {
+        tracing::error!("*** PASSTHROUGH IS RUNNING UNAUTHENTICATED ***");
+        tracing::error!(
+            "Passthrough routes bypass JWT validation. ATI-level auth (HMAC sig-verify) \
+             arrives in PR 2. Until then, network access to this proxy = access to every \
+             upstream a passthrough manifest forwards to. Bind to a private interface, \
+             allowlist source IPs, or wait for PR 2 before using --enable-passthrough."
+        );
+    }
+
     // Load manifests
     let manifests_dir = ati_dir.join("manifests");
     let mut registry = ManifestRegistry::load(&manifests_dir)?;
@@ -2018,6 +2098,25 @@ pub async fn run(
     }
     let db_status = db.status();
 
+    // Build the passthrough router once at startup. When `--enable-passthrough`
+    // is off, leave it as None — the fallback handler then 404s every request
+    // that didn't hit a named route, matching today's behaviour.
+    let passthrough = if enable_passthrough {
+        match crate::core::passthrough::PassthroughRouter::build(&registry, &keyring) {
+            Ok(router) => {
+                tracing::info!(routes = router.len(), "passthrough router built");
+                Some(Arc::new(router))
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to build passthrough router");
+                return Err(Box::new(e));
+            }
+        }
+    } else {
+        None
+    };
+    let passthrough_count = passthrough.as_ref().map(|r| r.len()).unwrap_or(0);
+
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
@@ -2026,6 +2125,7 @@ pub async fn run(
         jwks_json,
         auth_cache: AuthCache::new(),
         db,
+        passthrough,
     });
 
     let app = build_router(state);
@@ -2048,6 +2148,7 @@ pub async fn run(
         skills = skill_count,
         keyring = keyring_source,
         db = db_status,
+        passthrough = passthrough_count,
         "ATI proxy server starting"
     );
     for (name, transport) in &mcp_providers {

@@ -13,6 +13,7 @@ pub mod logging;
 pub mod manifest;
 pub mod mcp_client;
 pub mod openapi;
+pub mod passthrough;
 pub mod rate;
 pub mod response;
 pub mod scope;

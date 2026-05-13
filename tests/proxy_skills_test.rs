@@ -31,6 +31,7 @@ fn build_app_with_skills(
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     build_router(state)
 }
@@ -49,6 +50,7 @@ fn build_app_with_skills_and_jwt(
         jwks_json: None,
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
+        passthrough: None,
     });
     build_router(state)
 }

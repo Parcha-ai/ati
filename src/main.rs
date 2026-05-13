@@ -157,6 +157,25 @@ pub enum Commands {
         /// they auto-apply. In production, prefer running migrations out-of-band.
         #[arg(long)]
         migrate: bool,
+        /// Enable raw HTTP passthrough routes from `handler = "passthrough"`
+        /// manifests. Off by default — the proxy only serves named ATI routes
+        /// (/call, /mcp, /skills*, etc.) unless this is set.
+        ///
+        /// When enabled the proxy becomes an edge-mode reverse proxy on top
+        /// of the existing tool-call API. Used for absorbing parcha-proxy's
+        /// role on the static-IP egress VM.
+        ///
+        /// **Until PR 2 lands (HMAC sig-verify middleware), passthrough has
+        /// no ATI-level authentication.** Starting with `--enable-passthrough`
+        /// will refuse unless `--allow-unauthenticated-passthrough` is also
+        /// set, to prevent accidental open exposure of upstream services.
+        #[arg(long)]
+        enable_passthrough: bool,
+        /// Explicit acknowledgment that passthrough is running without ATI
+        /// authentication. Required during the PR 1 → PR 2 window. Once
+        /// PR 2 ships sig-verify, this flag is removed.
+        #[arg(long)]
+        allow_unauthenticated_passthrough: bool,
     },
 }
 
@@ -672,12 +691,24 @@ async fn main() {
             ati_dir,
             env_keys,
             migrate,
+            enable_passthrough,
+            allow_unauthenticated_passthrough,
         } => {
             let dir = ati_dir
                 .as_deref()
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(cli::common::ati_dir);
-            proxy::server::run(*port, bind.clone(), dir, cli.verbose, *env_keys, *migrate).await
+            proxy::server::run(
+                *port,
+                bind.clone(),
+                dir,
+                cli.verbose,
+                *env_keys,
+                *migrate,
+                *enable_passthrough,
+                *allow_unauthenticated_passthrough,
+            )
+            .await
         }
     };
 
