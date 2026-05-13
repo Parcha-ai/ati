@@ -25,12 +25,25 @@ pub type SentryGuard = sentry::ClientInitGuard;
 #[cfg(not(feature = "sentry"))]
 pub type SentryGuard = ();
 
-/// Initialize the tracing subscriber and (optionally) Sentry.
+/// Bundle of guards returned by `init`. Holds Sentry's `ClientInitGuard`
+/// (when compiled+enabled) and ATI's `OtelGuard` (when compiled+enabled),
+/// either or both of which may be `None` at runtime depending on env config.
 ///
-/// Call once at program startup, before any `tracing` macros fire.
-/// The returned guard (if `Some`) must be held until program exit so
-/// that pending Sentry events are flushed on drop.
-pub fn init(mode: LogMode, verbose: bool) -> Option<SentryGuard> {
+/// The whole struct must be held until program exit so the `Drop`s fire and
+/// flush pending events / spans / metrics.
+#[derive(Default)]
+pub struct InitGuards {
+    pub sentry: Option<SentryGuard>,
+    #[cfg(feature = "otel")]
+    pub otel: Option<crate::core::otel::OtelGuard>,
+}
+
+/// Initialize the tracing subscriber and (optionally) Sentry + OpenTelemetry.
+///
+/// Call once at program startup, before any `tracing` macros fire. The
+/// returned guards must be held until program exit so pending events and
+/// spans get flushed on drop.
+pub fn init(mode: LogMode, verbose: bool) -> InitGuards {
     let filter = match std::env::var("RUST_LOG") {
         Ok(val) if !val.is_empty() => EnvFilter::from_default_env(),
         _ if verbose => EnvFilter::new("debug"),
@@ -40,6 +53,13 @@ pub fn init(mode: LogMode, verbose: bool) -> Option<SentryGuard> {
     // Init Sentry first (before subscriber) so sentry-tracing layer can be wired in.
     let sentry_guard = init_sentry();
 
+    // Init OTel before the subscriber so its layer can be wired in.
+    #[cfg(feature = "otel")]
+    let (otel_layer, otel_guard) = match crate::core::otel::try_init() {
+        Some((layer, guard)) => (Some(layer), Some(guard)),
+        None => (None, None),
+    };
+
     // Build the layered subscriber.
     // The sentry-tracing layer (when enabled) bridges tracing events to Sentry:
     //   error! → Sentry issue, warn!/info! → breadcrumbs.
@@ -47,6 +67,9 @@ pub fn init(mode: LogMode, verbose: bool) -> Option<SentryGuard> {
 
     #[cfg(feature = "sentry")]
     let registry = registry.with(sentry_guard.as_ref().map(|_| sentry_tracing::layer()));
+
+    #[cfg(feature = "otel")]
+    let registry = registry.with(otel_layer);
 
     match mode {
         LogMode::Proxy => {
@@ -81,21 +104,36 @@ pub fn init(mode: LogMode, verbose: bool) -> Option<SentryGuard> {
              Build with: cargo build --features sentry"
         );
     }
+    #[cfg(not(feature = "otel"))]
+    if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+        tracing::warn!(
+            "OTEL_EXPORTER_OTLP_ENDPOINT is set but this binary was compiled without the otel feature — ignoring. \
+             Build with: cargo build --features otel"
+        );
+    }
 
-    sentry_guard
+    InitGuards {
+        sentry: sentry_guard,
+        #[cfg(feature = "otel")]
+        otel: otel_guard,
+    }
 }
 
-/// Flush the Sentry transport queue before a non-returning exit
-/// (e.g. `process::exit`, which bypasses destructors). No-op when the
-/// `sentry` feature is disabled.
-#[cfg(feature = "sentry")]
-pub fn shutdown(guard: Option<SentryGuard>) {
-    drop(guard);
+/// Flush the Sentry transport queue and the OTel exporters before a
+/// non-returning exit (e.g. `process::exit`, which bypasses destructors).
+///
+/// Safe to call with `InitGuards::default()` — the inner `Option`s and the
+/// guards' `Drop` impls handle the "feature off or runtime-disabled" case.
+/// When neither `sentry` nor `otel` is compiled in, `InitGuards` has no
+/// non-trivial drop and this is a compile-time no-op.
+#[allow(clippy::needless_pass_by_value)]
+pub fn shutdown(_guards: InitGuards) {
+    // Body intentionally empty: dropping `_guards` at the end of this scope
+    // runs the (cfg-gated) `Drop` impls on `SentryGuard` / `OtelGuard`,
+    // which is what triggers the flush + shutdown. Calling `drop()`
+    // explicitly trips `clippy::drop_non_drop` when neither feature is
+    // compiled in.
 }
-
-#[cfg(not(feature = "sentry"))]
-#[inline]
-pub fn shutdown(_guard: Option<SentryGuard>) {}
 
 /// Initialize Sentry if a DSN is configured. Returns `None` when Sentry is
 /// disabled (no DSN, or feature not compiled in).

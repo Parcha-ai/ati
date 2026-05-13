@@ -358,6 +358,7 @@ async fn visible_skill_names_with_remote(
     Ok(names)
 }
 
+#[tracing::instrument(name = "proxy.call", skip_all, fields(tool = tracing::field::Empty))]
 async fn handle_call(
     State(state): State<Arc<ProxyState>>,
     req: HttpRequest<Body>,
@@ -397,6 +398,7 @@ async fn handle_call(
         }
     };
 
+    tracing::Span::current().record("tool", call_req.tool_name.as_str());
     tracing::debug!(
         tool = %call_req.tool_name,
         args = ?call_req.args,
@@ -736,6 +738,7 @@ async fn handle_call(
     response
 }
 
+#[tracing::instrument(name = "proxy.help", skip_all)]
 async fn handle_help(
     State(state): State<Arc<ProxyState>>,
     claims: Option<Extension<TokenClaims>>,
@@ -928,6 +931,7 @@ async fn handle_jwks(State(state): State<Arc<ProxyState>>) -> impl IntoResponse 
 // POST /mcp — MCP JSON-RPC proxy endpoint
 // ---------------------------------------------------------------------------
 
+#[tracing::instrument(name = "proxy.mcp", skip_all, fields(jsonrpc.method = tracing::field::Empty))]
 async fn handle_mcp(
     State(state): State<Arc<ProxyState>>,
     claims: Option<Extension<TokenClaims>>,
@@ -1939,7 +1943,72 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
             state.clone(),
             crate::core::sig_verify::sig_verify_middleware,
         ))
+        // Outermost layer — runs first on inbound, last on outbound. Mints
+        // one span per request with HTTP attributes and (when the `otel`
+        // feature is on and an exporter is configured) records the
+        // `ati.proxy.requests` counter + `ati.proxy.request_duration_ms`
+        // histogram. Cheap no-op when the feature is off.
+        .layer(axum::middleware::from_fn(observability_middleware))
         .with_state(state)
+}
+
+/// Per-request observability layer. Always mints a `tracing` span so events
+/// inside handlers nest under one identifiable parent; when the `otel`
+/// feature is compiled in (and an exporter is configured), the span is
+/// exported and request metrics are recorded.
+///
+/// Attributes follow OTel semantic conventions for HTTP servers:
+/// `http.request.method`, `http.route`, `http.response.status_code`.
+/// `http.route` falls back to the raw path when axum hasn't matched a route
+/// yet (e.g. the passthrough fallback).
+async fn observability_middleware(req: HttpRequest<Body>, next: Next) -> Response {
+    use tracing::Instrument as _;
+
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    // Prefer the matched-route template (`/skills/{name}`) when present so
+    // metric cardinality stays bounded; fall back to the raw path for
+    // passthrough/unmatched requests.
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| uri.path().to_string());
+
+    let span = tracing::info_span!(
+        "http.server.request",
+        "http.request.method" = %method,
+        "http.route" = %route,
+        "http.response.status_code" = tracing::field::Empty,
+    );
+
+    let start = std::time::Instant::now();
+    let response = next.run(req).instrument(span.clone()).await;
+    let status = response.status();
+    span.record("http.response.status_code", status.as_u16());
+
+    #[cfg(feature = "otel")]
+    {
+        if let Some(m) = crate::core::otel::metrics() {
+            use opentelemetry::KeyValue;
+            let status_class = format!("{}xx", status.as_u16() / 100);
+            let attrs = [
+                KeyValue::new("http.route", route.clone()),
+                KeyValue::new("http.request.method", method.to_string()),
+                KeyValue::new("http.response.status_class", status_class),
+            ];
+            m.proxy_requests.add(1, &attrs);
+            m.proxy_request_duration_ms
+                .record(start.elapsed().as_secs_f64() * 1000.0, &attrs);
+        }
+    }
+    #[cfg(not(feature = "otel"))]
+    {
+        // Keep the variables referenced so the no-feature build doesn't warn.
+        let _ = (&route, &method, start);
+    }
+
+    response
 }
 
 /// Install a SIGHUP handler that re-reads the keyring and hot-swaps the

@@ -24,6 +24,15 @@ sentry = ["dep:sentry", "dep:sentry-tracing"]
 # Optional Postgres persistence (virtual keys, call audit log).
 # Enable with --features db. Build remains static-musl-friendly: sqlx uses rustls.
 db = ["dep:sqlx"]
+# Optional OpenTelemetry traces + metrics over OTLP/HTTP-protobuf.
+# Off by default; enable with --features otel. HTTP-only exporter (no gRPC/tonic)
+# to keep the static-musl release binary small. See docs/OTEL.md.
+otel = [
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+  "dep:tracing-opentelemetry",
+]
 
 [dependencies]
 # CLI
@@ -49,6 +58,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Includes errors, traces, AND Sentry Logs (structured log forwarding).
 sentry = { version = "0.47", features = ["tracing", "logs", "reqwest", "rustls"], default-features = false, optional = true }
 sentry-tracing = { version = "0.47", optional = true }
+
+# Optional OpenTelemetry integration (off by default, enable with --features otel).
+# HTTP-protobuf transport only (no gRPC/tonic), reqwest-based, rustls — same
+# rationale as sentry above: keep the static-musl release binary lean.
+#
+# Version-pinning note: tracing-opentelemetry 0.32.x still tracks
+# opentelemetry/opentelemetry_sdk 0.31, so the whole quartet stays on 0.31
+# until tracing-opentelemetry catches up. Bumping any one of these alone
+# results in a "multiple versions of crate opentelemetry in the dependency
+# graph" compile error; bump them together when upgrading.
+opentelemetry = { version = "0.31", default-features = false, features = ["trace", "metrics"], optional = true }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "metrics", "rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-client", "trace", "metrics"], optional = true }
+tracing-opentelemetry = { version = "0.32", default-features = false, features = ["tracing-log"], optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
