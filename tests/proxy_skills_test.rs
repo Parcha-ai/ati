@@ -32,6 +32,15 @@ fn build_app_with_skills(
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     build_router(state)
 }
@@ -51,6 +60,15 @@ fn build_app_with_skills_and_jwt(
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     build_router(state)
 }

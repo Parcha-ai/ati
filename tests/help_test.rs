@@ -162,6 +162,15 @@ async fn test_proxy_help_returns_llm_recommendations() {
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     let app = build_router(state);
 
@@ -224,6 +233,15 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     let app = build_router(state);
 
@@ -263,6 +281,15 @@ async fn test_proxy_help_missing_llm_key_returns_503() {
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     let app = build_router(state);
 
@@ -313,6 +340,15 @@ async fn test_proxy_help_llm_error_returns_502() {
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     let app = build_router(state);
 
@@ -619,6 +655,15 @@ async fn test_proxy_help_excludes_internal_tools() {
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     });
     let app = build_router(state);
 

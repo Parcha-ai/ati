@@ -46,6 +46,15 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
         auth_cache: AuthCache::new(),
         db: ati::core::db::DbState::Disabled,
         passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
     })
 }
 

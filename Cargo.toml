@@ -59,6 +59,11 @@ toml = "0.8"
 aes-gcm = "0.10"
 hmac = "0.12"
 sha2 = "0.10"
+# Constant-time comparison for HMAC digest verification (core/sig_verify.rs).
+subtle = "2"
+# Atomic Arc-swap for hot-reloading the sandbox signing secret on SIGHUP
+# without restarting the proxy.
+arc-swap = "1"
 
 # JWT
 jsonwebtoken = "9"

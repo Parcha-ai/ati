@@ -165,17 +165,35 @@ pub enum Commands {
         /// of the existing tool-call API. Used for absorbing parcha-proxy's
         /// role on the static-IP egress VM.
         ///
-        /// **Until PR 2 lands (HMAC sig-verify middleware), passthrough has
-        /// no ATI-level authentication.** Starting with `--enable-passthrough`
-        /// will refuse unless `--allow-unauthenticated-passthrough` is also
-        /// set, to prevent accidental open exposure of upstream services.
+        /// Authentication for passthrough routes is provided by the HMAC
+        /// `sig-verify` middleware (always wired in PR 2; configurable via
+        /// `--sig-verify-mode`). Set `--sig-verify-mode enforce` in
+        /// production deployments.
         #[arg(long)]
         enable_passthrough: bool,
-        /// Explicit acknowledgment that passthrough is running without ATI
-        /// authentication. Required during the PR 1 → PR 2 window. Once
-        /// PR 2 ships sig-verify, this flag is removed.
+        /// HMAC signature verification mode for incoming sandbox requests.
+        ///
+        /// - `log` (default): always allow, structured-log signature validity.
+        ///   Safe rollout mode — flip to `enforce` after a 24h soak.
+        /// - `warn`: always allow, set `X-Signature-Status` on the response.
+        /// - `enforce`: reject invalid/missing signatures with `403 Forbidden`.
+        ///
+        /// The signing secret is read from the keyring entry
+        /// `sandbox_signing_shared_secret` at startup (and on SIGHUP once
+        /// PR 3's rotate-keyring subcommand lands). Missing secret in
+        /// `enforce` mode fails closed.
+        #[arg(long, value_enum, default_value_t = core::sig_verify::SigVerifyMode::Log)]
+        sig_verify_mode: core::sig_verify::SigVerifyMode,
+        /// Maximum allowed clock drift between sandbox and proxy in seconds.
+        /// Requests with `|now - t|` exceeding this are rejected
+        /// (`expired_timestamp_drift=<n>s`). Defaults to verify.py's 60s.
+        #[arg(long, default_value = "60")]
+        sig_drift_seconds: i64,
+        /// Comma-separated path globs exempt from signature verification.
+        /// Defaults to ATI's health/JWKS routes plus the package-cache + OTel
+        /// routes that Caddy didn't forward_auth either.
         #[arg(long)]
-        allow_unauthenticated_passthrough: bool,
+        sig_exempt_paths: Option<String>,
     },
 }
 
@@ -692,7 +710,9 @@ async fn main() {
             env_keys,
             migrate,
             enable_passthrough,
-            allow_unauthenticated_passthrough,
+            sig_verify_mode,
+            sig_drift_seconds,
+            sig_exempt_paths,
         } => {
             let dir = ati_dir
                 .as_deref()
@@ -706,7 +726,9 @@ async fn main() {
                 *env_keys,
                 *migrate,
                 *enable_passthrough,
-                *allow_unauthenticated_passthrough,
+                *sig_verify_mode,
+                *sig_drift_seconds,
+                sig_exempt_paths.clone(),
             )
             .await
         }
