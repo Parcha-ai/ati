@@ -1,0 +1,55 @@
+[Unit]
+Description=ATI proxy (edge VM)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ati
+Group=ati
+# ati_dir holds the encrypted keyring, the per-VM session key, AND the
+# manifests directory at `$ati_dir/manifests`. With `--ati-dir /var/lib/ati`
+# below, manifests live at `/var/lib/ati/manifests/`.
+Environment=ATI_DIR=/var/lib/ati
+WorkingDirectory=/var/lib/ati
+
+# --enable-passthrough turns on raw HTTP passthrough routes from
+# manifests/*.toml.
+#
+# --sig-verify-mode starts in `log` for safe rollout; flip to `enforce`
+# after a 24h soak with zero unsigned/invalid requests. NEVER deploy
+# `--sig-verify-mode log` AND `--enable-passthrough` to a public-facing
+# interface — passthrough has no other authentication layer.
+ExecStart=/usr/local/bin/ati proxy \
+    --bind 127.0.0.1 \
+    --port 8080 \
+    --ati-dir /var/lib/ati \
+    --enable-passthrough \
+    --sig-verify-mode log \
+    --sig-drift-seconds 60
+
+Restart=on-failure
+RestartSec=3s
+
+# Tightenings — sandboxed services that mlock keyring memory like this
+# benefit from explicit hardening.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ati /var/log/ati
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+LockPersonality=true
+RestrictRealtime=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# mlock'ing the keyring memory needs MEMLOCK; bump if you see EAGAIN
+# in the proxy logs at startup.
+LimitMEMLOCK=64M
+
+[Install]
+WantedBy=multi-user.target
