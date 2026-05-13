@@ -941,6 +941,11 @@ async fn handle_mcp(
     let scopes = scopes_for_request(claims.as_ref(), &state);
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
+    // Record the JSON-RPC method onto the span so /mcp spans in any OTel
+    // backend carry the actual method (`tools/call`, `tools/list`,
+    // `initialize`, …) instead of the empty placeholder declared in the
+    // `#[tracing::instrument]` `fields(...)` clause.
+    tracing::Span::current().record("jsonrpc.method", method);
     tracing::info!(
         %method,
         agent = claims.as_ref().map(|c| c.sub.as_str()).unwrap_or(""),
