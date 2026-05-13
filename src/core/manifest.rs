@@ -726,13 +726,20 @@ impl ManifestRegistry {
                     }
                 }
                 if p.forward_websockets {
-                    return Err(ManifestError::Invalid(
-                        path.display().to_string(),
-                        "forward_websockets is not yet supported — WebSocket \
-                         passthrough is tracked as a follow-up to PR 1 of \
-                         issue #94"
-                            .to_string(),
-                    ));
+                    // PR 5 (#94) enables WebSocket passthrough. Require
+                    // `http://` or `https://` base_url — the proxy derives
+                    // ws/wss automatically. Catch a typo at load time
+                    // rather than on the first WS request.
+                    if !(p.base_url.starts_with("http://") || p.base_url.starts_with("https://")) {
+                        return Err(ManifestError::Invalid(
+                            path.display().to_string(),
+                            format!(
+                                "forward_websockets requires base_url to use http:// or https:// \
+                                 (proxy derives ws/wss automatically); got: {}",
+                                p.base_url
+                            ),
+                        ));
+                    }
                 }
                 if let Some((ref from, _)) = p.path_replace {
                     if !from.starts_with('/') {

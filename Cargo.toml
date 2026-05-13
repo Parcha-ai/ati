@@ -40,7 +40,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "str
 bytes = "1"
 
 # HTTP server (for `ati proxy`)
-axum = { version = "0.8", features = ["json"] }
+axum = { version = "0.8", features = ["json", "ws"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -106,6 +106,10 @@ pin-project-lite = "0.2"
 # URL parsing — already pulled transitively via reqwest, named explicitly so the
 # passthrough builder can validate base_url at manifest load.
 url = "2"
+# WebSocket client used by core/passthrough.rs to relay sandbox WS frames
+# to upstream services (Browserbase CDP traffic, etc.). connect_async for
+# the upstream side; axum's ws feature handles the downstream side.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 rand = "0.8"
 strsim = "0.11.1"
 
@@ -136,3 +140,5 @@ predicates = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "stream"], default-features = false }
+# Used by tests/passthrough_ws_test.rs to drive a real WS client + server.
+tokio-tungstenite = "0.24"
