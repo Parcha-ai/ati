@@ -1,0 +1,11 @@
+# Base passthrough route: /api/* → mock_http echo upstream (no auth).
+[provider]
+name = "passthrough_echo"
+description = "E2E: plain echo passthrough"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_HTTP__"
+path_prefix = "/api"
+strip_prefix = true
+auth_type = "none"
+max_request_bytes = 1048576       # 1 MiB cap for C10 test (200KB POST triggers 413)
+max_response_bytes = 524288       # 512 KiB cap for C11 test (1MB resp gets cut)

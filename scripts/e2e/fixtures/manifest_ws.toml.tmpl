@@ -1,0 +1,15 @@
+# WebSocket-enabled passthrough route. forward_websockets=true upgrades
+# /ws/* connections to the mock_ws.py echo server. auth header injected on
+# upgrade.
+[provider]
+name = "passthrough_ws"
+description = "E2E: WebSocket passthrough"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_WS__"
+path_prefix = "/ws"
+strip_prefix = true
+auth_type = "header"
+auth_key_name = "bb_api_key"
+auth_header_name = "X-BB-API-Key"
+forward_websockets = true
+connect_timeout_seconds = 3

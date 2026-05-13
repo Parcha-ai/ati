@@ -1,0 +1,11 @@
+# Passthrough route with forward_websockets explicitly OFF — used to
+# verify a WS upgrade request is rejected.
+[provider]
+name = "passthrough_ws_off"
+description = "E2E: WS upgrade rejected when not enabled"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_WS__"
+path_prefix = "/wsoff"
+strip_prefix = true
+auth_type = "none"
+forward_websockets = false

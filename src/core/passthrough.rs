@@ -433,6 +433,10 @@ const HOP_BY_HOP: &[&str] = &[
     "proxy-authenticate",
     "proxy-authorization",
     "te",
+    // RFC 7230 §6.1 spells this header "Trailer" (singular). "Trailers"
+    // (plural) is a *value* of TE: trailers, not a header name. Both are
+    // listed so a misspelling on either side gets stripped.
+    "trailer",
     "trailers",
     "transfer-encoding",
     "upgrade",
@@ -465,11 +469,36 @@ fn is_sandbox_internal_header(name: &str) -> bool {
     n.starts_with("x-sandbox-")
 }
 
+/// Collect the header names listed inside `Connection: a, b, c` — per
+/// RFC 7230 §6.1 these are also hop-by-hop and MUST NOT be forwarded
+/// downstream. Returned lower-cased for case-insensitive comparison.
+fn connection_hop_names(src: &HeaderMap) -> Vec<String> {
+    let mut names = Vec::new();
+    for v in src.get_all(axum::http::header::CONNECTION).iter() {
+        if let Ok(s) = v.to_str() {
+            for part in s.split(',') {
+                let trimmed = part.trim();
+                if !trimmed.is_empty() {
+                    names.push(trimmed.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    names
+}
+
 fn filter_request_headers(src: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::with_capacity(src.len());
+    let conn_hops = connection_hop_names(src);
     for (name, value) in src.iter() {
         let n = name.as_str();
         if HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(n)) {
+            continue;
+        }
+        // RFC 7230 §6.1: any header listed in `Connection:` is hop-by-hop.
+        // Without this the sandbox could leak custom transport-coupled
+        // headers (e.g. `Connection: keep-alive, X-Sandbox-Hop`) upstream.
+        if conn_hops.iter().any(|h| h.eq_ignore_ascii_case(n)) {
             continue;
         }
         if is_sandbox_internal_header(n) {
@@ -902,6 +931,21 @@ async fn handle_passthrough_ws(
     // for the upstream connection.
     let client_headers = filter_ws_client_headers(req.headers());
 
+    // Capture the client's offered subprotocols up front. axum's
+    // WebSocketUpgrade::from_request consumes the request and would
+    // otherwise leave the inbound 101 with no Sec-WebSocket-Protocol — so
+    // even when the upstream picks one, the sandbox client sees nothing
+    // negotiated. We mirror tokio_tungstenite's selection (first offered
+    // subprotocol) on the inbound side via WebSocketUpgrade::protocols.
+    let offered_subprotocols: Vec<String> = client_headers
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(','))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     let upgrade = match WebSocketUpgrade::from_request(req, &()).await {
         Ok(u) => u,
         Err(rej) => {
@@ -911,6 +955,11 @@ async fn handle_passthrough_ws(
             );
             return rej.into_response();
         }
+    };
+    let upgrade = if offered_subprotocols.is_empty() {
+        upgrade
+    } else {
+        upgrade.protocols(offered_subprotocols)
     };
     let route_for_log = route.name.clone();
     upgrade.on_upgrade(move |socket| async move {
@@ -953,9 +1002,18 @@ fn urlencode(value: &str) -> String {
 /// can need.
 fn filter_ws_client_headers(src: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::with_capacity(src.len());
+    // RFC 7230 §6.1: headers named in `Connection:` are hop-by-hop. The HTTP
+    // path strips these in `filter_request_headers`; the WS upgrade path is
+    // a real socket too and the same leak applies — `Connection: keep-alive,
+    // X-Custom-Hop` would otherwise drop `Connection` but forward
+    // `X-Custom-Hop` verbatim to the upstream. (Greptile #99 P1)
+    let conn_hops = connection_hop_names(src);
     for (name, value) in src.iter() {
         let n = name.as_str();
         if HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(n)) {
+            continue;
+        }
+        if conn_hops.iter().any(|h| h.eq_ignore_ascii_case(n)) {
             continue;
         }
         if is_sandbox_internal_header(n) {

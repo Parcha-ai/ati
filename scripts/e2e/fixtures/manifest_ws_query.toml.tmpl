@@ -1,0 +1,13 @@
+# WS route with auth_type=query — auth_query_name injects ?token=<key>
+# on the upgrade URL (Greptile #98 P1 regression guard).
+[provider]
+name = "passthrough_ws_q"
+description = "E2E: WS auth_query injection"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_WS__"
+path_prefix = "/wsq"
+strip_prefix = true
+auth_type = "query"
+auth_key_name = "bb_api_key"
+auth_query_name = "token"
+forward_websockets = true
