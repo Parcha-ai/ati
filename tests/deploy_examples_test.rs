@@ -151,8 +151,7 @@ fn caddyfile_default_is_https_redirect_not_plain_proxy() {
          commented opt-in block. Got active lines:\n{active}"
     );
     assert!(
-        !active.contains(":80 {\n\treverse_proxy")
-            && !active.contains(":80 {\n    reverse_proxy"),
+        !active.contains(":80 {\n\treverse_proxy") && !active.contains(":80 {\n    reverse_proxy"),
         "Caddyfile :80 must NOT plaintext-reverse_proxy by default. \
          Got active lines:\n{active}"
     );
