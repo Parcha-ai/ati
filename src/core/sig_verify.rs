@@ -556,16 +556,25 @@ mod tests {
         assert!(verify(&cfg, "GET", "/x", Some(&format!("t={ts},s={new_sig}")), ts).is_valid());
     }
 
+    /// Process-wide mutex around `ATI_KEY_*` env-var mutation. `Keyring::from_env`
+    /// scans the whole environment, so two concurrent unit tests touching the
+    /// same prefix would race and intermittently fail — Greptile P2 on PR #96.
+    fn env_mutex() -> &'static std::sync::Mutex<()> {
+        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn keyring_secret_hex_decode_preferred_with_utf8_fallback() {
         use crate::core::keyring::Keyring;
-        // First case: pure hex string in keyring → decoded as bytes.
-        let key_hex = "abcd1234";
+        let _guard = env_mutex().lock().unwrap_or_else(|p| p.into_inner());
+
         let env_var = format!("ATI_KEY_{}", SECRET_KEY_NAME.to_uppercase());
-        std::env::set_var(&env_var, key_hex);
+
+        // First case: pure hex string in keyring → decoded as bytes.
+        std::env::set_var(&env_var, "abcd1234");
         let kr = Keyring::from_env();
         std::env::remove_var(&env_var);
-
         let cfg =
             SigVerifyConfig::build(SigVerifyMode::Enforce, 60, DEFAULT_EXEMPT_PATHS, &kr).unwrap();
         let stored = cfg.secret.load();
@@ -581,6 +590,20 @@ mod tests {
         let stored = cfg.secret.load();
         let bytes = stored.as_ref().unwrap();
         assert_eq!(&**bytes, b"not-hex-string!".as_ref());
+    }
+
+    #[test]
+    fn reload_intentional_empty_clears_secret() {
+        // Sanity: when the operator deliberately removes the keyring entry
+        // and calls reload(), the secret IS cleared. The Greptile P1 fix on
+        // PR #96 is about NOT calling reload on transient I/O failures —
+        // not about changing reload's own semantics.
+        let cfg = cfg_with_secret(SigVerifyMode::Enforce, Some(b"v1"));
+        cfg.reload(&crate::core::keyring::Keyring::empty());
+        assert!(
+            cfg.secret.load().is_none(),
+            "reload(empty_keyring) must clear the secret — intentional removal"
+        );
     }
 
     #[test]

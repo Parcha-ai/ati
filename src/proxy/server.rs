@@ -1962,37 +1962,72 @@ fn install_sighup_reload_handler(state: Arc<ProxyState>, ati_dir: PathBuf, env_k
         };
         while sig.recv().await.is_some() {
             tracing::info!("SIGHUP received — reloading keyring and sig-verify secret");
-            let kr = reload_keyring(&ati_dir, env_keys);
-            state.sig_verify.reload(&kr);
+            match reload_keyring(&ati_dir, env_keys) {
+                Ok(kr) => {
+                    // Keyring re-read successfully (even if empty by design).
+                    // Apply the new state — secret may legitimately be removed,
+                    // and ArcSwapOption::store(None) is the right thing then.
+                    state.sig_verify.reload(&kr);
+                }
+                Err(e) => {
+                    // Transient read/decrypt failure. PRESERVE the previously
+                    // loaded secret — otherwise a single disk hiccup turns the
+                    // proxy into a 403 machine in enforce mode (Greptile P1 on
+                    // PR #96). The operator can re-issue SIGHUP after fixing
+                    // the underlying problem.
+                    tracing::error!(
+                        error = %e,
+                        "keyring reload failed on SIGHUP — keeping previously loaded secret in place"
+                    );
+                }
+            }
         }
     });
 }
 
 /// Re-read the keyring from disk (or environment, with `--env-keys`).
-/// Mirrors the cascade in `run()`. Logs but doesn't fail on errors — a
-/// transient read failure during SIGHUP shouldn't take the proxy down.
-fn reload_keyring(ati_dir: &Path, env_keys: bool) -> Keyring {
+/// Returns `Err` ONLY for transient/structural failures the caller should
+/// recover from (file present but undecryptable, credentials file present
+/// but corrupt). Returns `Ok(Keyring::empty())` if no keyring is configured
+/// at all — that's a legitimate config state, not a failure.
+///
+/// The distinction matters for SIGHUP reload: on `Err` the proxy must keep
+/// the previously-loaded sig-verify secret in place; on `Ok(empty)` the
+/// operator has intentionally removed the keyring and the secret should go
+/// with it.
+fn reload_keyring(ati_dir: &Path, env_keys: bool) -> Result<Keyring, Box<dyn std::error::Error>> {
     if env_keys {
-        return Keyring::from_env();
+        return Ok(Keyring::from_env());
     }
     let keyring_path = ati_dir.join("keyring.enc");
     if keyring_path.exists() {
         if let Ok(kr) = Keyring::load(&keyring_path) {
-            return kr;
+            return Ok(kr);
         }
         if let Ok(kr) = Keyring::load_local(&keyring_path, ati_dir) {
-            return kr;
+            return Ok(kr);
         }
-        tracing::warn!("keyring.enc exists but could not be decrypted on SIGHUP");
-        return Keyring::empty();
+        return Err(format!(
+            "keyring.enc at {} exists but could not be decrypted",
+            keyring_path.display()
+        )
+        .into());
     }
     let creds_path = ati_dir.join("credentials");
     if creds_path.exists() {
-        if let Ok(kr) = Keyring::load_credentials(&creds_path) {
-            return kr;
+        match Keyring::load_credentials(&creds_path) {
+            Ok(kr) => return Ok(kr),
+            Err(e) => {
+                return Err(format!(
+                    "credentials file at {} present but could not be parsed: {e}",
+                    creds_path.display()
+                )
+                .into());
+            }
         }
     }
-    Keyring::empty()
+    // No keyring configured at all — legitimate empty state.
+    Ok(Keyring::empty())
 }
 
 // --- Server startup ---
@@ -2196,11 +2231,17 @@ pub async fn run(
         )
         .into());
     }
-    // Soft warning: passthrough enabled but sig-verify in Log mode + no secret
-    // = wide open. Mirror PR 1's loud warning so we don't regress.
-    if enable_passthrough && (sig_verify_mode == SigVerifyMode::Log) && !sig_secret_loaded {
+    // Soft warning: passthrough enabled with non-blocking sig-verify (Log OR
+    // Warn) AND no secret in the keyring = passthrough is effectively
+    // unauthenticated. Mirror PR 1's loud warning so we don't regress.
+    // Greptile review on #96 flagged that the original check only fired in
+    // Log mode; Warn is just as porous — it adds a response header but never
+    // returns 403.
+    let non_blocking = matches!(sig_verify_mode, SigVerifyMode::Log | SigVerifyMode::Warn);
+    if enable_passthrough && non_blocking && !sig_secret_loaded {
         tracing::error!(
-            "*** SIG-VERIFY IS LOG-ONLY AND NO SECRET IS CONFIGURED — passthrough is \
+            mode = ?sig_verify_mode,
+            "*** SIG-VERIFY IS NON-BLOCKING AND NO SECRET IS CONFIGURED — passthrough is \
              effectively unauthenticated. Flip to --sig-verify-mode enforce + load \
              the keyring entry '{SECRET_KEY_NAME}' before exposing this to untrusted \
              networks."

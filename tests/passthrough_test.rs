@@ -1372,13 +1372,17 @@ fn ati_proxy_starts_in_log_mode_without_secret() {
     // posture — it logs validity but never blocks. The proxy emits a
     // warning at startup, then continues binding.
     //
-    // Verified by passing `--port 0` (ephemeral; bound + immediately
-    // closed) and checking the proxy printed its "starting" log line
-    // before we kill it. assert_cmd doesn't help here because run() never
-    // exits on success — instead we use a subprocess + a timeout that
-    // expects the proxy to STILL be running.
+    // Verified by polling for the proxy's "ATI proxy server starting"
+    // log line on stderr (rather than a fixed sleep — Greptile #96 P2
+    // flagged the original 2s sleep as flake-prone under CI load). We
+    // wait up to 30s for the line; if it appears the proxy is healthy.
     use assert_cmd::cargo::CommandCargoExt;
+    use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
     let dir = TempDir::new().unwrap();
     let manifests = dir.path().join("manifests");
     std::fs::create_dir_all(&manifests).unwrap();
@@ -1395,18 +1399,55 @@ fn ati_proxy_starts_in_log_mode_without_secret() {
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env("RUST_LOG", "info")
         .spawn()
         .expect("spawn ati");
 
-    // Give it 2s to either exit (bad) or stay running (good).
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    let still_running = child.try_wait().expect("wait").is_none();
+    // Stream stderr (where tracing-subscriber emits in proxy mode by default)
+    // into a channel; bail when we see the startup marker, or when the
+    // process exits.
+    let stderr = child.stderr.take().expect("stderr pipe");
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader_handle = thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut saw_startup = false;
+    let mut buffered = Vec::new();
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(line) => {
+                if line.contains("ATI proxy server starting") {
+                    saw_startup = true;
+                    break;
+                }
+                buffered.push(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(exit) = child.try_wait().expect("wait") {
+                    let _ = reader_handle.join();
+                    panic!(
+                        "proxy exited (code={exit:?}) before logging startup marker; stderr so far:\n{}",
+                        buffered.join("\n")
+                    );
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
     let _ = child.kill();
     let _ = child.wait();
+    let _ = reader_handle.join();
 
     assert!(
-        still_running,
-        "log mode without secret should not exit the proxy"
+        saw_startup,
+        "log mode without secret should reach the startup log line"
     );
 }
 
