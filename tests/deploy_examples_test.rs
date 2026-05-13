@@ -98,8 +98,68 @@ fn rotate_keyring_timer_and_service_pair_up() {
     let timer = std::fs::read_to_string(examples_dir().join("systemd/ati-rotate-keyring.timer"))
         .expect("rotate-keyring timer present");
     assert!(service.contains("ati edge rotate-keyring"));
-    assert!(service.contains("OP_SERVICE_ACCOUNT_TOKEN"));
     assert!(timer.contains("OnCalendar"));
+
+    // Greptile P1 regression guard on PR #97. The original unit set
+    //   Environment=OP_SERVICE_ACCOUNT_TOKEN=%d/op-token
+    // which substitutes a FILE PATH into the env var, not the token's
+    // contents. op authentication would fail on every rotation. The fix
+    // is to pass `--op-token-file %d/op-token` so the binary reads the
+    // file at runtime and exports the value into op's env explicitly.
+    assert!(
+        service.contains("--op-token-file %d/op-token"),
+        "rotate-keyring service must use --op-token-file with the credentials \
+         directory path (NOT Environment=OP_SERVICE_ACCOUNT_TOKEN=%d/op-token, \
+         which would set the env var to a file path string); got:\n{service}"
+    );
+    assert!(
+        !service.contains("Environment=OP_SERVICE_ACCOUNT_TOKEN="),
+        "rotate-keyring service must NOT set OP_SERVICE_ACCOUNT_TOKEN via \
+         Environment= — that would forward the literal `%d/op-token` path \
+         instead of the token value; got:\n{service}"
+    );
+    assert!(
+        service.contains("LoadCredential=op-token:"),
+        "rotate-keyring service must still use LoadCredential= so systemd \
+         restricts the token file's visibility to this unit; got:\n{service}"
+    );
+}
+
+#[test]
+fn readme_targets_manifests_to_ati_dir_manifests() {
+    // Greptile P1 regression guard on PR #97. The original README told
+    // operators to copy manifests to /etc/ati/manifests/, but the proxy
+    // resolves them as `<ati_dir>/manifests/` = /var/lib/ati/manifests/.
+    //
+    // The fixed README does still MENTION /etc/ati/manifests/ once, in a
+    // "NOT this path" warning. We allow that single mention but require
+    // that the canonical /var/lib/ati/manifests/ appears more often.
+    let readme = std::fs::read_to_string(examples_dir().join("README.md")).expect("README present");
+    let canonical_count = readme.matches("/var/lib/ati/manifests").count();
+    let wrong_count = readme.matches("/etc/ati/manifests").count();
+    assert!(
+        canonical_count >= 2,
+        "README must point manifests at /var/lib/ati/manifests/ in setup AND ops sections (found {canonical_count} mention(s))"
+    );
+    assert!(
+        wrong_count <= 1,
+        "README mentions /etc/ati/manifests/ {wrong_count} times; only a single \"NOT this path\" \
+         warning is allowed — operators must not be told to copy manifests there"
+    );
+}
+
+#[test]
+fn ati_service_comment_documents_correct_manifest_dir() {
+    let unit = std::fs::read_to_string(examples_dir().join("systemd/ati.service"))
+        .expect("ati.service present");
+    assert!(
+        !unit.contains("/etc/ati/manifests"),
+        "ati.service must not reference /etc/ati/manifests; got:\n{unit}"
+    );
+    assert!(
+        unit.contains("/var/lib/ati"),
+        "ati.service must reference /var/lib/ati as the ATI dir; got:\n{unit}"
+    );
 }
 
 #[test]

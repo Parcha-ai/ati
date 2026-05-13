@@ -62,8 +62,7 @@ npm install -g verdaccio
 
 # 3. Drop ATI's user
 useradd --system --no-create-home --shell /usr/sbin/nologin ati
-mkdir -p /etc/ati/manifests /var/lib/ati
-chown -R ati:ati /etc/ati /var/lib/ati
+install -d -o ati -g ati -m 0750 /var/lib/ati
 
 # 4. Copy this template's configs into place
 cp deploy/examples/vm/caddy/Caddyfile         /etc/caddy/Caddyfile
@@ -72,20 +71,30 @@ cp deploy/examples/vm/systemd/ati-rotate-keyring.service /etc/systemd/system/
 cp deploy/examples/vm/systemd/ati-rotate-keyring.timer   /etc/systemd/system/
 cp deploy/examples/vm/haproxy/haproxy.cfg.example        /etc/haproxy/haproxy.cfg
 cp deploy/examples/vm/verdaccio/config.yaml.example      /etc/verdaccio/config.yaml
-cp deploy/examples/vm/manifests/*.toml                   /etc/ati/manifests/
+install -d -o ati -g ati -m 0750 /var/lib/ati/manifests
+cp deploy/examples/vm/manifests/*.toml                   /var/lib/ati/manifests/
+chown -R ati:ati /var/lib/ati/manifests
+# NOTE: the proxy resolves the manifest directory as `<ati_dir>/manifests`.
+# `ati.service` passes `--ati-dir /var/lib/ati`, so manifests must live at
+# `/var/lib/ati/manifests/` — NOT `/etc/ati/manifests/`.
 
 # 5. Author your manifests
-#    Each file in /etc/ati/manifests/ describes one upstream. See
+#    Each file in /var/lib/ati/manifests/ describes one upstream. See
 #    example-passthrough.toml for the shape. Real production deployments
 #    will have one manifest per upstream service (LiteLLM, Browserbase,
 #    code.storage, Grafana OTel, devpi, verdaccio).
+#    The manifest dir is `<ati_dir>/manifests`. `ati.service` uses
+#    `--ati-dir /var/lib/ati`, so this is the canonical location.
 
-# 6. Bootstrap the keyring from 1Password
-sudo -u ati env OP_SERVICE_ACCOUNT_TOKEN=$(cat /etc/op-service-account-token) \
-  ati edge bootstrap-keyring \
-    --vault "Production Secrets" \
-    --item "ATI Edge VM Keyring" \
-    --ati-dir /var/lib/ati
+# 6. Bootstrap the keyring from 1Password. --op-token-file reads the
+#    contents of the file and passes them to `op` via env var (the
+#    token, NOT the path — see ati-rotate-keyring.service's LoadCredential=
+#    block for the systemd-managed equivalent).
+sudo -u ati ati edge bootstrap-keyring \
+  --vault "Production Secrets" \
+  --item "ATI Edge VM Keyring" \
+  --ati-dir /var/lib/ati \
+  --op-token-file /etc/op-service-account-token
 
 # 7. Start services
 systemctl daemon-reload
@@ -103,12 +112,12 @@ curl -fsS http://localhost:8080/health
 Triggered automatically by the systemd timer (default: weekly at 03:00 UTC).
 Manual rotation:
 ```bash
-sudo -u ati env OP_SERVICE_ACCOUNT_TOKEN=$(cat /etc/op-service-account-token) \
-  ati edge rotate-keyring \
-    --vault "Production Secrets" \
-    --item "ATI Edge VM Keyring" \
-    --ati-dir /var/lib/ati \
-    --service ati
+sudo -u ati ati edge rotate-keyring \
+  --vault "Production Secrets" \
+  --item "ATI Edge VM Keyring" \
+  --ati-dir /var/lib/ati \
+  --op-token-file /etc/op-service-account-token \
+  --service ati
 ```
 The command writes the new keyring atomically (tempfile + `rename(2)`),
 then sends `SIGHUP` to the running `ati.service`. The proxy hot-reloads

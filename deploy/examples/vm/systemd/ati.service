@@ -7,8 +7,9 @@ Wants=network-online.target
 Type=simple
 User=ati
 Group=ati
-# ati_dir holds the encrypted keyring + the per-VM session key.
-# Manifests are loaded from /etc/ati/manifests/.
+# ati_dir holds the encrypted keyring, the per-VM session key, AND the
+# manifests directory at `$ati_dir/manifests`. With `--ati-dir /var/lib/ati`
+# below, manifests live at `/var/lib/ati/manifests/`.
 Environment=ATI_DIR=/var/lib/ati
 WorkingDirectory=/var/lib/ati
 

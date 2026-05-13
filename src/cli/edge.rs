@@ -46,12 +46,20 @@ pub fn execute(subcmd: &crate::EdgeCommands) -> Result<(), Box<dyn std::error::E
             item,
             ati_dir,
             op_path,
-        } => bootstrap_keyring(vault, item, ati_dir.as_deref(), op_path.as_deref()),
+            op_token_file,
+        } => bootstrap_keyring(
+            vault,
+            item,
+            ati_dir.as_deref(),
+            op_path.as_deref(),
+            op_token_file.as_deref(),
+        ),
         crate::EdgeCommands::RotateKeyring {
             vault,
             item,
             ati_dir,
             op_path,
+            op_token_file,
             service,
             no_signal,
         } => rotate_keyring(
@@ -59,6 +67,7 @@ pub fn execute(subcmd: &crate::EdgeCommands) -> Result<(), Box<dyn std::error::E
             item,
             ati_dir.as_deref(),
             op_path.as_deref(),
+            op_token_file.as_deref(),
             service,
             *no_signal,
         ),
@@ -81,11 +90,17 @@ fn bootstrap_keyring(
     item: &str,
     ati_dir_override: Option<&str>,
     op_path_override: Option<&str>,
+    op_token_file: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ati_dir = resolve_ati_dir(ati_dir_override);
     std::fs::create_dir_all(&ati_dir)?;
 
-    let plaintext = fetch_keyring_json(vault, item, &resolve_op_path(op_path_override))?;
+    let plaintext = fetch_keyring_json(
+        vault,
+        item,
+        &resolve_op_path(op_path_override),
+        op_token_file,
+    )?;
     let key_path = ati_dir.join(".keyring-key");
     let session_key = load_or_generate_session_key(&key_path)?;
     let encrypted = encrypt_keyring(&session_key, &plaintext)?;
@@ -105,6 +120,7 @@ fn rotate_keyring(
     item: &str,
     ati_dir_override: Option<&str>,
     op_path_override: Option<&str>,
+    op_token_file: Option<&str>,
     service: &str,
     no_signal: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -128,7 +144,12 @@ fn rotate_keyring(
     }
 
     let session_key = read_persistent_key(&key_path)?;
-    let plaintext = fetch_keyring_json(vault, item, &resolve_op_path(op_path_override))?;
+    let plaintext = fetch_keyring_json(
+        vault,
+        item,
+        &resolve_op_path(op_path_override),
+        op_token_file,
+    )?;
     let encrypted = encrypt_keyring(&session_key, &plaintext)?;
     atomic_write(&keyring_path, &encrypted)?;
     println!(
@@ -192,8 +213,21 @@ fn fetch_keyring_json(
     vault: &str,
     item: &str,
     op_path: &str,
+    op_token_file: Option<&str>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let output = Command::new(op_path)
+    // Optionally read the 1Password service-account token from a file and
+    // pass it to `op` via env var. Used by the systemd timer with
+    // LoadCredential=: the file lives at $CREDENTIALS_DIRECTORY/op-token
+    // and we read its CONTENTS into the env var op expects (NOT the path —
+    // Greptile P1 on PR #97 flagged the previous `%d/op-token`
+    // substitution as setting the env var to a path string).
+    let mut cmd = Command::new(op_path);
+    if let Some(path) = op_token_file {
+        let token = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read --op-token-file '{path}': {e}"))?;
+        cmd.env("OP_SERVICE_ACCOUNT_TOKEN", token.trim());
+    }
+    let output = cmd
         .arg("item")
         .arg("get")
         .arg("--vault")
@@ -327,6 +361,18 @@ fn find_service_pid(service: &str) -> Result<Option<i32>, std::io::Error> {
 
 #[cfg(unix)]
 fn send_sighup(pid: i32) -> Result<(), std::io::Error> {
+    // Defense-in-depth (Greptile P3 nit on PR #97): refuse to deliver SIGHUP
+    // to anything but a normal positive PID. systemd returns 0 for inactive
+    // services (handled by find_service_pid → Ok(None) before we reach here),
+    // -1 is the broadcast-to-all sentinel for libc::kill, and other small
+    // negative values target whole process groups. None of those are
+    // appropriate for "signal the running ati proxy."
+    if pid <= 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to signal PID {pid}: only positive PIDs allowed"),
+        ));
+    }
     let ret = unsafe { libc::kill(pid, libc::SIGHUP) };
     if ret == 0 {
         Ok(())
@@ -393,8 +439,14 @@ mod tests {
 
     /// Build a fake `op` shim that echoes a known JSON payload. Used by the
     /// fetch / bootstrap tests so we don't depend on the real 1Password CLI.
+    ///
+    /// Each shim gets a unique filename so callers can stand up multiple
+    /// shims in the same TempDir (e.g. v1 + v2 in the rotate test).
     fn fake_op_shim(dir: &Path, payload: &str) -> PathBuf {
-        let path = dir.join("op-shim");
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("op-shim-{n}"));
         let script = format!("#!/bin/sh\ncat <<'EOF'\n{payload}\nEOF\n");
         std::fs::write(&path, script).unwrap();
         #[cfg(unix)]
@@ -417,7 +469,7 @@ mod tests {
             ]
         }"#;
         let op = fake_op_shim(dir.path(), payload);
-        let bytes = fetch_keyring_json("Vault", "Item", op.to_str().unwrap()).unwrap();
+        let bytes = fetch_keyring_json("Vault", "Item", op.to_str().unwrap(), None).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(obj.get("browserbase_api_key").unwrap(), "bb_live_X");
@@ -437,7 +489,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let payload = r#"{ "fields": [] }"#;
         let op = fake_op_shim(dir.path(), payload);
-        let err = fetch_keyring_json("V", "I", op.to_str().unwrap()).unwrap_err();
+        let err = fetch_keyring_json("V", "I", op.to_str().unwrap(), None).unwrap_err();
         assert!(err.to_string().contains("no labeled fields"));
     }
 
@@ -451,7 +503,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let err = fetch_keyring_json("V", "I", path.to_str().unwrap()).unwrap_err();
+        let err = fetch_keyring_json("V", "I", path.to_str().unwrap(), None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("op"), "{msg}");
     }
@@ -473,6 +525,7 @@ mod tests {
             "Item",
             Some(dir.path().to_str().unwrap()),
             Some(op.to_str().unwrap()),
+            None,
         )
         .unwrap();
         // Decrypt the way the proxy would on cold start.
@@ -495,6 +548,7 @@ mod tests {
             "I",
             Some(dir.path().to_str().unwrap()),
             Some(op_v1.to_str().unwrap()),
+            None,
         )
         .unwrap();
         let key_before = std::fs::read(dir.path().join(".keyring-key")).unwrap();
@@ -506,6 +560,7 @@ mod tests {
             "I",
             Some(dir.path().to_str().unwrap()),
             Some(op_v2.to_str().unwrap()),
+            None,
             "ati", // service name — won't exist on test host
             true,  // --no-signal: don't try to SIGHUP a nonexistent service
         )
@@ -529,6 +584,23 @@ mod tests {
     }
 
     #[test]
+    fn send_sighup_refuses_zero_or_negative_pid() {
+        // Greptile P3 nit on PR #97. systemd's `MainPID=0` for inactive
+        // services is already handled in find_service_pid; this is
+        // defense-in-depth against any other path that calls send_sighup
+        // directly with a bogus PID.
+        #[cfg(unix)]
+        {
+            for bad in &[0, -1, -42] {
+                let err = send_sighup(*bad).expect_err("must reject non-positive PID");
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+                let msg = err.to_string();
+                assert!(msg.contains(&bad.to_string()), "got: {msg}");
+            }
+        }
+    }
+
+    #[test]
     fn rotate_keyring_errors_when_no_bootstrap() {
         let dir = TempDir::new().unwrap();
         let op = fake_op_shim(dir.path(), r#"{"fields":[{"label":"k","value":"v"}]}"#);
@@ -537,6 +609,7 @@ mod tests {
             "I",
             Some(dir.path().to_str().unwrap()),
             Some(op.to_str().unwrap()),
+            None,
             "ati",
             true,
         )

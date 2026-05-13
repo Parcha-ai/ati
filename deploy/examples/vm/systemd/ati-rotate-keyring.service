@@ -10,9 +10,16 @@ User=ati
 Group=ati
 
 # 1Password service-account token. Provisioned as root:ati 0440 outside
-# this unit so the service can read it; never written by the service.
+# this unit so the service can read it via systemd's LoadCredential=
+# (which copies the file into a private $CREDENTIALS_DIRECTORY for this
+# service alone — the unit's User= can read it without needing access to
+# /etc/op-service-account-token directly).
+#
+# IMPORTANT: %d expands to $CREDENTIALS_DIRECTORY (a PATH), NOT the token
+# value. We pass that path to `ati edge rotate-keyring` via --op-token-file,
+# which reads the contents and exports them as OP_SERVICE_ACCOUNT_TOKEN to
+# the `op` subprocess.
 LoadCredential=op-token:/etc/op-service-account-token
-Environment=OP_SERVICE_ACCOUNT_TOKEN=%d/op-token
 
 # Vault / item to pull. Override per environment.
 Environment=ATI_OP_VAULT=Production Secrets
@@ -23,6 +30,7 @@ ExecStart=/usr/local/bin/ati edge rotate-keyring \
     --vault "${ATI_OP_VAULT}" \
     --item "${ATI_OP_ITEM}" \
     --ati-dir /var/lib/ati \
+    --op-token-file %d/op-token \
     --service ati
 ExecStopPost=/usr/bin/rm -f /var/lib/ati/.rotation-in-progress
 

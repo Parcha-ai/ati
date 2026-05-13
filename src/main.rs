@@ -580,12 +580,19 @@ pub enum EdgeCommands {
         /// 1Password item name or UUID
         #[arg(long)]
         item: String,
-        /// ATI directory (default: ~/.ati)
+        /// ATI directory (default: ~/.ati). Manifests live at
+        /// `<ati_dir>/manifests`; keyring at `<ati_dir>/keyring.enc`.
         #[arg(long)]
         ati_dir: Option<String>,
         /// Path to the `op` binary (default: looked up on PATH)
         #[arg(long)]
         op_path: Option<String>,
+        /// Read the 1Password service-account token from this file and
+        /// pass it to `op` via `OP_SERVICE_ACCOUNT_TOKEN`. Designed for
+        /// systemd's `LoadCredential=`: pass `${CREDENTIALS_DIRECTORY}/<id>`
+        /// here.
+        #[arg(long)]
+        op_token_file: Option<String>,
     },
     /// Rotate credentials on a running edge VM: re-pull from 1Password,
     /// atomically replace the encrypted keyring, and SIGHUP the running
@@ -600,6 +607,11 @@ pub enum EdgeCommands {
         ati_dir: Option<String>,
         #[arg(long)]
         op_path: Option<String>,
+        /// Read the 1Password service-account token from this file and
+        /// pass it to `op` via `OP_SERVICE_ACCOUNT_TOKEN`. Designed for
+        /// systemd's `LoadCredential=`.
+        #[arg(long)]
+        op_token_file: Option<String>,
         /// systemd service name to SIGHUP after writing the new keyring.
         /// `--no-signal` to skip.
         #[arg(long, default_value = "ati")]
