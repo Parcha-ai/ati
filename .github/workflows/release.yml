@@ -155,10 +155,14 @@ jobs:
     name: Publish ati-client to PyPI
     needs: release
     # Same prerelease gate as publish-crates. `pip install ati-client`
-    # keeps resolving the last stable release. To deliberately try a
-    # prerelease, callers can use `pip install --pre ati-client==X.Y.Z-rc.N`
-    # — but only AFTER it lands on PyPI via a future stable cut, which
-    # is by design: prereleases stay on GH Releases only.
+    # keeps resolving the last stable release.
+    #
+    # Prereleases are NOT published to PyPI under this workflow —
+    # `pip install --pre ati-client==X.Y.Z-rc.N` would fail to find a
+    # candidate. The deliberate distribution channel for prerelease
+    # binaries is the GH Releases asset (e.g.
+    # `https://github.com/Parcha-ai/ati/releases/download/v0.8.0-rc.1/ati-x86_64-unknown-linux-musl`)
+    # which the build job uploads regardless of this skip.
     if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment:
