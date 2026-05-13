@@ -1,0 +1,12 @@
+# Slow upstream for in-flight SIGHUP test (Group B4): handler sleeps 1.5s
+# before responding, giving us a window to rotate the keyring + SIGHUP while
+# 50 concurrent requests are mid-flight.
+[provider]
+name = "passthrough_slow"
+description = "E2E: slow upstream for in-flight rotation tests"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_HTTP_SLOW__"
+path_prefix = "/slow"
+strip_prefix = true
+auth_type = "none"
+read_timeout_seconds = 30

@@ -53,6 +53,15 @@ jobs:
         run: ATI_BIN=./target/debug/ati bash scripts/test_skills_e2e.sh
       - name: Proxy server E2E
         run: bash scripts/test_proxy_server_e2e.sh
+      - name: Full-stack E2E (ati#96 sig-verify + #97 edge + #98 WebSocket)
+        run: |
+          # The harness drives the real `ati proxy` binary on 127.0.0.1 with
+          # real mock upstreams, real SIGHUPs, real WebSocket upgrades, and
+          # real `ati edge` invocations against a fake `op` binary. Exits 0
+          # only when every one of ~67 cases across groups A-F passes.
+          python3 -m pip install --quiet --user 'websockets==15.0.1'
+          ATI_BIN=./target/debug/ati bash scripts/test_full_stack_e2e.sh --pr all
+        timeout-minutes: 5
 
   deny:
     name: cargo-deny

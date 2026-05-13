@@ -1,0 +1,10 @@
+# Passthrough route with deny_paths — confirms 403 without upstream hit.
+[provider]
+name = "passthrough_deny"
+description = "E2E: deny_paths blocking"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_HTTP__"
+path_prefix = "/litellm"
+strip_prefix = true
+auth_type = "none"
+deny_paths = ["/config/*", "/model/*"]

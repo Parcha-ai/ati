@@ -1,0 +1,12 @@
+# WS route pointing at a black-hole upstream (accepts TCP, never replies).
+# Used to validate connect_timeout_seconds fails fast.
+[provider]
+name = "passthrough_ws_bh"
+description = "E2E: WS connect timeout"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_WS_BH__"
+path_prefix = "/wsbh"
+strip_prefix = true
+auth_type = "none"
+forward_websockets = true
+connect_timeout_seconds = 2

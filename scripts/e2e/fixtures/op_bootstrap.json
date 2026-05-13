@@ -1,0 +1,20 @@
+{
+  "fields": [
+    {
+      "label": "sandbox_signing_shared_secret",
+      "value": "11111111111111111111111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "label": "upstream_bearer",
+      "value": "sk-test-bootstrap-token"
+    },
+    {
+      "label": "bb_api_key",
+      "value": "bb_test_KEY_AAAAAAAAAA"
+    },
+    {
+      "label": "otel_basic",
+      "value": "Basic dGVzdHVzZXI6dGVzdHBhc3M="
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+# Passthrough route with strip_prefix=false (devpi pattern).
+[provider]
+name = "passthrough_nostrip"
+description = "E2E: strip_prefix=false"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_HTTP__"
+path_prefix = "/root"
+strip_prefix = false
+auth_type = "none"

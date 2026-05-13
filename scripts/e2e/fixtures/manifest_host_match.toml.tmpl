@@ -1,0 +1,10 @@
+# Passthrough route keyed on Host header (bb.localhost). host_override
+# rewrites upstream-visible Host to "upstream.test".
+[provider]
+name = "passthrough_host"
+description = "E2E: host_match routing"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_HTTP__"
+host_match = "bb.localhost"
+host_override = "upstream.test"
+auth_type = "none"

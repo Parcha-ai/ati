@@ -1,0 +1,10 @@
+# Passthrough route with path_replace — confirms /otel → /otlp rewrite.
+[provider]
+name = "passthrough_replace"
+description = "E2E: path_replace rewrite"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_HTTP__"
+path_prefix = "/otel"
+strip_prefix = false
+path_replace = ["/otel", "/otlp"]
+auth_type = "none"

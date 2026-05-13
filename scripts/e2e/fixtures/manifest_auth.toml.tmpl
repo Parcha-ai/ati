@@ -1,0 +1,12 @@
+# Passthrough route with bearer-auth injection from keyring entry `upstream_bearer`.
+# Used to verify (a) auth header is injected upstream, (b) caller's own
+# Authorization header is stripped before the injected one is added.
+[provider]
+name = "passthrough_auth"
+description = "E2E: bearer-auth injection"
+handler = "passthrough"
+base_url = "http://127.0.0.1:__PORT_UPSTREAM_HTTP__"
+path_prefix = "/secure"
+strip_prefix = true
+auth_type = "bearer"
+auth_key_name = "upstream_bearer"
