@@ -3,11 +3,18 @@ use serde_json::Value;
 ///
 /// These tests require:
 /// - `npx` available in PATH (for stdio servers)
-/// - Linear API key (for HTTP server)
-/// - GitHub token (for GitHub MCP server)
+/// - Linear API key (for HTTP server, read from env or ~/.claude.json)
+/// - GitHub token (for GitHub MCP server, read from env or ~/.claude.json)
 ///
-/// Run with: cargo test --test mcp_live_test -- --nocapture
-/// Skip with: cargo test --test mcp_live_test -- --ignored (they're not ignored by default)
+/// **Network-dependent tests are gated with `#[ignore]`** so they don't run
+/// in default `cargo test` invocations (CI, local sweeps). The unit-level
+/// SSE-parsing tests in this file are NOT gated — they don't touch the
+/// network and run in every sweep.
+///
+/// Run only the live tests with:
+///   cargo test --test mcp_live_test -- --ignored --nocapture
+///
+/// Skip them (default): just `cargo test`.
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -366,6 +373,7 @@ fn http_mcp_notification(
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "live network test: spawns @modelcontextprotocol/server-github via npx and hits the GitHub API"]
 fn test_github_mcp_stdio_initialize_and_list_tools() {
     if !npx_available() {
         eprintln!("SKIP: npx not available");
@@ -493,6 +501,7 @@ fn test_github_mcp_stdio_initialize_and_list_tools() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "live network test: hits Linear's hosted MCP HTTP server (requires Linear API key)"]
 fn test_linear_mcp_http_initialize_and_list_tools() {
     let linear_key = match get_linear_token() {
         Some(t) => t,
@@ -628,6 +637,7 @@ fn test_linear_mcp_http_initialize_and_list_tools() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "live network test: spawns the Sentry MCP server (requires Sentry credentials)"]
 fn test_sentry_mcp_stdio_initialize_and_list_tools() {
     if !npx_available() {
         eprintln!("SKIP: npx not available");
@@ -696,6 +706,7 @@ fn test_sentry_mcp_stdio_initialize_and_list_tools() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "live network test: drives ATI's McpClient against Linear's hosted MCP server"]
 fn test_ati_mcp_client_against_linear() {
     if get_linear_token().is_none() {
         eprintln!("SKIP: No Linear API key for ATI client test");
@@ -807,6 +818,7 @@ fn test_ati_mcp_client_against_linear() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "live network test: drives ATI's McpClient against the GitHub MCP stdio server"]
 fn test_ati_mcp_client_against_github_stdio() {
     if !npx_available() {
         eprintln!("SKIP: npx not available");
@@ -1033,6 +1045,7 @@ data: [{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "live network test: spawns the GitHub MCP server to probe protocol-error edges"]
 fn test_github_mcp_protocol_error_handling() {
     if !npx_available() {
         eprintln!("SKIP: npx not available");
@@ -1087,6 +1100,7 @@ fn test_github_mcp_protocol_error_handling() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "live network test: spawns @modelcontextprotocol/server-everything via npx"]
 fn test_everything_mcp_stdio() {
     if !npx_available() {
         eprintln!("SKIP: npx not available");
@@ -1173,6 +1187,7 @@ fn test_everything_mcp_stdio() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "live network test: hits the public DeepWiki MCP HTTP server"]
 fn test_deepwiki_mcp_http_full_flow() {
     let url = "https://mcp.deepwiki.com/mcp";
 
