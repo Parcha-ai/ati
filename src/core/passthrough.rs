@@ -636,6 +636,14 @@ fn rewrite_path(incoming: &str, route: &PassthroughRoute) -> String {
 /// Catch-all handler. Mounted via `Router::fallback`, runs for every request
 /// that didn't match a named route. Returns 404 when no passthrough route
 /// matches.
+#[tracing::instrument(
+    name = "passthrough.request",
+    skip_all,
+    fields(
+        route = tracing::field::Empty,
+        upstream = tracing::field::Empty,
+    ),
+)]
 pub async fn handle_passthrough(
     State(state): State<Arc<crate::proxy::server::ProxyState>>,
     req: Request<Body>,
@@ -665,6 +673,8 @@ pub async fn handle_passthrough(
             return not_found("no passthrough route");
         }
     };
+    tracing::Span::current().record("route", route.name.as_str());
+    tracing::Span::current().record("upstream", route.base_url.as_str());
 
     // Compute the rewritten path BEFORE checking deny-paths, so denials are
     // expressed against the path the upstream would actually see.
@@ -764,6 +774,18 @@ pub async fn handle_passthrough(
         builder = builder.body(reqwest::Body::wrap_stream(capped));
     }
 
+    // Inject W3C trace context so the upstream service joins our trace.
+    // No-op when the `otel` feature is off or no exporter is configured.
+    // Note: an inbound `traceparent` from the sandbox is *not* trusted here;
+    // the upstream sees the trace context of *our* current span, which
+    // tracing-opentelemetry's subscriber layer is already extending from
+    // the inbound `traceparent` when one was present at the proxy edge
+    // (handled in the proxy observability middleware in a follow-up).
+    #[cfg(feature = "otel")]
+    for (k, v) in crate::core::otel::current_trace_headers() {
+        builder = builder.header(k, v);
+    }
+
     let upstream_resp = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
@@ -773,6 +795,24 @@ pub async fn handle_passthrough(
                 upstream_url = %upstream_url,
                 "upstream request failed"
             );
+            #[cfg(feature = "otel")]
+            if let Some(m) = crate::core::otel::metrics() {
+                use opentelemetry::KeyValue;
+                let kind = if e.is_timeout() {
+                    "timeout"
+                } else if e.is_connect() {
+                    "connect"
+                } else {
+                    "send"
+                };
+                m.upstream_errors.add(
+                    1,
+                    &[
+                        KeyValue::new("provider", route.name.clone()),
+                        KeyValue::new("error_kind", kind),
+                    ],
+                );
+            }
             return bad_gateway(&format!("upstream error: {e}"));
         }
     };

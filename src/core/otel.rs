@@ -14,12 +14,14 @@
 //! is set. With the feature compiled in but no endpoint configured, this is
 //! a no-op — same shape as `init_sentry` in `core::logging`.
 
+use opentelemetry::propagation::{Extractor, Injector};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::Subscriber;
 use tracing_opentelemetry::OpenTelemetryLayer;
@@ -124,6 +126,15 @@ where
     // this same final block, never before its sibling has been built.
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
     opentelemetry::global::set_meter_provider(meter_provider.clone());
+
+    // Install a W3C traceparent/tracestate propagator so outbound HTTP calls
+    // (core/http.rs, core/passthrough.rs, core/mcp_client.rs HTTP transport)
+    // can hand off the trace context to upstream services. Without this the
+    // injector at the call site has nothing to serialize and outbound spans
+    // become roots.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
 
     let meter = opentelemetry::global::meter(METER_NAME);
     let handles = MetricsHandles {
@@ -283,6 +294,62 @@ fn parse_otlp_headers() -> Vec<(String, String)> {
             Some((k.to_string(), v.to_string()))
         })
         .collect()
+}
+
+/// Collect the current span's W3C trace context into a header map ready to
+/// be applied to an outbound HTTP request. Returns an empty map when no
+/// span is active or no propagator is registered (e.g. the OTel runtime
+/// gate skipped init).
+///
+/// Usage in `core::http`, `core::passthrough`, `core::mcp_client`:
+/// ```ignore
+/// for (k, v) in crate::core::otel::current_trace_headers() {
+///     request_builder = request_builder.header(k, v);
+/// }
+/// ```
+pub fn current_trace_headers() -> HashMap<String, String> {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let cx = tracing::Span::current().context();
+    let mut carrier = HeaderInjector(HashMap::new());
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut carrier);
+    });
+    carrier.0
+}
+
+struct HeaderInjector(HashMap<String, String>);
+
+impl Injector for HeaderInjector {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
+    }
+}
+
+/// Read the W3C trace context from inbound HTTP headers and attach it as
+/// `span`'s parent. Called from the proxy's outermost middleware so every
+/// downstream span (handlers, passthrough, outbound HTTP) lives under the
+/// agent-supplied trace.
+///
+/// No-op when the propagator is unset (e.g. OTel not initialized) or when
+/// no `traceparent` header is present.
+pub fn extract_request_parent_into_span(span: &tracing::Span, headers: &axum::http::HeaderMap) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let extractor = HeaderExtractor(headers);
+    let parent_cx =
+        opentelemetry::global::get_text_map_propagator(|propagator| propagator.extract(&extractor));
+    let _ = span.set_parent(parent_cx);
+}
+
+struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
+
+impl<'a> Extractor for HeaderExtractor<'a> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|k| k.as_str()).collect()
+    }
 }
 
 #[cfg(test)]

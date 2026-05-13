@@ -114,7 +114,6 @@ fn _keep_sig_verify_import_used() {
     let _ = sig_verify::DEFAULT_EXEMPT_PATHS.len();
 }
 
-// ---------------------------------------------------------------------------
 // Regression: `try_init` must NOT panic when called from inside a tokio
 // runtime context.
 //
@@ -157,4 +156,111 @@ async fn try_init_does_not_panic_inside_tokio_runtime() {
 
     std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
     std::env::remove_var("OTEL_SERVICE_NAME");
+}
+
+// ---------------------------------------------------------------------------
+// Feature-gated W3C propagation tests (PR B)
+//
+// Cover the W3C trace-context round-trip: extract an inbound `traceparent`
+// header into a tracing span's parent context, then inject that context
+// back into outbound headers via `current_trace_headers()`. The trace_id
+// and trace flags survive the round-trip; the span_id changes because the
+// outbound headers identify the *current* span, not the inbound parent.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "otel")]
+mod propagation {
+    use axum::http::HeaderMap;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    /// Set up the W3C propagator + a minimal tracing-opentelemetry layer so
+    /// `tracing::Span::current().context()` returns a real OTel context
+    /// (otherwise the injector has nothing to serialize). Uses an SDK
+    /// tracer with no exporter — spans are emitted in-process and dropped.
+    fn install_propagator_and_subscriber_once() {
+        use std::sync::Once;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            opentelemetry::global::set_text_map_propagator(
+                opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+            );
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+            let tracer = {
+                use opentelemetry::trace::TracerProvider as _;
+                provider.tracer("ati-test")
+            };
+            let _ = tracing_subscriber::registry()
+                .with(tracing_opentelemetry::OpenTelemetryLayer::new(tracer))
+                .try_init();
+        });
+    }
+
+    #[test]
+    fn extract_then_inject_preserves_trace_id() {
+        install_propagator_and_subscriber_once();
+
+        // Synthetic but valid W3C traceparent:
+        //   version=00, trace-id (32 hex), span-id (16 hex), flags=01 (sampled).
+        let inbound_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let inbound_span_id = "00f067aa0ba902b7";
+        let traceparent = format!("00-{inbound_trace_id}-{inbound_span_id}-01");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("traceparent", traceparent.parse().unwrap());
+
+        let span = tracing::info_span!("test.span");
+        ati::core::otel::extract_request_parent_into_span(&span, &headers);
+
+        // Inside that span, the injector should emit a traceparent whose
+        // trace-id matches the inbound one.
+        let _enter = span.enter();
+        let injected = ati::core::otel::current_trace_headers();
+        let outbound_traceparent = injected
+            .get("traceparent")
+            .expect("traceparent should be injected when a parent is attached");
+
+        // traceparent format: "00-<trace_id>-<span_id>-<flags>"
+        let parts: Vec<&str> = outbound_traceparent.split('-').collect();
+        assert_eq!(parts.len(), 4, "malformed outbound traceparent");
+        assert_eq!(
+            parts[1], inbound_trace_id,
+            "trace_id must be preserved across extract→inject"
+        );
+        // Span ID *changes* (we're now in a child span). Flags stay sampled.
+        assert_ne!(parts[2], inbound_span_id, "span_id should be a new id");
+        assert_eq!(parts[3], "01", "sampled flag should propagate");
+    }
+
+    #[test]
+    fn current_trace_headers_empty_when_no_parent_and_no_span_context() {
+        install_propagator_and_subscriber_once();
+        // Outside any span with an attached context, the propagator has
+        // nothing to serialize. Some SDKs emit an invalid placeholder
+        // traceparent; assert either empty OR an invalid trace_id (all zeros).
+        let headers = ati::core::otel::current_trace_headers();
+        if let Some(tp) = headers.get("traceparent") {
+            let parts: Vec<&str> = tp.split('-').collect();
+            assert!(
+                parts.len() == 4
+                    && (parts[1] == "00000000000000000000000000000000"
+                        || parts[1].chars().all(|c| c == '0')),
+                "expected invalid/placeholder traceparent when no context is set, got {tp}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_request_parent_into_span_with_no_inbound_traceparent_is_safe() {
+        install_propagator_and_subscriber_once();
+        // No traceparent header — extractor returns an empty parent context.
+        // We just need to confirm the call doesn't panic and doesn't poison
+        // the span. Whether the resulting span is a sampled root depends on
+        // the SDK's default sampler; that's not the contract being tested.
+        let headers = HeaderMap::new();
+        let span = tracing::info_span!("test.no_parent");
+        ati::core::otel::extract_request_parent_into_span(&span, &headers);
+        let _ = span.context(); // smoke check: doesn't panic
+    }
 }
