@@ -636,6 +636,19 @@ async fn inject_auth(
             let access_token = get_oauth2_token(provider, keyring).await?;
             Ok(request.bearer_auth(access_token))
         }
+        AuthType::Oauth2Pkce => {
+            // OAuth 2.1 + PKCE is currently MCP-only. Tokens live in
+            // ~/.ati/oauth/<name>.json and are refreshed by core::oauth_refresh.
+            // Generic HTTP providers don't go through this path today; if/when
+            // we extend it to HTTP, mirror the mcp_client connect-time pattern.
+            let token = crate::core::oauth_refresh::ensure_fresh_token(
+                provider,
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .map_err(|e| HttpError::Oauth2Error(e.to_string()))?;
+            Ok(request.bearer_auth(token))
+        }
         AuthType::Url => {
             // Auth key is already interpolated into the URL via
             // ${key_name} placeholders resolved at connection time.

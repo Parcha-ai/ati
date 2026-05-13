@@ -54,6 +54,8 @@ pub fn test_provider(name: &str, base_url: &str) -> Provider {
         oauth2_token_url: None,
         auth_secret_name: None,
         oauth2_basic_auth: false,
+        oauth_resource: None,
+        oauth_scopes: Vec::new(),
         internal: false,
         handler: "http".into(),
         mcp_transport: None,

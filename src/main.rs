@@ -537,6 +537,32 @@ pub enum ProviderCommands {
         /// Provider name to unload
         name: String,
     },
+
+    /// Run the OAuth 2.1 + PKCE authorization flow for an MCP provider.
+    ///
+    /// Discovers the protected-resource and authorization-server metadata,
+    /// dynamically registers the client (RFC 7591), opens a browser to the
+    /// authorize endpoint, captures the callback on a loopback listener,
+    /// and persists the resulting tokens to ~/.ati/oauth/<name>.json.
+    #[command(
+        after_help = "Examples:\n  ati provider authorize particle\n  ati provider authorize particle --no-browser\n  ati provider authorize particle --port 9876"
+    )]
+    Authorize {
+        /// Provider name (must declare auth_type = \"oauth2_pkce\")
+        name: String,
+        /// Local loopback callback port (0 = OS-assigned ephemeral port)
+        #[arg(long, default_value = "0")]
+        port: u16,
+        /// Print the authorization URL instead of opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+
+    /// Revoke OAuth tokens at the authorization server and delete the local file.
+    Deauthorize {
+        /// Provider name
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

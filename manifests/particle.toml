@@ -1,0 +1,37 @@
+# Particle IoT Cloud — MCP server with OAuth 2.1 + PKCE.
+#
+# Particle's hosted MCP server (https://mcp.particle.pro) follows the
+# 2025-06-18 MCP authorization spec: Streamable HTTP, OAuth 2.1 + PKCE,
+# Dynamic Client Registration (RFC 7591), RFC 8707 resource indicator,
+# and rotating refresh tokens.
+#
+# Setup (one-time per operator/host):
+#   1. ati provider authorize particle
+#      → opens browser, runs the consent flow, persists tokens to
+#        ~/.ati/oauth/particle.json (mode 0600).
+#   2. ati run particle:<tool> --arg value
+#      → ATI auto-refreshes the access token on near-expiry or on 401.
+#
+# To revoke and remove local tokens:
+#   ati provider deauthorize particle
+#
+# Documentation: https://docs.particle.pro/mcp/overview
+
+[provider]
+name = "particle"
+description = "Particle IoT Cloud MCP server — devices, fleet, products, customers."
+handler = "mcp"
+mcp_transport = "http"
+mcp_url = "https://mcp.particle.pro"
+auth_type = "oauth2_pkce"
+
+# RFC 8707 resource indicator. Sent on every /authorize, /token, and /refresh
+# request so the issued access token is bound to this MCP server.
+oauth_resource = "https://mcp.particle.pro"
+
+# Scopes requested in the authorization grant. Particle exposes mcp:read and
+# mcp:write; start with read-only — an operator who needs writes can add
+# "mcp:write" here and re-run `ati provider authorize particle`.
+oauth_scopes = ["mcp:read"]
+
+category = "iot"

@@ -1,4 +1,5 @@
 use crate::core::jwt;
+use crate::core::manifest::{AuthType, ManifestRegistry};
 use crate::core::scope::ScopeConfig;
 use crate::{AuthCommands, Cli, OutputFormat};
 
@@ -15,6 +16,7 @@ fn show_status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         _ => {
             println!("No session token set (ATI_SESSION_TOKEN not configured)");
             println!("Running in unrestricted mode — all tools accessible.");
+            print_oauth_providers_section(cli);
             return Ok(());
         }
     };
@@ -100,6 +102,8 @@ fn show_status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
             println!("Verified: {verified_str}");
 
+            print_oauth_providers_section(cli);
+
             if scopes.is_expired() {
                 tracing::warn!("your session has expired â tool calls will be denied");
             }
@@ -107,4 +111,72 @@ fn show_status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn print_oauth_providers_section(cli: &Cli) {
+    let ati_dir = super::common::ati_dir();
+    let manifests_dir = ati_dir.join("manifests");
+    let registry = match ManifestRegistry::load(&manifests_dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let oauth_providers: Vec<_> = registry
+        .list_providers()
+        .into_iter()
+        .filter(|p| matches!(p.auth_type, AuthType::Oauth2Pkce))
+        .collect();
+
+    if oauth_providers.is_empty() {
+        return;
+    }
+
+    match cli.output {
+        OutputFormat::Json => {
+            let entries: Vec<_> = oauth_providers
+                .iter()
+                .map(|p| {
+                    let tokens = crate::core::oauth_store::load(&p.name).ok().flatten();
+                    serde_json::json!({
+                        "provider": p.name,
+                        "authorized": tokens.is_some(),
+                        "expires_at": tokens.as_ref().map(|t| t.access_token_expires_at),
+                        "scopes": tokens.as_ref().map(|t| t.scopes.clone()),
+                        "refreshable": tokens.as_ref().is_some_and(|t| t.refresh_token.is_some()),
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::json!({"oauth_providers": entries}));
+        }
+        _ => {
+            println!();
+            println!("OAuth providers:");
+            for p in oauth_providers {
+                match crate::core::oauth_store::load(&p.name) {
+                    Ok(Some(t)) => {
+                        let mins = t.access_remaining().num_minutes();
+                        let status = if t.access_remaining().num_seconds() <= 0 {
+                            "expired".to_string()
+                        } else {
+                            format!("authorized, expires in {mins} min")
+                        };
+                        let refreshable = if t.refresh_token.is_some() {
+                            "refreshable"
+                        } else {
+                            "no refresh token"
+                        };
+                        println!("  {}: {status}, {refreshable}", p.name);
+                    }
+                    Ok(None) => {
+                        println!(
+                            "  {}: not authorized — run `ati provider authorize {}`",
+                            p.name, p.name
+                        );
+                    }
+                    Err(e) => {
+                        println!("  {}: error reading tokens ({e})", p.name);
+                    }
+                }
+            }
+        }
+    }
 }
