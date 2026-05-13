@@ -95,15 +95,40 @@ for i in $(seq 1 50); do
 done
 INFLIGHT_KICKED_AT=$(date +%s)
 
-# Wait deterministically until the slow upstream confirms at least one
-# request has crossed sig-verify and is now sleeping in the handler. The
-# slow handler logs to $MOCK_LOG synchronously on entry (see mock_http.py
-# log_record() before time.sleep). 1.4s is < the 1.5s upstream sleep, so
-# the rotation lands while requests are still pinned mid-flight.
-for _ in $(seq 1 20); do
-    if [[ -s "$MOCK_LOG" ]]; then break; fi
-    sleep 0.05
+# Wait deterministically until ALL 50 requests have crossed sig-verify
+# and are sleeping in the slow upstream handler. The slow handler logs to
+# $MOCK_LOG synchronously on entry (see mock_http.py log_record() before
+# time.sleep), so once $MOCK_LOG has 50 lines every request has cleared
+# sig-verify and the rotation is guaranteed to land after them all.
+#
+# Earlier versions waited for ≥1 entry, which only proved that the FIRST
+# request had cleared — under CI load the remaining 49 could still be in
+# TCP-connect / OS-buffered-send / not-yet-spawned states. Those that
+# arrived at sig-verify *after* the SIGHUP rotation would 403 with the
+# new secret rejecting the S2-signed payload, producing a spurious "torn
+# read" failure. The fix is to wait until ALL 50 are confirmed in-flight
+# before triggering rotation.
+#
+# Budget: 50 requests × 1.5s upstream sleep means we have up to ~1.4s
+# (200ms safety margin under the upstream's wall time) to see all 50 land.
+# We poll at 20ms granularity, max 70 ticks = 1.4s.
+for _ in $(seq 1 70); do
+    inflight_count=$(wc -l < "$MOCK_LOG" 2>/dev/null || echo 0)
+    if (( inflight_count >= 50 )); then break; fi
+    sleep 0.02
 done
+
+# Sanity: if we couldn't get all 50 in-flight inside the upstream sleep
+# window, the test premise is broken (the rotation would race with
+# requests still in TCP-connect). Fail loudly with diagnostic info rather
+# than mislabel it as a torn-read bug in production code.
+inflight_count=$(wc -l < "$MOCK_LOG" 2>/dev/null || echo 0)
+if (( inflight_count < 50 )); then
+    case_fail B4_inflight_sighup_50_concurrent \
+        "could not get 50/50 requests in-flight before SIGHUP (only ${inflight_count}/50 reached upstream within 1.4s — test infrastructure race, not a code bug)"
+    stop_proxy
+    return 0
+fi
 
 rotate_keyring "$E2E_DIR/fixtures/op_bootstrap.json"
 kill -HUP "$ATI_PID"
