@@ -1,0 +1,34 @@
+[Unit]
+Description=Rotate the ATI keyring from 1Password and SIGHUP the live proxy
+Documentation=https://github.com/Parcha-ai/ati/blob/main/deploy/examples/vm/README.md
+# Don't trample a running rotation if the timer fires twice.
+ConditionPathExists=!/var/lib/ati/.rotation-in-progress
+
+[Service]
+Type=oneshot
+User=ati
+Group=ati
+
+# 1Password service-account token. Provisioned as root:ati 0440 outside
+# this unit so the service can read it; never written by the service.
+LoadCredential=op-token:/etc/op-service-account-token
+Environment=OP_SERVICE_ACCOUNT_TOKEN=%d/op-token
+
+# Vault / item to pull. Override per environment.
+Environment=ATI_OP_VAULT=Production Secrets
+Environment=ATI_OP_ITEM=ATI Edge VM Keyring
+
+ExecStartPre=/usr/bin/touch /var/lib/ati/.rotation-in-progress
+ExecStart=/usr/local/bin/ati edge rotate-keyring \
+    --vault "${ATI_OP_VAULT}" \
+    --item "${ATI_OP_ITEM}" \
+    --ati-dir /var/lib/ati \
+    --service ati
+ExecStopPost=/usr/bin/rm -f /var/lib/ati/.rotation-in-progress
+
+# Hardening — same posture as ati.service.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ati
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true

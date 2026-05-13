@@ -137,6 +137,15 @@ pub enum Commands {
     #[command(subcommand)]
     Audit(AuditCommands),
 
+    /// Operator commands for the edge VM deployment.
+    ///
+    /// Today: bootstrap-keyring and rotate-keyring — pull credentials from
+    /// 1Password and write `<ati_dir>/keyring.enc`. `rotate-keyring` also
+    /// SIGHUPs the running ati service so the new signing secret takes
+    /// effect without a process restart.
+    #[command(subcommand)]
+    Edge(EdgeCommands),
+
     /// Run ATI as a proxy server (holds keys, serves sandbox agents)
     Proxy {
         /// Port to listen on
@@ -558,6 +567,51 @@ pub enum ProviderCommands {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum EdgeCommands {
+    /// Bootstrap a fresh edge VM: pull credentials from a 1Password item,
+    /// generate a persistent session key, and write `keyring.enc` +
+    /// `.keyring-key` into the ATI directory. Idempotent — re-running
+    /// re-pulls and replaces the encrypted blob but reuses the existing
+    /// session key.
+    BootstrapKeyring {
+        /// 1Password vault name (e.g. "Dev Secrets")
+        #[arg(long)]
+        vault: String,
+        /// 1Password item name or UUID
+        #[arg(long)]
+        item: String,
+        /// ATI directory (default: ~/.ati)
+        #[arg(long)]
+        ati_dir: Option<String>,
+        /// Path to the `op` binary (default: looked up on PATH)
+        #[arg(long)]
+        op_path: Option<String>,
+    },
+    /// Rotate credentials on a running edge VM: re-pull from 1Password,
+    /// atomically replace the encrypted keyring, and SIGHUP the running
+    /// `ati` service so the new signing secret is picked up without a
+    /// restart. Requires that `bootstrap-keyring` has previously run.
+    RotateKeyring {
+        #[arg(long)]
+        vault: String,
+        #[arg(long)]
+        item: String,
+        #[arg(long)]
+        ati_dir: Option<String>,
+        #[arg(long)]
+        op_path: Option<String>,
+        /// systemd service name to SIGHUP after writing the new keyring.
+        /// `--no-signal` to skip.
+        #[arg(long, default_value = "ati")]
+        service: String,
+        /// Skip the SIGHUP step. Use when rotating before first start or
+        /// when the running process is not managed by systemd.
+        #[arg(long)]
+        no_signal: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum KeyCommands {
     /// Store an API key
     Set {
@@ -703,6 +757,7 @@ async fn main() {
         Commands::Init { proxy, es256 } => cli::init::execute(*proxy, *es256),
         Commands::Key(subcmd) => cli::keys::execute(subcmd),
         Commands::Audit(subcmd) => cli::audit::execute(&cli, subcmd),
+        Commands::Edge(subcmd) => cli::edge::execute(subcmd),
         Commands::Proxy {
             port,
             bind,

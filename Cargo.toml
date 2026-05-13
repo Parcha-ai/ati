@@ -95,6 +95,9 @@ futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 glob = "0.3"
+# Atomic-file primitive used by `ati edge {bootstrap,rotate}-keyring` and by
+# the passthrough/sig_verify modules' rotation tests.
+tempfile = "3"
 # Compiled glob set for passthrough deny_paths matching (faster than Glob-per-path
 # at request time; built once at startup).
 globset = "0.4"

@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodic ATI keyring rotation from 1Password
+Documentation=https://github.com/Parcha-ai/ati/blob/main/deploy/examples/vm/README.md
+
+[Timer]
+# Weekly rotation at 03:00 UTC Monday. Adjust per your operational
+# preference — under normal conditions there's nothing time-sensitive
+# about the rotation; this is just to make sure secrets don't go stale.
+OnCalendar=Mon 03:00 UTC
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,42 @@
+# L4 Redis fan-out. ATI is HTTP-only, so Redis stays on haproxy.
+#
+# Each backend connects to a Redis instance with TLS + SNI. The
+# downstream sandbox uses `redis://default:<pw>@<vm-ip>:638X` (NOT
+# `rediss://`) — haproxy adds TLS on the upstream connection.
+#
+# Per-environment ports are arbitrary; pick a range that doesn't
+# conflict with anything else on the VM and bake them into your
+# sandbox env templates.
+
+global
+    log /dev/log local0
+    maxconn 256
+
+defaults
+    mode tcp
+    log global
+    option tcplog
+    timeout connect 5s
+    timeout client 300s
+    timeout server 300s
+
+frontend redis_dev
+    bind *:6381
+    default_backend redis_dev_backend
+
+backend redis_dev_backend
+    server upstream <UPSTREAM_HOST_DEV>:6379 ssl verify none sni str(<UPSTREAM_HOST_DEV>)
+
+frontend redis_staging
+    bind *:6382
+    default_backend redis_staging_backend
+
+backend redis_staging_backend
+    server upstream <UPSTREAM_HOST_STAGING>:6379 ssl verify none sni str(<UPSTREAM_HOST_STAGING>)
+
+frontend redis_prod
+    bind *:6383
+    default_backend redis_prod_backend
+
+backend redis_prod_backend
+    server upstream <UPSTREAM_HOST_PROD>:6379 ssl verify none sni str(<UPSTREAM_HOST_PROD>)

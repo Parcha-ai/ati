@@ -1,0 +1,37 @@
+# Local npm registry cache. Sandboxes hit /npm/* on the ATI proxy,
+# which forwards to 127.0.0.1:4873 (this server). First hit fetches
+# from npmjs.org; cached locally afterwards.
+#
+# No auth — the upstream proxy in front handles HMAC sig-verify before
+# anything reaches this. Listen on 127.0.0.1 only.
+
+storage: /var/lib/verdaccio/storage
+plugins: /var/lib/verdaccio/plugins
+
+# Sandboxes don't need to publish, only fetch.
+auth:
+  htpasswd:
+    file: /var/lib/verdaccio/htpasswd
+    max_users: -1
+
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+    timeout: 30s
+    cache: true
+
+packages:
+  '@*/*':
+    access: $all
+    publish: $authenticated
+    proxy: npmjs
+  '**':
+    access: $all
+    publish: $authenticated
+    proxy: npmjs
+
+logs:
+  - {type: stdout, format: pretty, level: warn}
+
+listen:
+  - 127.0.0.1:4873

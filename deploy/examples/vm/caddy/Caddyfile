@@ -1,0 +1,13 @@
+{
+	admin off
+}
+
+:80 {
+	reverse_proxy 127.0.0.1:8080
+}
+
+# Public TLS-terminated subdomains. Caddy auto-provisions LE certs.
+api.example.com, bb.example.com, otel.example.com, git.example.com {
+	tls operator@example.com
+	reverse_proxy 127.0.0.1:8080
+}

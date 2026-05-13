@@ -1,0 +1,97 @@
+# Generic passthrough manifest template.
+#
+# Each file in /etc/ati/manifests/ describes one upstream the proxy should
+# forward to. Match by host header, URL path prefix, or both. Authentication
+# headers and `${var}` placeholders in extra_headers are resolved from the
+# keyring once at startup (and on every SIGHUP after `ati edge rotate-keyring`).
+
+[provider]
+name = "example-service"
+description = "Generic passthrough route to an upstream HTTP service."
+handler = "passthrough"
+
+# Where to forward to. Must be a fully-qualified URL — host derives TLS SNI.
+base_url = "https://api.example.com"
+
+# --- Match rules: at least one of host_match / path_prefix must be set. ---
+
+# Hostname-based routing. When set, only requests with this Host header
+# (case-insensitive) hit this route. Useful when serving multiple upstreams
+# behind a single TLS-terminated VM with their own DNS records.
+# host_match = "api.example.com"
+
+# Path-prefix-based routing. Longer prefixes win over shorter ones at
+# dispatch time (`/litellm/v1` beats `/litellm`).
+path_prefix = "/example"
+
+# Whether to strip path_prefix before forwarding upstream. Default: true.
+# Set false for upstreams that need to see the original public-facing path.
+strip_prefix = true
+
+# Optional `(from, to)` rewrite applied after prefix stripping. Used for
+# `/otel → /otlp`-style remapping.
+# path_replace = ["/", "/v1/"]
+
+# --- Upstream connection knobs ---
+
+# Override the Host header sent upstream. SNI follows base_url's host, so
+# this is purely an HTTP-level Host rewrite (e.g. when the upstream
+# virtualhosts on a different name than the public-facing one).
+# host_override = "internal.example.com"
+
+# Per-route timeouts (seconds). Tune per upstream characteristics.
+connect_timeout_seconds = 5
+read_timeout_seconds    = 60     # 300 for git clone-style endpoints, ∞-ish
+idle_timeout_seconds    = 30
+
+# Body caps (bytes). 0 = unlimited. The cap operates on the raw transferred
+# stream — compressed bodies are fine; the cap stops the upstream connection
+# if it exceeds, and `Content-Length` is stripped from the forwarded
+# response so chunked-encoding framing stays correct.
+max_request_bytes  = 16777216   # 16 MB
+max_response_bytes = 16777216
+
+# --- Authentication: pick AT MOST ONE of bearer / header / query / basic. ---
+
+# Inject `Authorization: Bearer <keyring[example_api_key]>` on every request.
+# Strips any inbound Authorization the client sent — sandboxes can't proxy
+# their own creds through this route.
+# auth_type = "bearer"
+# auth_key_name = "example_api_key"
+
+# Inject a custom header (e.g. `x-bb-api-key: <keyring[browserbase_api_key]>`).
+# auth_type = "header"
+# auth_header_name = "x-bb-api-key"
+# auth_key_name = "browserbase_api_key"
+# auth_value_prefix = ""   # set to "Token " to produce "Token <key>", etc.
+
+# Append a query parameter (e.g. `?api_key=<keyring[example_query_key]>`).
+# auth_type = "query"
+# auth_query_name = "api_key"
+# auth_key_name = "example_query_key"
+
+# Basic auth: keyring entry must be a "user:password" string.
+# auth_type = "basic"
+# auth_key_name = "example_basic_credentials"
+
+# --- Deny list ---
+
+# Glob patterns matched against the *post-rewrite* path (what the upstream
+# would see). Any match returns 403 without forwarding upstream. Use this
+# to block admin endpoints on third-party services.
+#
+# Note: `*` doesn't cross `/`, so write `/admin/*` and the load-time
+# expansion will also register `/admin/**` automatically. To match a
+# literal path AND everything underneath, write `/admin` without a glob.
+# deny_paths = [
+#     "/admin/*",
+#     "/internal/*",
+# ]
+
+# --- Extra headers (always-on, resolved from keyring at startup) ---
+
+# Values may contain `${keyring_var_name}` placeholders. Expanded once at
+# startup; rotate via `ati edge rotate-keyring` + SIGHUP.
+# [provider.extra_headers]
+# X-Tenant-ID         = "us-prod-1"
+# X-Telemetry-Token   = "Bearer ${example_telemetry_token}"
