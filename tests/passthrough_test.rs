@@ -1153,7 +1153,10 @@ connect_timeout_seconds = 1
 // --- Manifest-load-time validation ---------------------------------------
 
 #[tokio::test]
-async fn passthrough_rejects_forward_websockets_true_at_load() {
+async fn passthrough_accepts_forward_websockets_with_http_base_url() {
+    // PR 5 enables WebSocket support. `forward_websockets = true` paired
+    // with an http(s):// base_url must load successfully — the proxy
+    // derives ws/wss from the URL scheme automatically.
     let dir = TempDir::new().unwrap();
     let manifests_dir = dir.path().join("manifests");
     std::fs::create_dir_all(&manifests_dir).unwrap();
@@ -1164,13 +1167,33 @@ async fn passthrough_rejects_forward_websockets_true_at_load() {
 name = "ws"
 description = "t"
 handler = "passthrough"
-base_url = "http://x"
+base_url = "https://api.example.com"
 path_prefix = "/ws"
 forward_websockets = true
 "#,
     )
     .unwrap();
+    ManifestRegistry::load(&manifests_dir).expect("must load");
+}
 
+#[tokio::test]
+async fn passthrough_rejects_forward_websockets_with_non_http_base_url() {
+    let dir = TempDir::new().unwrap();
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+    std::fs::write(
+        manifests_dir.join("ws.toml"),
+        r#"
+[provider]
+name = "ws"
+description = "t"
+handler = "passthrough"
+base_url = "ftp://example.com"
+path_prefix = "/ws"
+forward_websockets = true
+"#,
+    )
+    .unwrap();
     let err = match ManifestRegistry::load(&manifests_dir) {
         Ok(_) => panic!("expected load to fail"),
         Err(e) => e,
@@ -1178,8 +1201,8 @@ forward_websockets = true
     let msg = format!("{err}");
     assert!(msg.contains("forward_websockets"), "got: {msg}");
     assert!(
-        msg.contains("#94") || msg.contains("WebSocket"),
-        "should reference tracking issue or feature name: {msg}"
+        msg.contains("http://") || msg.contains("https://"),
+        "got: {msg}"
     );
 }
 
