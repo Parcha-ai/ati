@@ -257,6 +257,7 @@ _e2e_cleanup() {
     # gets to keep one of our ports past harness exit.
     kill_port_owners "${PROXY_PORT:-}" \
         "${PORT_UPSTREAM_HTTP:-}" "${PORT_UPSTREAM_HTTP_SLOW:-}" \
+        "${PORT_UPSTREAM_HTTP_BIG:-}" \
         "${PORT_UPSTREAM_WS:-}" "${PORT_UPSTREAM_WS_BH:-}"
     if [[ "${KEEP_TMPDIR:-0}" != "1" ]] \
        && [[ -n "${TMPDIR_E2E:-}" && -d "$TMPDIR_E2E" ]]; then

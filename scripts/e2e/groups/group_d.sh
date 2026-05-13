@@ -80,6 +80,29 @@ else
         "no x-bb-api-key in upgrade. WS_LOG tail: $(tail -1 "$WS_LOG" | head -c 400)"
 fi
 
+# --- D6b: RFC 7230 §6.1 Connection-hop stripping on WS upgrade.
+# Greptile #99 P1 caught that connection_hop_names() was wired into
+# filter_request_headers but not into filter_ws_client_headers — a WS
+# upgrade carrying `Connection: keep-alive, X-Custom-Hop` had the
+# Connection header itself stripped but X-Custom-Hop forwarded verbatim.
+# Probe sends the same header and asserts the upstream upgrade record
+# does NOT carry it.
+: > "$WS_LOG"
+TS=$(now); SIG=$(sign "$TS" GET /ws/hopcheck "$S1")
+python3 "$E2E_DIR/ws_probe.py" \
+    --url "ws://127.0.0.1:$PROXY_PORT/ws/hopcheck" \
+    --header "X-Sandbox-Signature: $SIG" \
+    --header "Connection: keep-alive, X-Custom-Hop" \
+    --header "X-Custom-Hop: should-be-stripped-on-ws" \
+    --send-text "hop" > "$TMPDIR_E2E/d6b.out" 2>&1 || true
+sleep 0.1
+if grep -q '"x-custom-hop":' "$WS_LOG"; then
+    case_fail "D6b_ws_connection_hop_stripping" \
+        "X-Custom-Hop leaked to upstream WS upgrade. WS_LOG tail: $(tail -1 "$WS_LOG" | head -c 400)"
+else
+    case_pass "D6b_ws_connection_hop_stripping"
+fi
+
 # --- D7: auth_query token injected on upgrade URL (Greptile #98 P1) ---
 # The /wsq route uses auth_type=query, auth_query_name=token. The upstream
 # should see ?token=<key> in the path of its upgrade request.
@@ -114,15 +137,16 @@ else
         "rc=$d8_rc, WS_LOG tail: $(tail -1 "$WS_LOG" | head -c 300)"
 fi
 
-# --- D8b: subprotocol echoed back TO client (proxy must call
-# WebSocketUpgrade::protocols on the inbound side; current impl uses bare
-# WebSocketUpgrade::from_request so this FAILS until the proxy fix lands).
-# Documenting this as a Known Issue surfaced by the harness.
+# --- D8b: subprotocol echoed back TO client. Regression guard for the
+# fix in this PR: `handle_passthrough_ws` now captures the client's
+# offered subprotocol list and passes it to `WebSocketUpgrade::protocols`
+# before `on_upgrade`. axum picks the first match and writes it onto the
+# inbound 101 response.
 if grep -q '"subprotocol_negotiated":\s*"chat"' "$TMPDIR_E2E/d8.out"; then
     case_pass "D8b_subprotocol_echoed_to_client"
 else
     case_fail "D8b_subprotocol_echoed_to_client" \
-        "client got no subprotocol back. probe: $(head -c 200 "$TMPDIR_E2E/d8.out")  (KNOWN: proxy doesn't yet call WebSocketUpgrade::protocols on the inbound side)"
+        "client got no subprotocol back — regression in WebSocketUpgrade::protocols wiring. probe: $(head -c 200 "$TMPDIR_E2E/d8.out")"
 fi
 
 # --- D9: forward_websockets=false → upgrade rejected ---

@@ -81,6 +81,10 @@ TS=$(now); SIG=$(sign "$TS" POST /slow/x "$S2")
 
 # Fire 50 concurrent requests in the background. Each writes its status code
 # to a per-request file. Wall-clock budget is ~3s (1.5s upstream sleep + RTT).
+# Wipe the mock log first so we can use it as a synchronization point —
+# polling for a slow-upstream record arrival is more reliable than a
+# `sleep 0.5` under CI load (Greptile #99 P2).
+: > "$MOCK_LOG"
 INFLIGHT_PIDS=()
 for i in $(seq 1 50); do
     (curl -sS -o /dev/null -w '%{http_code}\n' -m 6 \
@@ -91,8 +95,16 @@ for i in $(seq 1 50); do
 done
 INFLIGHT_KICKED_AT=$(date +%s)
 
-# Mid-flight: at +0.5s rotate to S1 + SIGHUP.
-sleep 0.5
+# Wait deterministically until the slow upstream confirms at least one
+# request has crossed sig-verify and is now sleeping in the handler. The
+# slow handler logs to $MOCK_LOG synchronously on entry (see mock_http.py
+# log_record() before time.sleep). 1.4s is < the 1.5s upstream sleep, so
+# the rotation lands while requests are still pinned mid-flight.
+for _ in $(seq 1 20); do
+    if [[ -s "$MOCK_LOG" ]]; then break; fi
+    sleep 0.05
+done
+
 rotate_keyring "$E2E_DIR/fixtures/op_bootstrap.json"
 kill -HUP "$ATI_PID"
 

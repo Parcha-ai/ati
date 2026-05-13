@@ -53,6 +53,10 @@ fi
 export PROXY_PORT=18910
 export PORT_UPSTREAM_HTTP=18920
 export PORT_UPSTREAM_HTTP_SLOW=18921
+# Group C's "big-response" upstream — declared at the orchestrator level
+# so the preflight kill_port_owners list catches it on re-run-after-abort
+# (Greptile #99 P2: previously hardcoded inside group_c.sh only).
+export PORT_UPSTREAM_HTTP_BIG=18922
 export PORT_UPSTREAM_WS=18930
 export PORT_UPSTREAM_WS_BH=18931
 
@@ -72,7 +76,7 @@ source "$E2E_DIR/lib.sh"
 # Anything left over from a previous abort is killed up front so the first
 # start_proxy doesn't EADDRINUSE silently.
 kill_port_owners "$PROXY_PORT" "$PORT_UPSTREAM_HTTP" "$PORT_UPSTREAM_HTTP_SLOW" \
-    "$PORT_UPSTREAM_WS" "$PORT_UPSTREAM_WS_BH"
+    "$PORT_UPSTREAM_HTTP_BIG" "$PORT_UPSTREAM_WS" "$PORT_UPSTREAM_WS_BH"
 sleep 0.1
 
 # --- manifest rendering ----------------------------------------------------

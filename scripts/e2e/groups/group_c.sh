@@ -9,8 +9,10 @@ S1="11111111111111111111111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 if [[ -z "${MOCK_PIDS[*]:-}" ]]; then
     start_mock_http "$PORT_UPSTREAM_HTTP" echo
 fi
-# Also start the big-response upstream for C11
-BIG_PORT=18922
+# Also start the big-response upstream for C11. Use the orchestrator-
+# exported port so preflight cleanup + EXIT-trap kill_port_owners cover it
+# on re-run-after-abort (Greptile #99 P2).
+BIG_PORT="${PORT_UPSTREAM_HTTP_BIG:-18922}"
 start_mock_http "$BIG_PORT" big_response --big-size 1048576
 
 # Install ALL the C-relevant manifests on a single proxy boot

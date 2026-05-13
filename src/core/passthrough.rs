@@ -1002,9 +1002,18 @@ fn urlencode(value: &str) -> String {
 /// can need.
 fn filter_ws_client_headers(src: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::with_capacity(src.len());
+    // RFC 7230 §6.1: headers named in `Connection:` are hop-by-hop. The HTTP
+    // path strips these in `filter_request_headers`; the WS upgrade path is
+    // a real socket too and the same leak applies — `Connection: keep-alive,
+    // X-Custom-Hop` would otherwise drop `Connection` but forward
+    // `X-Custom-Hop` verbatim to the upstream. (Greptile #99 P1)
+    let conn_hops = connection_hop_names(src);
     for (name, value) in src.iter() {
         let n = name.as_str();
         if HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(n)) {
+            continue;
+        }
+        if conn_hops.iter().any(|h| h.eq_ignore_ascii_case(n)) {
             continue;
         }
         if is_sandbox_internal_header(n) {
