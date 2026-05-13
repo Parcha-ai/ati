@@ -94,11 +94,12 @@ where
         .with_resource(resource.clone())
         .with_batch_exporter(span_exporter)
         .build();
-    // Install the tracer provider globally so any library code calling
-    // `opentelemetry::global::tracer(...)` gets a real (sampled, exporting)
-    // tracer. Without this, third-party crates that lookup the global
-    // provider receive a noop tracer and their spans never export.
-    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+    // Build the local tracer NOW (for the tracing-opentelemetry layer) so we
+    // can hand it back to the caller even if the metric exporter fails below.
+    // Crucially, we do NOT install the tracer provider globally yet — see
+    // the install-globals block at the bottom of this function. Otherwise a
+    // metric-exporter failure would leave `opentelemetry::global::*` pointing
+    // at a tracer provider we're about to shut down.
     let tracer = tracer_provider.tracer(TRACER_NAME);
 
     // --- Meter provider ---
@@ -107,6 +108,7 @@ where
         Err(e) => {
             eprintln!("ati: failed to build OTLP metric exporter: {e}");
             // Shutdown the already-built tracer provider before bailing.
+            // Globals are still untouched at this point — no dangling refs.
             let _ = tracer_provider.shutdown();
             return None;
         }
@@ -117,8 +119,10 @@ where
         .with_reader(reader)
         .build();
 
-    // Set the global meter provider so `opentelemetry::global::meter(...)`
-    // returns a meter backed by our exporter.
+    // --- Install globals: only AFTER both providers are built successfully.
+    // Order: tracer → meter. If we ever add a logs provider, install it in
+    // this same final block, never before its sibling has been built.
+    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
     let meter = opentelemetry::global::meter(METER_NAME);

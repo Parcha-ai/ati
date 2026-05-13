@@ -80,7 +80,7 @@ sentry-tracing = { version = "0.47", optional = true }
 # graph" compile error; bump them together when upgrading.
 opentelemetry = { version = "0.31", default-features = false, features = ["trace", "metrics"], optional = true }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "metrics", "rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-client", "trace", "metrics"], optional = true }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"], optional = true }
 tracing-opentelemetry = { version = "0.32", default-features = false, features = ["tracing-log"], optional = true }
 
 # Serialization
