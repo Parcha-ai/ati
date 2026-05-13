@@ -80,6 +80,11 @@ pub struct PassthroughRoute {
     pub deny_globs: GlobSet,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
+    /// TCP connect timeout for the upstream. The HTTP path bakes this into
+    /// the per-route `reqwest::Client`; the WS path uses it to wrap
+    /// `tokio_tungstenite::connect_async` in `tokio::time::timeout`
+    /// (Greptile P1 on PR #98 — `connect_async` has no built-in timeout).
+    pub connect_timeout_seconds: u64,
     /// Whether this route is allowed to be upgraded to a WebSocket. When
     /// `false`, an inbound `Upgrade: websocket` request is treated as
     /// ordinary HTTP — which the upstream will likely reject. When `true`,
@@ -303,6 +308,7 @@ fn compile_route(
         deny_globs,
         max_request_bytes: p.max_request_bytes,
         max_response_bytes: p.max_response_bytes,
+        connect_timeout_seconds: p.connect_timeout_seconds,
         forward_websockets: p.forward_websockets,
         client: Arc::new(client),
     })
@@ -862,7 +868,40 @@ async fn handle_passthrough_ws(
     upstream_path: String,
     query: Option<String>,
 ) -> Response<Body> {
-    let upstream_url = build_ws_upstream_url(&route.base_url, &upstream_path, query.as_deref());
+    // Append auth_query (if any) to the upstream URL. Routes with
+    // `auth_type = "query"` carry the credential in the query string;
+    // earlier PR-5 code only handled the header-based variants.
+    // (Greptile P1 #98)
+    let mut combined_query = query.unwrap_or_default();
+    if let Some((ref name, ref value)) = route.auth_query {
+        if !combined_query.is_empty() {
+            combined_query.push('&');
+        }
+        let encoded_value = urlencode(value);
+        combined_query.push_str(name);
+        combined_query.push('=');
+        combined_query.push_str(&encoded_value);
+    }
+    let upstream_url = build_ws_upstream_url(
+        &route.base_url,
+        &upstream_path,
+        if combined_query.is_empty() {
+            None
+        } else {
+            Some(combined_query.as_str())
+        },
+    );
+
+    // Extract + filter the inbound client headers BEFORE consuming `req`
+    // via `WebSocketUpgrade::from_request`. axum's extractor takes
+    // ownership of the request, so we have to capture anything we need to
+    // forward (subprotocol negotiation, custom application headers, etc.)
+    // up front. We use the same hop-by-hop / sandbox-internal filter as
+    // the HTTP path — and additionally strip the `sec-websocket-*`
+    // handshake-control headers, which tokio_tungstenite generates fresh
+    // for the upstream connection.
+    let client_headers = filter_ws_client_headers(req.headers());
+
     let upgrade = match WebSocketUpgrade::from_request(req, &()).await {
         Ok(u) => u,
         Err(rej) => {
@@ -875,7 +914,7 @@ async fn handle_passthrough_ws(
     };
     let route_for_log = route.name.clone();
     upgrade.on_upgrade(move |socket| async move {
-        if let Err(e) = pump_ws(route, upstream_url.clone(), socket).await {
+        if let Err(e) = pump_ws(route, upstream_url.clone(), client_headers, socket).await {
             tracing::warn!(
                 route = %route_for_log,
                 error = %e,
@@ -886,11 +925,67 @@ async fn handle_passthrough_ws(
     })
 }
 
-/// Open the upstream WebSocket connection (injecting auth + extra headers)
-/// and pump frames in both directions until one side closes.
+/// Minimal percent-encoder for the auth_query value. Only encodes a
+/// conservative set that's safe in URL query position (RFC 3986).
+fn urlencode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+/// Filter inbound client headers for forwarding through a WS handshake.
+/// Strips:
+/// - hop-by-hop headers (RFC 7230 §6.1)
+/// - sandbox-internal headers (host, authorization, x-sandbox-*)
+/// - `sec-websocket-*` handshake-control headers — tokio_tungstenite
+///   generates fresh `Sec-WebSocket-Key`/`Sec-WebSocket-Version` for
+///   the upstream connection; forwarding the client's values would
+///   break the handshake.
+///
+/// What survives: `Sec-WebSocket-Protocol` (subprotocol negotiation) is
+/// explicitly KEPT — that's the one `sec-websocket-*` header upstreams
+/// can need.
+fn filter_ws_client_headers(src: &HeaderMap) -> HeaderMap {
+    let mut out = HeaderMap::with_capacity(src.len());
+    for (name, value) in src.iter() {
+        let n = name.as_str();
+        if HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(n)) {
+            continue;
+        }
+        if is_sandbox_internal_header(n) {
+            continue;
+        }
+        let n_lc = n.to_ascii_lowercase();
+        // Strip Sec-WebSocket-Key / -Version / -Accept / -Extensions.
+        // Keep Sec-WebSocket-Protocol for subprotocol negotiation.
+        if n_lc.starts_with("sec-websocket-") && n_lc != "sec-websocket-protocol" {
+            continue;
+        }
+        // Strip the upgrade signaling headers — tokio_tungstenite handles
+        // those itself on the upstream side.
+        if matches!(n_lc.as_str(), "upgrade" | "connection") {
+            continue;
+        }
+        out.append(name.clone(), value.clone());
+    }
+    out
+}
+
+/// Open the upstream WebSocket connection (injecting auth, extra
+/// headers, and the filtered client headers) and pump frames in both
+/// directions until one side closes. Ping/Pong frames are NOT relayed:
+/// both libraries auto-respond on their own leg, so forwarding would
+/// cause double-Pongs (Greptile P2 #98).
 async fn pump_ws(
     route: Arc<PassthroughRoute>,
     upstream_url: String,
+    client_headers: HeaderMap,
     mut sandbox: WebSocket,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::str::FromStr;
@@ -902,6 +997,17 @@ async fn pump_ws(
         .as_str()
         .into_client_request()
         .map_err(|e| format!("invalid upstream URL: {e}"))?;
+
+    // Forward filtered client headers FIRST so route-configured ones can
+    // override them (host_override / auth_header / extra_headers below
+    // use `insert` which replaces).
+    for (name, value) in &client_headers {
+        if let Ok(n) = tokio_tungstenite::tungstenite::http::HeaderName::from_str(name.as_str()) {
+            if let Ok(v) = TtHeaderValue::from_bytes(value.as_bytes()) {
+                up_req.headers_mut().append(n, v);
+            }
+        }
+    }
     if let Some(ref host_override) = route.host_override {
         if let Ok(v) = TtHeaderValue::from_str(host_override) {
             up_req.headers_mut().insert("host", v);
@@ -924,15 +1030,35 @@ async fn pump_ws(
         }
     }
 
-    let (upstream, _resp) = tokio_tungstenite::connect_async(up_req)
-        .await
-        .map_err(|e| format!("upstream WS handshake failed: {e}"))?;
+    // Bound the upstream handshake. `connect_async` has no built-in
+    // timeout, so a stalled upstream would leak one task per WS attempt
+    // (the 101 back to the client is already sent at this point).
+    let connect_timeout = Duration::from_secs(route.connect_timeout_seconds.max(1));
+    let upstream =
+        match tokio::time::timeout(connect_timeout, tokio_tungstenite::connect_async(up_req)).await
+        {
+            Ok(Ok((ws, _resp))) => ws,
+            Ok(Err(e)) => return Err(format!("upstream WS handshake failed: {e}").into()),
+            Err(_) => {
+                return Err(format!(
+                    "upstream WS handshake timed out after {}s",
+                    connect_timeout.as_secs()
+                )
+                .into());
+            }
+        };
     let (mut up_tx, mut up_rx) = upstream.split();
 
     loop {
         tokio::select! {
             inbound = sandbox.recv() => match inbound {
                 Some(Ok(msg)) => {
+                    // Drop Ping/Pong from the relay — each library auto-
+                    // responds on its own leg. Forwarding them produces
+                    // double-Pongs that confuse heartbeat counters.
+                    if matches!(msg, Message::Ping(_) | Message::Pong(_)) {
+                        continue;
+                    }
                     let tt_msg = axum_to_tungstenite(msg);
                     let is_close = matches!(tt_msg, TtMessage::Close(_));
                     if let Err(e) = up_tx.send(tt_msg).await {
@@ -949,6 +1075,9 @@ async fn pump_ws(
             },
             outbound = up_rx.next() => match outbound {
                 Some(Ok(msg)) => {
+                    if matches!(msg, TtMessage::Ping(_) | TtMessage::Pong(_)) {
+                        continue;
+                    }
                     let is_close = matches!(msg, TtMessage::Close(_));
                     if let Some(m) = tungstenite_to_axum(msg) {
                         if let Err(e) = sandbox.send(m).await {

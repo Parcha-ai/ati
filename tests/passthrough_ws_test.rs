@@ -283,6 +283,209 @@ async fn ws_passthrough_propagates_binary_frames() {
 }
 
 #[tokio::test]
+async fn ws_passthrough_injects_auth_query_into_upstream_url() {
+    // Greptile P1 on PR #98: routes with auth_type = "query" used to
+    // silently lose the credential in the WS path because pump_ws only
+    // injected header-style auth.
+    use std::sync::Mutex;
+    let captured_query: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let captured_query_clone = captured_query.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let _upstream = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let captured = captured_query_clone.clone();
+            tokio::spawn(async move {
+                #[allow(clippy::result_large_err)]
+                let ws = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        let uri = req.uri();
+                        *captured.lock().unwrap() = uri.query().map(String::from);
+                        Ok(resp)
+                    },
+                )
+                .await;
+                if let Ok(ws) = ws {
+                    let (mut tx, _) = ws.split();
+                    let _ = tx
+                        .send(tokio_tungstenite::tungstenite::Message::Text("ok".into()))
+                        .await;
+                }
+            });
+        }
+    });
+
+    // Manifest with auth_type = "query"
+    let dir = TempDir::new().unwrap();
+    let manifests = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("ws.toml"),
+        format!(
+            r#"
+[provider]
+name = "ws-q"
+description = "t"
+handler = "passthrough"
+base_url = "http://{upstream_addr}"
+path_prefix = "/api"
+forward_websockets = true
+auth_type = "query"
+auth_query_name = "token"
+auth_key_name = "ws_query_secret"
+"#
+        ),
+    )
+    .unwrap();
+
+    let keyring = {
+        let _guard = env_mutex().lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("ATI_KEY_WS_QUERY_SECRET", "tok 123/with&punct");
+        let kr = Keyring::from_env();
+        std::env::remove_var("ATI_KEY_WS_QUERY_SECRET");
+        kr
+    };
+
+    let registry = ManifestRegistry::load(&manifests).unwrap();
+    let passthrough = PassthroughRouter::build(&registry, &keyring).unwrap();
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring,
+        jwt_config: None,
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+        db: ati::core::db::DbState::Disabled,
+        passthrough: Some(Arc::new(passthrough)),
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &Keyring::empty(),
+            )
+            .unwrap(),
+        ),
+    });
+    let app = build_router(state);
+    std::mem::forget(dir);
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(proxy_listener, app).await;
+    });
+
+    let client_url = format!("ws://{proxy_addr}/api/x");
+    let (mut client, _) = tokio_tungstenite::connect_async(&client_url)
+        .await
+        .expect("client connect");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), client.next()).await;
+    let _ = client
+        .send(tokio_tungstenite::tungstenite::Message::Close(None))
+        .await;
+
+    let q = captured_query.lock().unwrap().clone();
+    assert!(
+        q.as_deref()
+            .is_some_and(|s| s.contains("token=tok%20123%2Fwith%26punct")),
+        "upstream URL must include percent-encoded token query param; got: {q:?}"
+    );
+}
+
+#[tokio::test]
+async fn ws_passthrough_forwards_subprotocol_header() {
+    // Greptile P2 on PR #98: client headers were dropped by passing
+    // `req` directly to WebSocketUpgrade::from_request. Now we extract
+    // and forward Sec-WebSocket-Protocol so subprotocol-aware upstreams
+    // can negotiate.
+    use std::sync::Mutex;
+    let captured_proto: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let captured_clone = captured_proto.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let _upstream = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let captured = captured_clone.clone();
+            tokio::spawn(async move {
+                #[allow(clippy::result_large_err)]
+                let ws = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     mut resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        let proto = req
+                            .headers()
+                            .get("sec-websocket-protocol")
+                            .and_then(|v| v.to_str().ok())
+                            .map(String::from);
+                        // Echo the protocol back so the client's strict
+                        // handshake validator accepts the response.
+                        if let Some(ref p) = proto {
+                            if let Ok(v) =
+                                tokio_tungstenite::tungstenite::http::HeaderValue::from_str(p)
+                            {
+                                resp.headers_mut().insert("sec-websocket-protocol", v);
+                            }
+                        }
+                        *captured.lock().unwrap() = proto;
+                        Ok(resp)
+                    },
+                )
+                .await;
+                if let Ok(ws) = ws {
+                    let (mut tx, _) = ws.split();
+                    let _ = tx
+                        .send(tokio_tungstenite::tungstenite::Message::Text("ok".into()))
+                        .await;
+                }
+            });
+        }
+    });
+
+    let upstream_url = format!("http://{upstream_addr}");
+    let proxy_addr = spawn_proxy(&upstream_url, true, None).await;
+
+    // We only need to verify the upstream RECEIVED the header. The
+    // client-side subprotocol echo back through axum is a separate
+    // axum concern (subprotocol negotiation requires `WebSocketUpgrade::
+    // protocols()` to be wired with the offered list; that's a
+    // follow-up). For now: send the handshake, ignore whether the
+    // client-side strict handshake validator complains, and check
+    // captured_proto on the upstream side after a short grace period.
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut full = format!("ws://{proxy_addr}/api/x")
+        .into_client_request()
+        .unwrap();
+    full.headers_mut().insert(
+        "sec-websocket-protocol",
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_static("graphql-transport-ws"),
+    );
+    // Don't unwrap — the client may legitimately reject the response
+    // because axum doesn't echo subprotocols today. We only care that
+    // the upstream saw the header before the handshake fails.
+    let _ = tokio_tungstenite::connect_async(full).await;
+
+    // Give the upstream a moment to record the captured header.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let proto = captured_proto.lock().unwrap().clone();
+    assert_eq!(
+        proto.as_deref(),
+        Some("graphql-transport-ws"),
+        "upstream must see the client's Sec-WebSocket-Protocol; got: {proto:?}"
+    );
+}
+
+#[tokio::test]
 async fn ws_passthrough_propagates_close_frame() {
     let (upstream_addr, _upstream) = spawn_echo_upstream(None).await;
     let upstream_url = format!("http://{upstream_addr}");
