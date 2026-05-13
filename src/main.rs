@@ -747,7 +747,7 @@ async fn main() {
         Commands::Proxy { .. } => core::logging::LogMode::Proxy,
         _ => core::logging::LogMode::Cli,
     };
-    let _sentry_guard = core::logging::init(log_mode, cli.verbose);
+    let _init_guards = core::logging::init(log_mode, cli.verbose);
 
     let result = match &cli.command {
         Commands::Run { tool_name, args } => cli::call::execute(&cli, tool_name, args).await,
@@ -818,10 +818,10 @@ async fn main() {
             }
         }
         let exit_code = core::error::exit_code_for_error(e.as_ref());
-        // Flush the sentry transport queue before process::exit (which
-        // bypasses destructors). Without this, queued error events are
-        // lost on CLI exit.
-        core::logging::shutdown(_sentry_guard);
+        // Flush the Sentry transport queue and OTel exporters before
+        // process::exit (which bypasses destructors). Without this, queued
+        // error events / spans / metrics are lost on CLI exit.
+        core::logging::shutdown(_init_guards);
         process::exit(exit_code);
     }
 }

@@ -13,6 +13,8 @@ pub mod logging;
 pub mod manifest;
 pub mod mcp_client;
 pub mod openapi;
+#[cfg(feature = "otel")]
+pub mod otel;
 pub mod passthrough;
 pub mod rate;
 pub mod response;
