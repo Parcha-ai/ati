@@ -52,15 +52,15 @@ fn example_manifests_parse() {
 
 #[test]
 fn caddyfile_template_has_terminator_pattern() {
-    // Sanity check: thin TLS terminator → 127.0.0.1:8080. If we
-    // accidentally publish a Caddyfile with path-based routing or
-    // header-rewriting, that's a regression to the parcha-proxy era
-    // we're explicitly leaving behind.
+    // Sanity check: thin TLS terminator → 127.0.0.1:8080 on the vhost
+    // block. If we accidentally publish a Caddyfile with path-based
+    // routing or header-rewriting, that's a regression to the
+    // parcha-proxy era we're explicitly leaving behind.
     let caddyfile =
         std::fs::read_to_string(examples_dir().join("caddy/Caddyfile")).expect("Caddyfile present");
     assert!(
         caddyfile.contains("reverse_proxy 127.0.0.1:8080"),
-        "expected thin TLS terminator pattern; got:\n{caddyfile}"
+        "expected thin TLS terminator pattern (vhost block); got:\n{caddyfile}"
     );
     // Negative: no header_up, no path-based handlers, no forward_auth —
     // those are the ATI-internal concerns we DON'T want Caddy to do.
@@ -122,26 +122,53 @@ fn rotate_keyring_service_uses_runtime_directory_not_lock_file() {
 }
 
 #[test]
-fn caddyfile_documents_https_redirect_option() {
-    // Greptile review on PR #97 flagged that the bare `:80
-    // reverse_proxy` in the example exposes passthrough routes over
-    // plain HTTP. The example deliberately keeps :80 plain (sandboxes
-    // hit by IP, no LE cert on the IP), but documents the redirect
-    // alternative for vhost-only deployments.
+fn caddyfile_default_is_https_redirect_not_plain_proxy() {
+    // Greptile review 3 on PR #97 (P1): the prior version of this
+    // Caddyfile reverse-proxied :80 plaintext by default. Combined with
+    // the recommended `--sig-verify-mode log` 24h soak window, that left
+    // passthrough routes (LLM gateway, browser API, git storage) wide
+    // open to anyone on the network — log mode never returns 403.
+    //
+    // The fix: make HTTPS redirect (308) the active :80 block, and move
+    // the plain-HTTP fallback into a commented opt-in for IP-only
+    // egress deployments (Daytona CIDR allowlist), with an explicit
+    // requirement that those run sig-verify-mode=enforce.
     let caddyfile =
         std::fs::read_to_string(examples_dir().join("caddy/Caddyfile")).expect("Caddyfile");
+
+    // The redirect must be the ACTIVE (uncommented) :80 directive.
+    // Greptile's "documents the alternative" framing wasn't strong
+    // enough — operators who copy-paste don't read comments.
+    let active_lines: Vec<&str> = caddyfile
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect();
+    let active = active_lines.join("\n");
     assert!(
-        caddyfile.contains("redir https://{host}{uri} 308"),
-        "Caddyfile must document the HTTPS-redirect alternative as a commented \
-         example so operators with TLS-only deployments don't accidentally expose \
-         plain HTTP. Got:\n{caddyfile}"
+        active.contains("redir https://{host}{uri} 308"),
+        "Caddyfile :80 MUST default to a 308 HTTPS redirect, not a \
+         plaintext reverse_proxy. The plain-HTTP variant lives in a \
+         commented opt-in block. Got active lines:\n{active}"
     );
     assert!(
-        caddyfile.contains("HMAC")
-            || caddyfile.contains("sig-verify")
-            || caddyfile.contains("sig_verify"),
-        "Caddyfile :80 comment must explain why plain HTTP is acceptable in \
-         the default config (HMAC sig-verify protects the routes). Got:\n{caddyfile}"
+        !active.contains(":80 {\n\treverse_proxy")
+            && !active.contains(":80 {\n    reverse_proxy"),
+        "Caddyfile :80 must NOT plaintext-reverse_proxy by default. \
+         Got active lines:\n{active}"
+    );
+
+    // The plain-HTTP fallback must still be DOCUMENTED (as a commented
+    // block) so operators on Daytona-style IP-only egress know how to
+    // opt in.
+    assert!(
+        caddyfile.contains("Daytona") || caddyfile.contains("IP address"),
+        "Caddyfile must explain when the plain-HTTP opt-in is needed. \
+         Got:\n{caddyfile}"
+    );
+    assert!(
+        caddyfile.contains("enforce"),
+        "Caddyfile plain-HTTP opt-in must require sig-verify-mode=enforce. \
+         Got:\n{caddyfile}"
     );
 }
 

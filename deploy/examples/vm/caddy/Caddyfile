@@ -2,25 +2,33 @@
 	admin off
 }
 
-# IMPORTANT: this `:80` block reverse-proxies plain HTTP traffic to ATI on
-# 127.0.0.1:8080.
+# DEFAULT: redirect every plain-HTTP request to HTTPS. This is the safe
+# posture for the recommended `--sig-verify-mode log` 24h soak window —
+# log mode does NOT block unsigned requests, so leaving :80 wide open
+# during soak would let any caller on the network reach passthrough
+# routes (LLM gateway, browser API, git storage, etc.) over the wire.
 #
-# Deployments where sandboxes reach the proxy by IP (e.g. Daytona-style
-# CIDR-allowlisted egress) need plaintext here — TLS termination on the
-# IP without an LE cert isn't workable. The sandbox-side HMAC signing
-# (Parcha-ai/ati#96 sig-verify) is what protects passthrough routes;
-# plain HTTP is fine when sig-verify is in `enforce` mode.
+# Even in `--sig-verify-mode enforce`, redirecting prevents accidental
+# http:// callers from leaking their HMAC signature + payload over plain
+# HTTP before the proxy returns 403.
 #
-# Deployments where every caller goes through a TLS-terminated subdomain
-# (the vhost block below) should REPLACE the line below with a redirect,
-# so an accidental http:// caller doesn't leak credentials over the wire:
+# The 308 (vs 301/302) preserves request method and body, which matters
+# for the POST-heavy passthrough traffic (chat completions, OTLP).
+:80 {
+	redir https://{host}{uri} 308
+}
+
+# OPT-IN ALTERNATIVE: deployments where sandboxes reach the proxy by IP
+# address (e.g. Daytona-style CIDR-allowlisted egress) need plaintext
+# :80 — TLS termination on a raw IP isn't workable without a public DNS
+# name + Let's Encrypt cert. In that case ONLY, replace the redirect
+# block above with the reverse_proxy block below, AND run ATI in
+# `--sig-verify-mode enforce` so sig-verify rejects unsigned requests.
+# Plain HTTP during log-mode soak is NOT a supported configuration.
 #
 #     :80 {
-#         redir https://{host}{uri} 308
+#         reverse_proxy 127.0.0.1:8080
 #     }
-:80 {
-	reverse_proxy 127.0.0.1:8080
-}
 
 # Public TLS-terminated subdomains. Caddy auto-provisions LE certs.
 api.example.com, bb.example.com, otel.example.com, git.example.com {
