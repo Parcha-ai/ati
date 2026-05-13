@@ -137,7 +137,9 @@ fn rotate_keyring(
     }
     if !key_path.exists() {
         return Err(format!(
-            "no session key at {} — keyring was not encrypted with --features local",
+            "no session key at {} — keyring was bootstrapped without the persistent session key. \
+             Re-run `ati edge bootstrap-keyring` to regenerate it (it'll write a fresh \
+             .keyring-key and re-encrypt keyring.enc with it).",
             key_path.display()
         )
         .into());

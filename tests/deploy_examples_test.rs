@@ -91,6 +91,61 @@ fn systemd_unit_runs_proxy_with_passthrough_enabled() {
 }
 
 #[test]
+fn rotate_keyring_service_uses_runtime_directory_not_lock_file() {
+    // Greptile review on PR #97 flagged that
+    //   ConditionPathExists=!/var/lib/ati/.rotation-in-progress
+    // can silently skip the unit forever if a crash leaves the lock
+    // file orphaned. systemd's RuntimeDirectory= is auto-cleaned on
+    // unit stop (even after a crash), so we use that instead.
+    let service =
+        std::fs::read_to_string(examples_dir().join("systemd/ati-rotate-keyring.service"))
+            .expect("rotate-keyring service present");
+    // Look for ConditionPathExists=! at the start of a line (an active
+    // directive), not inside a comment.
+    let has_active_cond = service
+        .lines()
+        .any(|l| l.trim_start().starts_with("ConditionPathExists=!"));
+    assert!(
+        !has_active_cond,
+        "rotate-keyring service must NOT use ConditionPathExists=! \
+         (silent-skip-on-orphan footgun); use RuntimeDirectory= instead. Got:\n{service}"
+    );
+    assert!(
+        service.contains("RuntimeDirectory=ati-rotate-keyring"),
+        "rotate-keyring service must use RuntimeDirectory= for crash-safe \
+         lock management. Got:\n{service}"
+    );
+    assert!(
+        !service.contains(".rotation-in-progress"),
+        "no manual lockfile should remain in the unit. Got:\n{service}"
+    );
+}
+
+#[test]
+fn caddyfile_documents_https_redirect_option() {
+    // Greptile review on PR #97 flagged that the bare `:80
+    // reverse_proxy` in the example exposes passthrough routes over
+    // plain HTTP. The example deliberately keeps :80 plain (sandboxes
+    // hit by IP, no LE cert on the IP), but documents the redirect
+    // alternative for vhost-only deployments.
+    let caddyfile =
+        std::fs::read_to_string(examples_dir().join("caddy/Caddyfile")).expect("Caddyfile");
+    assert!(
+        caddyfile.contains("redir https://{host}{uri} 308"),
+        "Caddyfile must document the HTTPS-redirect alternative as a commented \
+         example so operators with TLS-only deployments don't accidentally expose \
+         plain HTTP. Got:\n{caddyfile}"
+    );
+    assert!(
+        caddyfile.contains("HMAC")
+            || caddyfile.contains("sig-verify")
+            || caddyfile.contains("sig_verify"),
+        "Caddyfile :80 comment must explain why plain HTTP is acceptable in \
+         the default config (HMAC sig-verify protects the routes). Got:\n{caddyfile}"
+    );
+}
+
+#[test]
 fn rotate_keyring_timer_and_service_pair_up() {
     let service =
         std::fs::read_to_string(examples_dir().join("systemd/ati-rotate-keyring.service"))

@@ -2,6 +2,22 @@
 	admin off
 }
 
+# IMPORTANT: this `:80` block reverse-proxies plain HTTP traffic to ATI on
+# 127.0.0.1:8080.
+#
+# Deployments where sandboxes reach the proxy by IP (e.g. Daytona-style
+# CIDR-allowlisted egress) need plaintext here — TLS termination on the
+# IP without an LE cert isn't workable. The sandbox-side HMAC signing
+# (Parcha-ai/ati#96 sig-verify) is what protects passthrough routes;
+# plain HTTP is fine when sig-verify is in `enforce` mode.
+#
+# Deployments where every caller goes through a TLS-terminated subdomain
+# (the vhost block below) should REPLACE the line below with a redirect,
+# so an accidental http:// caller doesn't leak credentials over the wire:
+#
+#     :80 {
+#         redir https://{host}{uri} 308
+#     }
 :80 {
 	reverse_proxy 127.0.0.1:8080
 }

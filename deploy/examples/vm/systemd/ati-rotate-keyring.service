@@ -1,13 +1,24 @@
 [Unit]
 Description=Rotate the ATI keyring from 1Password and SIGHUP the live proxy
 Documentation=https://github.com/Parcha-ai/ati/blob/main/deploy/examples/vm/README.md
-# Don't trample a running rotation if the timer fires twice.
-ConditionPathExists=!/var/lib/ati/.rotation-in-progress
+# No manual ConditionPathExists=! lockfile — that would silently SKIP
+# the unit forever if a crash mid-rotation orphaned the lock. Instead
+# we use RuntimeDirectory= below: systemd creates it at unit start and
+# auto-cleans it on unit stop (including crash). If two rotations
+# overlap, the second one fails its mkdir cleanly with EEXIST and
+# systemd logs it — far better than a silent skip.
 
 [Service]
 Type=oneshot
 User=ati
 Group=ati
+
+# systemd-managed lock directory under /run/ati-rotate-keyring/. Created
+# at unit start, cleaned at unit stop (even after a crash). External
+# observers can read this dir's existence as the "rotation in progress"
+# signal.
+RuntimeDirectory=ati-rotate-keyring
+RuntimeDirectoryMode=0700
 
 # 1Password service-account token. Provisioned as root:ati 0440 outside
 # this unit so the service can read it via systemd's LoadCredential=
@@ -25,14 +36,12 @@ LoadCredential=op-token:/etc/op-service-account-token
 Environment=ATI_OP_VAULT=Production Secrets
 Environment=ATI_OP_ITEM=ATI Edge VM Keyring
 
-ExecStartPre=/usr/bin/touch /var/lib/ati/.rotation-in-progress
 ExecStart=/usr/local/bin/ati edge rotate-keyring \
     --vault "${ATI_OP_VAULT}" \
     --item "${ATI_OP_ITEM}" \
     --ati-dir /var/lib/ati \
     --op-token-file %d/op-token \
     --service ati
-ExecStopPost=/usr/bin/rm -f /var/lib/ati/.rotation-in-progress
 
 # Hardening — same posture as ati.service.
 ProtectSystem=strict
