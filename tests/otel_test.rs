@@ -113,3 +113,48 @@ async fn observability_middleware_buckets_two_distinct_unmatched_paths_identical
 fn _keep_sig_verify_import_used() {
     let _ = sig_verify::DEFAULT_EXEMPT_PATHS.len();
 }
+
+// ---------------------------------------------------------------------------
+// Regression: `try_init` must NOT panic when called from inside a tokio
+// runtime context.
+//
+// `core::logging::init` (and therefore `core::otel::try_init`) runs inside
+// `#[tokio::main] async fn main()` — i.e. *within* a Tokio runtime. The OTel
+// batch span exporter builds a reqwest client at init time. Two failure
+// modes are possible depending on which reqwest feature is selected on
+// opentelemetry-otlp:
+//
+//   - `reqwest-client` (async): the SDK's dedicated batch-processor thread
+//     later panics with "no reactor running" when it tries to call
+//     `reqwest::Client::send` outside an async context.
+//   - `reqwest-blocking-client`: in theory, `reqwest::blocking::Client::new()`
+//     panics with "Cannot start a runtime from within a runtime" when
+//     invoked inside a tokio context.
+//
+// We use the blocking variant. It works in practice because opentelemetry-otlp
+// 0.31.1 explicitly wraps client construction in `std::thread::spawn(...).join()`
+// to escape the parent runtime context (see opentelemetry-otlp-0.31.1
+// `src/exporter/http/mod.rs` around line 183). This test pins that contract:
+// if the SDK ever drops that workaround during a future version bump, the
+// test catches it before the binary ships.
+//
+// Notably also covers the original symptom that the local E2E surfaced —
+// `try_init` runs cleanly from within `#[tokio::main]`.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "otel")]
+#[tokio::test]
+async fn try_init_does_not_panic_inside_tokio_runtime() {
+    // Point at a definitely-unreachable endpoint. The exporter is built
+    // lazily — we only want to confirm `try_init` itself doesn't panic
+    // during reqwest-client construction. Whether the batch processor
+    // can later contact the endpoint is a separate concern (its own
+    // dedicated thread, with its own panic surface).
+    std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1");
+    std::env::set_var("OTEL_SERVICE_NAME", "ati-tokio-rt-regression");
+
+    let _ = ati::core::otel::try_init::<tracing_subscriber::Registry>();
+
+    std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+    std::env::remove_var("OTEL_SERVICE_NAME");
+}
