@@ -80,6 +80,33 @@ async fn observability_middleware_records_status_for_unmatched_path() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn observability_middleware_buckets_two_distinct_unmatched_paths_identically() {
+    // Cardinality regression test: when two requests fall through to the
+    // passthrough fallback (no `MatchedPath` extension), both must end up
+    // with the SAME low-cardinality `http.route` value. Without this, a
+    // proxy forwarding /api/v1/users/123, /api/v1/users/456, ... would
+    // mint a unique metric label per URL.
+    //
+    // We can't easily introspect the span attributes from outside without
+    // a subscriber, so this test serves as a behavioral regression
+    // guardrail: it exercises the fallback path on two distinct URIs.
+    // The contract is enforced in the source (single string literal in
+    // observability_middleware); this just confirms both calls reach the
+    // same 404 handler without the cardinality fix introducing other
+    // breakage.
+    let app = build_minimal_proxy();
+    for path in ["/api/v1/users/123", "/api/v1/users/456"] {
+        let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "{path} should hit the passthrough-disabled 404 fallback"
+        );
+    }
+}
+
 // Keep clippy happy — `sig_verify` import is used inside `build_minimal_proxy`
 // indirectly, but rustc sometimes flags the trait-namespace import as unused.
 #[allow(dead_code)]

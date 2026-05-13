@@ -1971,19 +1971,26 @@ async fn observability_middleware(req: HttpRequest<Body>, next: Next) -> Respons
 
     let method = req.method().clone();
     let uri = req.uri().clone();
-    // Prefer the matched-route template (`/skills/{name}`) when present so
-    // metric cardinality stays bounded; fall back to the raw path for
-    // passthrough/unmatched requests.
+    // `http.route` must be a *template* (low cardinality), not a raw path.
+    // axum's `MatchedPath` gives us the template for named routes
+    // (`/skills/{name}`). When no named route matches, the request falls
+    // through to the passthrough handler — using the raw path there would
+    // make every unique forwarded URL its own metric label, which blows up
+    // Prometheus/Mimir cardinality. Bucket all such requests under a single
+    // low-cardinality value; the passthrough span (added in PR B) records
+    // the actual route name + upstream as separate attributes.
+    let raw_path = uri.path().to_string();
     let route = req
         .extensions()
         .get::<axum::extract::MatchedPath>()
         .map(|m| m.as_str().to_string())
-        .unwrap_or_else(|| uri.path().to_string());
+        .unwrap_or_else(|| "/__passthrough_or_unmatched".to_string());
 
     let span = tracing::info_span!(
         "http.server.request",
         "http.request.method" = %method,
         "http.route" = %route,
+        "url.path" = %raw_path,
         "http.response.status_code" = tracing::field::Empty,
     );
 

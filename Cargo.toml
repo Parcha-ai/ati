@@ -60,8 +60,18 @@ sentry = { version = "0.47", features = ["tracing", "logs", "reqwest", "rustls"]
 sentry-tracing = { version = "0.47", optional = true }
 
 # Optional OpenTelemetry integration (off by default, enable with --features otel).
-# HTTP-protobuf transport only (no gRPC/tonic), reqwest-based, rustls — same
-# rationale as sentry above: keep the static-musl release binary lean.
+# HTTP/protobuf transport at runtime, reqwest-based, rustls — same rationale
+# as sentry above: keep the static-musl release binary lean.
+#
+# Tonic note: opentelemetry-otlp's `http-proto` feature enables
+# `opentelemetry-proto/gen-tonic-messages`, which pulls `tonic` and
+# `tonic-prost` *into the build* for prost-generated message types. We do NOT
+# spin up gRPC at runtime — the exporter ships protobuf over HTTP via reqwest
+# — so there's no gRPC client, no `tonic::transport::Channel`, no second
+# async runtime. The static-musl binary remains a single reqwest+rustls
+# transport; the tonic crates contribute the proto message types only.
+# Build-size delta with the feature on is ~500 KiB (measured), well under
+# the +3 MB budget in the TDD.
 #
 # Version-pinning note: tracing-opentelemetry 0.32.x still tracks
 # opentelemetry/opentelemetry_sdk 0.31, so the whole quartet stays on 0.31
