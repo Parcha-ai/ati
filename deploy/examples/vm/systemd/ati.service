@@ -13,6 +13,33 @@ Group=ati
 Environment=ATI_DIR=/var/lib/ati
 WorkingDirectory=/var/lib/ati
 
+# --- Optional OpenTelemetry export ---
+#
+# When the binary is built with `--features otel`, these env vars route
+# traces + metrics to your OTLP backend. See docs/OTEL.md.
+#
+# - Comment them out (or build without `--features otel`) for a fully
+#   offline deployment; the OTel layer becomes a compile-time no-op.
+# - The example shows Grafana Cloud OTLP; swap to Honeycomb / Tempo /
+#   Jaeger / a local OTel Collector by changing the endpoint.
+# - `OTEL_EXPORTER_OTLP_HEADERS` carries an HTTP Basic credential. Keep
+#   it in a sealed unit drop-in (`/etc/systemd/system/ati.service.d/otel.conf`)
+#   readable only by root, NOT in the world-readable unit. The block below
+#   shows the variables; the actual values belong in the drop-in.
+#
+# Environment=OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-us-central-0.grafana.net/otlp
+# Environment="OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64-of-instance:token>"
+# Environment=OTEL_SERVICE_NAME=ati-proxy
+# Environment=ENVIRONMENT_TIER=production
+# Environment=OTEL_TRACES_SAMPLER=parentbased_traceidratio
+# Environment=OTEL_TRACES_SAMPLER_ARG=0.25
+#
+# Note the quotes around the HEADERS line: the value "Authorization=Basic <token>"
+# contains a space, and systemd's `Environment=` parser is whitespace-separated.
+# Without quotes, only the "Authorization=Basic" portion ends up in the env var
+# and the base64 token is silently dropped — the OTLP endpoint then 401s with no
+# hint in the ATI log.
+
 # --enable-passthrough turns on raw HTTP passthrough routes from
 # manifests/*.toml.
 #

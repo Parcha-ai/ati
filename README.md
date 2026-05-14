@@ -1289,6 +1289,7 @@ ati/
 ├── scripts/                # E2E test scripts
 ├── docs/
 │   ├── SECURITY.md         # Threat model and security design
+│   ├── OTEL.md             # OpenTelemetry export — env vars, Grafana Cloud quickstart
 │   └── IDEAS.md            # Future directions
 ├── src/
 │   ├── main.rs             # CLI entry point (clap)

@@ -62,6 +62,16 @@ jobs:
           python3 -m pip install --quiet --user 'websockets==15.0.1'
           ATI_BIN=./target/debug/ati bash scripts/test_full_stack_e2e.sh --pr all
         timeout-minutes: 5
+      - name: OTel E2E (--features otel against stub OTLP collector)
+        run: |
+          # Boots a stub OTLP/HTTP collector + `ati proxy --features otel`,
+          # asserts the collector receives non-empty trace POSTs after a few
+          # /health hits + the 10s span-flush window. This is the integration
+          # safety net for the `otel` cargo feature — tests/otel_test.rs
+          # covers the layer wiring in-process but cannot verify that
+          # exporter+propagator actually serialize and ship spans over HTTP.
+          bash scripts/test_otel_e2e.sh
+        timeout-minutes: 5
 
   deny:
     name: cargo-deny

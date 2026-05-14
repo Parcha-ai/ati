@@ -497,19 +497,41 @@ pub async fn execute_with_gen(
     // Spawn the subprocess via tokio::process so we get an async-aware child
     // that we can kill on timeout (unlike spawn_blocking + std::process which
     // would leave the subprocess running when the timeout fires).
-    let child = tokio::process::Command::new(&command)
-        .args(&default_args)
-        .args(&extra_args)
-        .env_clear()
-        .envs(&env_snapshot)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            discard_captures(&captures);
-            CliError::Spawn(format!("{command}: {e}"))
-        })?;
+    //
+    // Bounded retry loop around the spawn to absorb Linux's `ETXTBSY`
+    // ("Text file busy", errno 26): the kernel returns it when the target
+    // executable still has an open write fd somewhere in the process tree.
+    // In production this is vanishingly rare — agents call pre-installed
+    // binaries that were placed on disk long before exec — but it shows up
+    // reliably in `cargo test`'s parallel runner when one thread writes-
+    // then-chmod-then-execs a freshly-created shell script while another
+    // thread holds a write fd on the same inode. The retry costs ~100ms
+    // total worst-case and is a no-op on the fast path.
+    const MAX_ETXTBSY_RETRIES: u32 = 10;
+    let mut attempt: u32 = 0;
+    let child = loop {
+        match tokio::process::Command::new(&command)
+            .args(&default_args)
+            .args(&extra_args)
+            .env_clear()
+            .envs(&env_snapshot)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(c) => break c,
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < MAX_ETXTBSY_RETRIES => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            }
+            Err(e) => {
+                discard_captures(&captures);
+                return Err(CliError::Spawn(format!("{command}: {e}")));
+            }
+        }
+    };
 
     // Apply timeout — kill_on_drop ensures the child is killed if we bail early
     let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {

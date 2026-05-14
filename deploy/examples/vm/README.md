@@ -146,13 +146,22 @@ journalctl -u ati --since "24 hours ago" | grep sig_verify | \
 | `caddy/Caddyfile` | Thin TLS terminator. No header rewriting; just LE certs + reverse_proxy to ATI on `127.0.0.1:8080`. |
 | `manifests/example-passthrough.toml` | Generic passthrough manifest template — clone for each upstream. |
 | `systemd/ati.service` | Runs `ati proxy --enable-passthrough --sig-verify-mode log` (flip to `enforce` after soak). |
+| `systemd/ati.service.d/otel.conf.example` | Optional drop-in for OpenTelemetry export. Holds the OTLP Basic-auth credential — install with `0600`, root-only. See [docs/OTEL.md](../../../docs/OTEL.md). |
 | `systemd/ati-rotate-keyring.service` + `.timer` | Weekly cron-style rotation. |
 | `haproxy/haproxy.cfg.example` | L4 Redis fan-out. Replace `<UPSTREAM_HOST>` per backend. |
 | `verdaccio/config.yaml.example` | Local npm registry cache. |
+
+## Observability (optional)
+
+Build with `--features otel` and install `systemd/ati.service.d/otel.conf.example` as `/etc/systemd/system/ati.service.d/otel.conf` (mode `0600`) to ship traces + metrics to Grafana Cloud / Tempo / Honeycomb / a local OTel Collector. The OTel layer is a runtime no-op when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, so the same binary can ship without observability for fully offline deployments.
+
+See [docs/OTEL.md](../../../docs/OTEL.md) for env vars, semantic conventions, cardinality notes, and the Grafana Cloud quickstart.
 
 ## See also
 
 - `src/core/passthrough.rs` — the handler that consumes these manifests.
 - `src/core/sig_verify.rs` — HMAC verification middleware.
 - `src/cli/edge.rs` — `bootstrap-keyring` / `rotate-keyring` source.
+- `src/core/otel.rs` — OTel initialization (compiled with `--features otel`).
 - Tracking issue: [#94](https://github.com/Parcha-ai/ati/issues/94).
+- OTel design doc: [#100](https://github.com/Parcha-ai/ati/issues/100).
