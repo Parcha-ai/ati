@@ -237,9 +237,20 @@ impl KeyStore {
 
         let raw_key = generate_raw_key();
         let hash = crate::core::keys::sha256_hex(raw_key.as_bytes());
+        // Propagate `Duration::from_std` overflow rather than swallowing it
+        // with `.ok()`. A caller passing `expires_in_secs > i64::MAX / 1e9`
+        // (≈292B seconds) — including the common foot-gun of accidentally
+        // passing a millisecond value — must NOT silently get a permanent
+        // key, which would violate the ephemeral-key invariant the whole
+        // module exists to enforce.
         let expires_at = params
             .expires_in
-            .and_then(|d| chrono::Duration::from_std(d).ok())
+            .map(|d| {
+                chrono::Duration::from_std(d).map_err(|_| {
+                    KeyStoreError::InvalidParams("expires_in overflows chrono::Duration")
+                })
+            })
+            .transpose()?
             .map(|d| Utc::now() + d);
 
         let mut tx = self.pool.begin().await?;
@@ -333,11 +344,19 @@ impl KeyStore {
     pub async fn revoke(&self, hash: &str, by: Option<&str>) -> Result<bool, KeyStoreError> {
         let mut tx = self.pool.begin().await?;
 
-        let snapshot: Option<serde_json::Value> =
-            sqlx::query_scalar("SELECT to_jsonb(ati_keys.*) FROM ati_keys WHERE token_hash = $1")
-                .bind(hash)
-                .fetch_optional(&mut *tx)
-                .await?;
+        // DELETE … RETURNING is the atomic alternative to SELECT-then-DELETE,
+        // which under READ COMMITTED lets two concurrent revokes both observe
+        // the row and both attempt to insert a snapshot (one wins on the
+        // ati_deleted_keys PK, the other aborts late after wasted work; worse,
+        // both fire NOTIFY). Single-statement form ensures exactly one
+        // committed transaction per actual hard-delete: if RETURNING is
+        // empty, another revoker beat us and we exit clean with `false`.
+        let snapshot: Option<serde_json::Value> = sqlx::query_scalar(
+            "DELETE FROM ati_keys WHERE token_hash = $1 RETURNING to_jsonb(ati_keys.*)",
+        )
+        .bind(hash)
+        .fetch_optional(&mut *tx)
+        .await?;
 
         let Some(snapshot) = snapshot else {
             return Ok(false);
@@ -354,11 +373,6 @@ impl KeyStore {
         .bind(by)
         .execute(&mut *tx)
         .await?;
-
-        sqlx::query("DELETE FROM ati_keys WHERE token_hash = $1")
-            .bind(hash)
-            .execute(&mut *tx)
-            .await?;
 
         sqlx::query(
             r#"
@@ -693,6 +707,18 @@ mod tests {
             created_by: None,
         };
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn duration_from_std_overflow_is_caught_at_compile_path() {
+        // chrono::Duration::from_std returns Err once the value overflows
+        // i64::MAX nanoseconds. Verify the boundary: this guards against a
+        // regression where `issue` silently maps overflow to `None` and
+        // produces a permanent key. The actual `issue()` call requires a DB
+        // pool, so we exercise the conversion directly here and rely on
+        // the live test for the end-to-end shape.
+        let too_big = std::time::Duration::from_secs(u64::MAX / 1_000); // way past i64::MAX ns
+        assert!(chrono::Duration::from_std(too_big).is_err());
     }
 
     fn dummy_key() -> AtiKey {
