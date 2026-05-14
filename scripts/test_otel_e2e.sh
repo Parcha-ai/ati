@@ -68,6 +68,10 @@ cat >"${WORK_DIR}/collector.py" <<'PYEOF'
 Accepts POSTs to /v1/traces and /v1/metrics. Each request body (protobuf,
 opaque to us) is written to a per-signal file with a request counter
 appended, so the e2e script can assert non-empty traffic.
+
+Also handles GET /__ready for the e2e script's readiness probe — using
+a GET ensures the probe doesn't get counted as a real trace export
+(which would create a 0-byte traces-1.bin and trick later assertions).
 """
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import os, sys, threading
@@ -77,6 +81,18 @@ COUNTERS = {"traces": 0, "metrics": 0}
 LOCK = threading.Lock()
 
 class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Readiness probe only — never touches the trace/metric counters.
+        if self.path == "/__ready":
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
         body = self.rfile.read(length) if length > 0 else b""
@@ -106,13 +122,33 @@ OUT_DIR="${WORK_DIR}" PORT="${COLLECTOR_PORT}" \
   python3 "${WORK_DIR}/collector.py" > "${WORK_DIR}/collector.log" 2>&1 &
 COLLECTOR_PID=$!
 
-# Wait until collector is accepting connections.
+# Wait until the collector is accepting connections. We probe via GET
+# /__ready, NOT POST /v1/traces — a POST probe gets counted as a real
+# trace export and writes a 0-byte traces-1.bin that fools the existence
+# check below. The collector handles /__ready in `do_GET` and never
+# touches the trace/metric counters.
+collector_ready=0
 for _ in {1..30}; do
-  if curl -sf -o /dev/null -X POST "http://127.0.0.1:${COLLECTOR_PORT}/v1/traces"; then
+  # If the collector process died before binding, bail with the captured
+  # log rather than spinning to timeout with a silent "did not bind" panic.
+  if ! kill -0 "${COLLECTOR_PID}" 2>/dev/null; then
+    echo "FAIL: collector process exited before binding (pid ${COLLECTOR_PID})." >&2
+    echo "--- collector.log ---" >&2
+    cat "${WORK_DIR}/collector.log" >&2
+    exit 1
+  fi
+  if curl -sf -o /dev/null "http://127.0.0.1:${COLLECTOR_PORT}/__ready"; then
+    collector_ready=1
     break
   fi
   sleep 0.2
 done
+if (( collector_ready == 0 )); then
+  echo "FAIL: collector did not accept connections within 6s." >&2
+  echo "--- collector.log ---" >&2
+  cat "${WORK_DIR}/collector.log" >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Boot ati proxy pointed at the collector
@@ -132,12 +168,32 @@ RUST_LOG="info,opentelemetry=debug" \
   > "${WORK_DIR}/ati.log" 2>&1 &
 PROXY_PID=$!
 
-# Wait for proxy /health to return 200.
+# Wait for proxy /health to return 200, OR bail if the proxy process
+# died. Without the kill-0 check, a crashed proxy (port collision, etc.)
+# leaves the curl loop spinning to timeout and then fails 10s later with
+# a misleading "collector received no traces" instead of pointing at the
+# actual cause.
+proxy_ready=0
 for _ in {1..50}; do
+  if ! kill -0 "${PROXY_PID}" 2>/dev/null; then
+    echo "FAIL: ati proxy process exited before /health was reachable (pid ${PROXY_PID})." >&2
+    echo "--- ati.log (tail) ---" >&2
+    tail -50 "${WORK_DIR}/ati.log" >&2
+    exit 1
+  fi
   code=$(curl -sf -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PROXY_PORT}/health" || echo "")
-  if [[ "${code}" == "200" ]]; then break; fi
+  if [[ "${code}" == "200" ]]; then
+    proxy_ready=1
+    break
+  fi
   sleep 0.2
 done
+if (( proxy_ready == 0 )); then
+  echo "FAIL: ati proxy /health did not return 200 within 10s." >&2
+  echo "--- ati.log (tail) ---" >&2
+  tail -50 "${WORK_DIR}/ati.log" >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Generate traffic
@@ -167,7 +223,11 @@ if [[ ! -e "${trace_files[0]}" ]]; then
 fi
 
 # Smoke check: at least one trace body should be non-empty.
-biggest=$(stat --printf="%s\n" "${trace_files[@]}" | sort -n | tail -1)
+# Use `wc -c <file` (POSIX) instead of `stat --printf` (GNU coreutils
+# only — macOS/BSD `stat` uses `stat -f "%z"` and rejects `--printf`).
+# CI is Linux so the GNU form would work there, but the script also
+# runs locally on macOS dev machines.
+biggest=$(for f in "${trace_files[@]}"; do wc -c <"$f"; done | sort -n | tail -1)
 if [[ "${biggest}" -lt 50 ]]; then
   echo "FAIL: collector got trace POSTs but all bodies are suspiciously small (${biggest} bytes)." >&2
   exit 1

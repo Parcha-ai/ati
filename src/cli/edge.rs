@@ -508,17 +508,20 @@ mod tests {
         }
         std::fs::rename(&tmp_path, &path).unwrap();
 
-        // fsync the parent directory so the rename is durably committed
-        // and the kernel's view of the new inode is fully resolved before
-        // execve sees it. Without this, on some kernels the rename can be
-        // "visible" via stat() but the underlying inode still has open
-        // write refs from the page-cache writer.
-        #[cfg(unix)]
-        {
-            if let Ok(dir_handle) = std::fs::File::open(dir) {
-                let _ = dir_handle.sync_all();
-            }
-        }
+        // Note: ETXTBSY protection here is BEST-EFFORT only. Closing the
+        // write fd (via the block scope above) and renaming an already-
+        // closed inode into place removes most races, but cargo's parallel
+        // test runner can still produce open writer references on the
+        // destination inode through unrelated threads. The reliable
+        // backstop is the retry loop in `fetch_keyring_json` (and the
+        // matching one in `core::cli_executor`) — those catch any
+        // ETXTBSY the kernel returns and retry with a 10ms backoff,
+        // which empirically clears in <10ms every time.
+        //
+        // Earlier revisions of this helper also fsync'd the parent
+        // directory here. Greptile correctly pointed out that fsync on
+        // a directory is for crash-safe rename durability, not for
+        // write-fd release — it doesn't help with ETXTBSY. Removed.
         path
     }
 

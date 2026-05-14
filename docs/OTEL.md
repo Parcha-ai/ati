@@ -85,7 +85,13 @@ Grafana Cloud OTLP endpoints use HTTP Basic auth with `<instance-id>:<api-token>
    export OTEL_SERVICE_NAME=ati-proxy
    export ENVIRONMENT_TIER=production
    ```
-4. Run `ati proxy --features otel`.
+4. Run the binary built in step 1 (with `--features otel` baked in):
+
+   ```bash
+   ./target/release/ati proxy --port 8080
+   ```
+
+   `--features otel` is a **build-time** Cargo flag, not a runtime CLI flag — `ati proxy` will reject it. The OTel layer is on because you compiled it in; the env vars decide whether export actually happens.
 5. Explore: in Grafana Cloud → Explore → pick the Tempo data source → filter on `service.name=ati-proxy`.
 
 ## Build size
