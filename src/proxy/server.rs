@@ -2459,9 +2459,18 @@ async fn admin_auth_middleware(
 /// XOR-ing index-by-index against `b`, and fold the length difference
 /// into `diff` so unequal-length inputs always return false.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    // Mix the length difference into the accumulator so unequal lengths
-    // can never compare equal. `wrapping_*` keeps the body branch-free.
-    let mut diff: u8 = (a.len() ^ b.len()) as u8 | ((a.len() ^ b.len()) >> 8) as u8;
+    // Fold the FULL `usize` length-XOR into a single bit so any nonzero
+    // length difference — including ones whose low 16 bits happen to be
+    // zero (e.g. exactly 65536 bytes apart) — sets `len_diff_bit` to 1.
+    // The previous shape `(len_xor as u8) | ((len_xor >> 8) as u8)` only
+    // covered bits 0–15 of the usize XOR, so a length mismatch that was
+    // an exact multiple of 65536 silently passed. Greptile flagged this
+    // as a security P2; the exploit requires already knowing the token,
+    // so blast radius was small, but the guarantee should hold without
+    // qualification.
+    let len_xor = (a.len() ^ b.len()) as u64;
+    let len_diff_bit: u8 = if len_xor == 0 { 0 } else { 1 };
+    let mut diff: u8 = len_diff_bit;
     let n = a.len();
     for i in 0..n {
         // Index `b` modulo its length when `b` is shorter; the diff

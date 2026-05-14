@@ -850,9 +850,12 @@ mod tests {
 
     #[test]
     fn constant_time_eq_basics() {
-        // Local copy of the proxy helper for unit testing.
+        // Local copy of the proxy helper for unit testing — must stay in
+        // sync with `crate::proxy::server::constant_time_eq`.
         fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-            let mut diff: u8 = (a.len() ^ b.len()) as u8 | ((a.len() ^ b.len()) >> 8) as u8;
+            let len_xor = (a.len() ^ b.len()) as u64;
+            let len_diff_bit: u8 = if len_xor == 0 { 0 } else { 1 };
+            let mut diff: u8 = len_diff_bit;
             let n = a.len();
             for i in 0..n {
                 let bi = if b.is_empty() { 0u8 } else { b[i % b.len()] };
@@ -867,5 +870,16 @@ mod tests {
         assert!(!ct_eq(b"ab", b"abc")); // longer
         assert!(!ct_eq(b"abc", b"")); // empty mismatch
         assert!(!ct_eq(b"", b"abc"));
+
+        // Regression for the Greptile P2: a length difference of exactly
+        // 65536 used to slip through the (u8 | u8>>8) length fold. The full
+        // u64 fold must catch it. Construct a worst case: configured token
+        // of N bytes, candidate of N + 65536 bytes whose first N bytes
+        // happen to match. Without the fix this returns true.
+        let token = b"ati-admin-token-12345";
+        let mut padded = token.to_vec();
+        padded.extend(std::iter::repeat_n(b'x', 65536));
+        assert!(!ct_eq(token, &padded));
+        assert!(!ct_eq(&padded, token));
     }
 }
