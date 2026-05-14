@@ -1,0 +1,31 @@
+# Systemd drop-in for OpenTelemetry export config.
+#
+# Install:
+#   mkdir -p /etc/systemd/system/ati.service.d
+#   cp otel.conf.example /etc/systemd/system/ati.service.d/otel.conf
+#   chmod 600 /etc/systemd/system/ati.service.d/otel.conf
+#   systemctl daemon-reload
+#   systemctl restart ati
+#
+# Why a drop-in instead of editing ati.service?
+# - Keeps the credential out of the world-readable unit file.
+# - Lets you rotate the OTLP token without changing the unit shipped by
+#   your config-management pipeline.
+# - Survives `apt upgrade` if your unit ever comes from a package.
+#
+# Required: --features otel at build time. Without that, ATI prints a
+# startup warning and ignores OTEL_EXPORTER_OTLP_ENDPOINT.
+
+[Service]
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-us-central-0.grafana.net/otlp
+# Format: "Authorization=Basic <base64-of-instanceId:apiToken>"
+# Generate with: echo -n "${INSTANCE_ID}:${API_TOKEN}" | base64
+Environment=OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic REPLACE_WITH_BASE64_CREDENTIAL
+Environment=OTEL_SERVICE_NAME=ati-proxy
+Environment=ENVIRONMENT_TIER=production
+
+# Sampling — tune to your traffic + budget.
+#   parentbased_traceidratio: respect inbound sampling decisions; otherwise
+#   sample the configured ratio. 0.25 = 25% of root traces.
+Environment=OTEL_TRACES_SAMPLER=parentbased_traceidratio
+Environment=OTEL_TRACES_SAMPLER_ARG=0.25

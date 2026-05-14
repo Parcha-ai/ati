@@ -223,22 +223,47 @@ fn fetch_keyring_json(
     // and we read its CONTENTS into the env var op expects (NOT the path —
     // Greptile P1 on PR #97 flagged the previous `%d/op-token`
     // substitution as setting the env var to a path string).
-    let mut cmd = Command::new(op_path);
-    if let Some(path) = op_token_file {
-        let token = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read --op-token-file '{path}': {e}"))?;
-        cmd.env("OP_SERVICE_ACCOUNT_TOKEN", token.trim());
-    }
-    let output = cmd
-        .arg("item")
-        .arg("get")
-        .arg("--vault")
-        .arg(vault)
-        .arg(item)
-        .arg("--format")
-        .arg("json")
-        .output()
-        .map_err(|e| format!("failed to spawn '{op_path}': {e}"))?;
+    // Bounded retry loop around the spawn to absorb Linux's `ETXTBSY`
+    // ("Text file busy", errno 26) which the kernel returns when the
+    // target executable still has an open write fd somewhere in the
+    // process tree. This happens vanishingly rarely in production (the
+    // real `op` binary is statically installed at deploy time), but it
+    // surfaces reliably in our test harness where `fake_op_shim` writes
+    // a fresh shell script and immediately execs it under cargo test's
+    // parallel runner. The retry costs ~100ms total in the worst case
+    // and is a no-op on the fast path.
+    const MAX_ETXTBSY_RETRIES: u32 = 10;
+    let mut attempt: u32 = 0;
+    let output = loop {
+        // Cmd has to be re-built each iteration: Command isn't Clone and
+        // `output()` consumes it via &mut self.
+        let mut cmd = Command::new(op_path);
+        if let Some(path) = op_token_file {
+            let token = std::fs::read_to_string(path)
+                .map_err(|e| format!("failed to read --op-token-file '{path}': {e}"))?;
+            cmd.env("OP_SERVICE_ACCOUNT_TOKEN", token.trim());
+        }
+        match cmd
+            .arg("item")
+            .arg("get")
+            .arg("--vault")
+            .arg(vault)
+            .arg(item)
+            .arg("--format")
+            .arg("json")
+            .output()
+        {
+            Ok(o) => break o,
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < MAX_ETXTBSY_RETRIES => {
+                // ETXTBSY clears once every writer fd is dropped on the
+                // kernel side, usually < 10ms even on slow CI runners.
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            Err(e) => return Err(format!("failed to spawn '{op_path}': {e}").into()),
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -450,11 +475,49 @@ mod tests {
         let n = N.fetch_add(1, Ordering::Relaxed);
         let path = dir.join(format!("op-shim-{n}"));
         let script = format!("#!/bin/sh\ncat <<'EOF'\n{payload}\nEOF\n");
-        std::fs::write(&path, script).unwrap();
+
+        // Two-stage write to dodge `ETXTBSY` ("Text file busy") on the
+        // subsequent `execve`. The Linux kernel returns ETXTBSY if any
+        // process holds the file open for write at exec time — which happens
+        // when `std::fs::write`'s internal buffered writer hasn't yet been
+        // fully released by the page-cache flusher, or when `cargo test`'s
+        // parallel threads have multiple write handles racing each other.
+        //
+        // The fix is two-part:
+        //  1. Write to `<name>.tmp`, fsync the FILE, drop the handle, then
+        //     fsync the PARENT DIRECTORY — only then is the rename durable
+        //     and the inode guaranteed to have no writer fd.
+        //  2. Rename into place; the kernel sees the destination as a fresh
+        //     inode with zero writer refs.
+        //
+        // The flake surfaced as `cli::edge::tests::*` ETXTBSY panics that
+        // had retriggered CI on prior PRs (see commits 63acee1, 4b5b378,
+        // a728ec4 — all retriggers for this same flake). This is the
+        // permanent fix.
+        let tmp_path = dir.join(format!("op-shim-{n}.tmp"));
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp_path).unwrap();
+            f.write_all(script.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        } // file fd dropped + closed here
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::rename(&tmp_path, &path).unwrap();
+
+        // fsync the parent directory so the rename is durably committed
+        // and the kernel's view of the new inode is fully resolved before
+        // execve sees it. Without this, on some kernels the rename can be
+        // "visible" via stat() but the underlying inode still has open
+        // write refs from the page-cache writer.
+        #[cfg(unix)]
+        {
+            if let Ok(dir_handle) = std::fs::File::open(dir) {
+                let _ = dir_handle.sync_all();
+            }
         }
         path
     }
