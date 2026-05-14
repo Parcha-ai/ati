@@ -1994,6 +1994,14 @@ async fn observability_middleware(req: HttpRequest<Body>, next: Next) -> Respons
         "http.response.status_code" = tracing::field::Empty,
     );
 
+    // Extract inbound W3C trace context (`traceparent` / `tracestate`)
+    // from the request headers and attach it as the span's parent. This is
+    // what lets the agent's outer trace continue through ATI to upstream
+    // services. No-op when the `otel` feature is off — `tracing` spans
+    // still nest as usual.
+    #[cfg(feature = "otel")]
+    crate::core::otel::extract_request_parent_into_span(&span, req.headers());
+
     let start = std::time::Instant::now();
     let response = next.run(req).instrument(span.clone()).await;
     let status = response.status();

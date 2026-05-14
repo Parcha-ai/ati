@@ -507,6 +507,14 @@ pub async fn execute_tool_with_gen(
         request = request.header(header_name.as_str(), header_value.as_str());
     }
 
+    // Inject W3C trace context (traceparent / tracestate) so the upstream
+    // joins the current trace. No-op when the `otel` feature is off or
+    // when no OTel exporter is configured at runtime.
+    #[cfg(feature = "otel")]
+    for (k, v) in crate::core::otel::current_trace_headers() {
+        request = request.header(k, v);
+    }
+
     // Execute request
     let response = request.send().await?;
     let status = response.status();

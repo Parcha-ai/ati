@@ -16,7 +16,7 @@ S2="22222222222222222222222222222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 if [[ -z "${MOCK_PIDS[*]:-}" ]]; then
     start_mock_http "$PORT_UPSTREAM_HTTP" echo
 fi
-start_mock_http "$PORT_UPSTREAM_HTTP_SLOW" slow
+start_mock_http "$PORT_UPSTREAM_HTTP_SLOW" slow --slow-seconds 3
 
 install_manifests passthrough slow
 bootstrap_keyring "$E2E_DIR/fixtures/op_bootstrap.json"
@@ -109,10 +109,17 @@ INFLIGHT_KICKED_AT=$(date +%s)
 # read" failure. The fix is to wait until ALL 50 are confirmed in-flight
 # before triggering rotation.
 #
-# Budget: 50 requests × 1.5s upstream sleep means we have up to ~1.4s
-# (200ms safety margin under the upstream's wall time) to see all 50 land.
-# We poll at 20ms granularity, max 70 ticks = 1.4s.
-for _ in $(seq 1 70); do
+# Budget: the slow upstream sleeps 3s (configured at start_mock_http).
+# We poll at 20ms granularity, max 140 ticks = 2.8s — leaves a 200ms
+# safety margin under the upstream's wall time for the rotation +
+# SIGHUP to land before the first in-flight request returns.
+#
+# Why 3s upstream / 2.8s budget instead of 1.5s / 1.4s (the original):
+# CI's slower runners observed 48/50 requests landing in 1.4s — bash
+# spawning 50 curl backgrounds + their TCP connects is just slow on
+# constrained CI machines. The longer budget removes that flake without
+# changing the semantics of the test.
+for _ in $(seq 1 140); do
     inflight_count=$(wc -l < "$MOCK_LOG" 2>/dev/null || echo 0)
     if (( inflight_count >= 50 )); then break; fi
     sleep 0.02
@@ -125,7 +132,7 @@ done
 inflight_count=$(wc -l < "$MOCK_LOG" 2>/dev/null || echo 0)
 if (( inflight_count < 50 )); then
     case_fail B4_inflight_sighup_50_concurrent \
-        "could not get 50/50 requests in-flight before SIGHUP (only ${inflight_count}/50 reached upstream within 1.4s — test infrastructure race, not a code bug)"
+        "could not get 50/50 requests in-flight before SIGHUP (only ${inflight_count}/50 reached upstream within 2.8s — test infrastructure race, not a code bug)"
     stop_proxy
     return 0
 fi

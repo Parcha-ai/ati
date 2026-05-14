@@ -494,6 +494,14 @@ impl McpClient {
                     req = req.header(name.as_str(), value.as_str());
                 }
 
+                // Inject W3C trace context for outbound MCP Streamable HTTP.
+                // Stdio MCP transport (the other branch) is not HTTP and gets
+                // span attributes only; no header injection there.
+                #[cfg(feature = "otel")]
+                for (k, v) in crate::core::otel::current_trace_headers() {
+                    req = req.header(k, v);
+                }
+
                 let resp = req.send().await?;
                 // Notifications should get 202 Accepted
                 if !resp.status().is_success() {
@@ -618,6 +626,13 @@ async fn send_http_request(
     // Inject extra headers from provider config
     for (name, value) in &http.extra_headers {
         req = req.header(name.as_str(), value.as_str());
+    }
+
+    // Inject W3C trace context (traceparent / tracestate). No-op when the
+    // otel feature is off or no exporter is configured at runtime.
+    #[cfg(feature = "otel")]
+    for (k, v) in crate::core::otel::current_trace_headers() {
+        req = req.header(k, v);
     }
 
     let response = req
