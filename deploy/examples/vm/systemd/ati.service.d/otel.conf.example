@@ -20,7 +20,15 @@
 Environment=OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-us-central-0.grafana.net/otlp
 # Format: "Authorization=Basic <base64-of-instanceId:apiToken>"
 # Generate with: echo -n "${INSTANCE_ID}:${API_TOKEN}" | base64
-Environment=OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic REPLACE_WITH_BASE64_CREDENTIAL
+#
+# IMPORTANT: the value MUST be double-quoted. Per systemd.exec(5),
+# `Environment=` is a whitespace-separated list of `KEY=value` pairs —
+# without quotes, systemd splits "Authorization=Basic <token>" at the
+# space and only the scheme portion ends up in the env var. The base64
+# credential is silently dropped, the exporter ships an incomplete
+# Authorization header, and the OTLP endpoint returns 401 with no hint
+# in the ATI logs. Quotes prevent the split.
+Environment="OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic REPLACE_WITH_BASE64_CREDENTIAL"
 Environment=OTEL_SERVICE_NAME=ati-proxy
 Environment=ENVIRONMENT_TIER=production
 
