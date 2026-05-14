@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::core::jwt;
 use crate::core::scope::ScopeConfig;
+use crate::core::token;
 
 /// Resolve the ATI directory path.
 ///
@@ -32,14 +33,13 @@ pub fn ensure_ati_dir() {
 /// - If JWT validation is not configured, local mode stays unrestricted for dev use.
 pub fn load_local_scopes_from_env() -> Result<ScopeConfig, Box<dyn std::error::Error>> {
     let jwt_config = jwt::config_from_env()?;
-    let token = std::env::var("ATI_SESSION_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty());
+    let token = token::resolve_session_token()?;
 
     match jwt_config {
         Some(config) => {
             let token = token.ok_or(
-                "ATI_SESSION_TOKEN is required because JWT validation is configured locally.",
+                "ATI_SESSION_TOKEN is required because JWT validation is configured locally. \
+                 Set ATI_SESSION_TOKEN, ATI_SESSION_TOKEN_FILE, or write the token to /run/ati/session_token.",
             )?;
             let claims = jwt::validate(&token, &config)
                 .map_err(|e| format!("Invalid ATI_SESSION_TOKEN: {e}"))?;

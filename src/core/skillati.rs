@@ -173,9 +173,7 @@ impl SkillAtiClient {
                 .filter(|u| !u.trim().is_empty())
                 .ok_or(SkillAtiError::ProxyUrlRequired)?;
             let base_url = base_url.trim_end_matches('/').to_string();
-            let token = std::env::var("ATI_SESSION_TOKEN")
-                .ok()
-                .filter(|t| !t.trim().is_empty());
+            let token = crate::core::token::resolve_session_token().unwrap_or(None);
             let http = Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()

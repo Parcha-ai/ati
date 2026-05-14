@@ -69,9 +69,15 @@ fn build_proxy_request(
     url: &str,
 ) -> reqwest::RequestBuilder {
     let mut req = client.request(method, url);
-    if let Ok(token) = std::env::var("ATI_SESSION_TOKEN") {
-        if !token.is_empty() {
+    match crate::core::token::resolve_session_token() {
+        Ok(Some(token)) => {
             req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // File-read error (e.g., permission denied on ATI_SESSION_TOKEN_FILE).
+            // Don't block the request; let the proxy 401 if auth is required.
+            tracing::debug!(error = %e, "session token file unreadable; sending request without Authorization");
         }
     }
     req
