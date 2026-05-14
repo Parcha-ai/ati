@@ -173,7 +173,13 @@ impl SkillAtiClient {
                 .filter(|u| !u.trim().is_empty())
                 .ok_or(SkillAtiError::ProxyUrlRequired)?;
             let base_url = base_url.trim_end_matches('/').to_string();
-            let token = crate::core::token::resolve_session_token().unwrap_or(None);
+            let token = match crate::core::token::resolve_session_token() {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::debug!(error = %e, "session token file unreadable; skillati proxy client will send requests without Authorization");
+                    None
+                }
+            };
             let http = Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
