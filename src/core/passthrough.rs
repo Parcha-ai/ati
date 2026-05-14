@@ -451,6 +451,18 @@ const HOP_BY_HOP: &[&str] = &[
 const STRIP_DOWNSTREAM: &[&str] = &[
     "host",
     "authorization", // upstream-specific auth comes from the manifest
+    // W3C Trace Context (RFC TraceContext §2.3): forwarding the sandbox-
+    // supplied `traceparent` verbatim WHILE we also inject our own from
+    // OTel produces two `traceparent` headers — the spec mandates
+    // receivers treat that as if neither was present, silently severing
+    // trace continuity. Strip on the way in; the OTel propagator injects
+    // a new one (with the same trace_id but our span_id) at send time.
+    // The strip is unconditional (NOT cfg-gated) so the behaviour is the
+    // same whether or not the `otel` feature is compiled in: upstream
+    // never sees the sandbox's raw traceparent, only what we choose to
+    // emit.
+    "traceparent",
+    "tracestate",
 ];
 
 /// Returns true if `name` matches a header we always strip from inbound
@@ -776,11 +788,14 @@ pub async fn handle_passthrough(
 
     // Inject W3C trace context so the upstream service joins our trace.
     // No-op when the `otel` feature is off or no exporter is configured.
-    // Note: an inbound `traceparent` from the sandbox is *not* trusted here;
-    // the upstream sees the trace context of *our* current span, which
-    // tracing-opentelemetry's subscriber layer is already extending from
-    // the inbound `traceparent` when one was present at the proxy edge
-    // (handled in the proxy observability middleware in a follow-up).
+    //
+    // The sandbox-supplied inbound `traceparent` is not forwarded verbatim
+    // (see `STRIP_DOWNSTREAM`). When an inbound `traceparent` was present,
+    // `observability_middleware` in `proxy/server.rs` extracted it as the
+    // parent of the outermost `http.server.request` span — so our current
+    // span is already a child of the agent's outer trace, and the
+    // `traceparent` we inject here carries the same trace_id with our own
+    // span_id. Upstream receivers see one (and only one) traceparent.
     #[cfg(feature = "otel")]
     for (k, v) in crate::core::otel::current_trace_headers() {
         builder = builder.header(k, v);
@@ -1636,6 +1651,35 @@ mod tests {
         assert!(out.get("host").is_none());
         assert!(out.get("authorization").is_none());
         assert!(out.get("x-sandbox-signature").is_none());
+        assert_eq!(out.get("x-keep").unwrap().to_str().unwrap(), "yes");
+    }
+
+    #[test]
+    fn filter_request_strips_inbound_w3c_trace_headers() {
+        // W3C Trace Context §2.3: multiple `traceparent` headers on a single
+        // request MUST be treated as if none was present. Since the OTel
+        // injection in handle_passthrough adds its own `traceparent` /
+        // `tracestate` before send, we MUST strip the sandbox-supplied
+        // ones inbound or the upstream sees both and silently discards
+        // the trace context. This test pins that strip.
+        let mut h = HeaderMap::new();
+        h.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        h.insert("tracestate", "vendor=value,other=v2".parse().unwrap());
+        h.insert("x-keep", "yes".parse().unwrap());
+        let out = filter_request_headers(&h);
+        assert!(
+            out.get("traceparent").is_none(),
+            "inbound traceparent must be stripped — see W3C Trace Context §2.3"
+        );
+        assert!(
+            out.get("tracestate").is_none(),
+            "inbound tracestate must be stripped alongside traceparent"
+        );
         assert_eq!(out.get("x-keep").unwrap().to_str().unwrap(), "yes");
     }
 
