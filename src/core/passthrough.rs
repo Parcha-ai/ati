@@ -343,6 +343,46 @@ fn compile_route(
 /// per-request handler can apply whichever the provider configured.
 type ResolvedAuth = (Option<(HeaderName, HeaderValue)>, Option<(String, String)>);
 
+/// Look up `auth_key_name` in the keyring, normalising to lowercase so that
+/// manifests authored in either case work against the `ATI_KEY_*` convention
+/// (env-var loader lowercases on insert — `keyring.rs::from_env`).
+///
+/// Returns the resolved value on hit. On miss, logs a clear warning naming
+/// the provider + the (un-normalised) key and returns `None` — the caller
+/// then skips auth-header injection entirely, preventing `Authorization:
+/// Bearer ` (empty value) from reaching upstream.
+fn lookup_auth_key<'k>(
+    provider_name: &str,
+    key_name: &str,
+    keyring: &'k Keyring,
+) -> Option<&'k str> {
+    let lowered = key_name.to_ascii_lowercase();
+    if let Some(v) = keyring.get(&lowered) {
+        return Some(v);
+    }
+    // Fall back to the literal name in case an operator inserted a mixed-case
+    // entry through a custom keyring loader. Pure-lowercase is the expected
+    // convention; this is a safety net.
+    if lowered != key_name {
+        if let Some(v) = keyring.get(key_name) {
+            tracing::debug!(
+                provider = provider_name,
+                key = key_name,
+                "auth_key_name resolved via case-sensitive fallback; consider using lowercase for consistency with ATI_KEY_* convention"
+            );
+            return Some(v);
+        }
+    }
+    tracing::warn!(
+        provider = provider_name,
+        key = key_name,
+        "auth_key_name not found in keyring — auth header will NOT be injected; \
+         check that ATI_KEY_{} is set or that the keyring contains the key",
+        key_name.to_ascii_uppercase()
+    );
+    None
+}
+
 fn resolve_auth(p: &Provider, keyring: &Keyring) -> Result<ResolvedAuth, PassthroughBuildError> {
     match p.auth_type {
         AuthType::None | AuthType::Oauth2 | AuthType::Url => Ok((None, None)),
@@ -351,7 +391,10 @@ fn resolve_auth(p: &Provider, keyring: &Keyring) -> Result<ResolvedAuth, Passthr
                 Some(k) => k,
                 None => return Ok((None, None)),
             };
-            let value = keyring.get(key).unwrap_or("");
+            let value = match lookup_auth_key(&p.name, key, keyring) {
+                Some(v) => v,
+                None => return Ok((None, None)),
+            };
             let header_value = HeaderValue::from_str(&format!("Bearer {value}")).map_err(|_| {
                 PassthroughBuildError::BadHeaderValue(p.name.clone(), "Authorization".to_string())
             })?;
@@ -369,7 +412,10 @@ fn resolve_auth(p: &Provider, keyring: &Keyring) -> Result<ResolvedAuth, Passthr
             let header_name = HeaderName::try_from(header_name_str).map_err(|_| {
                 PassthroughBuildError::BadHeaderName(p.name.clone(), header_name_str.to_string())
             })?;
-            let key_value = keyring.get(key).unwrap_or("");
+            let key_value = match lookup_auth_key(&p.name, key, keyring) {
+                Some(v) => v,
+                None => return Ok((None, None)),
+            };
             let value = if let Some(prefix) = &p.auth_value_prefix {
                 format!("{prefix}{key_value}")
             } else {
@@ -389,7 +435,10 @@ fn resolve_auth(p: &Provider, keyring: &Keyring) -> Result<ResolvedAuth, Passthr
                 .auth_query_name
                 .clone()
                 .unwrap_or_else(|| "api_key".to_string());
-            let value = keyring.get(key).unwrap_or("").to_string();
+            let value = match lookup_auth_key(&p.name, key, keyring) {
+                Some(v) => v.to_string(),
+                None => return Ok((None, None)),
+            };
             Ok((None, Some((query_name, value))))
         }
         AuthType::Basic => {
@@ -401,7 +450,10 @@ fn resolve_auth(p: &Provider, keyring: &Keyring) -> Result<ResolvedAuth, Passthr
             // (caller's responsibility). We base64 it. If the operator wants
             // user/pass split they can use `extra_headers` directly.
             use base64::Engine;
-            let creds = keyring.get(key).unwrap_or("");
+            let creds = match lookup_auth_key(&p.name, key, keyring) {
+                Some(v) => v,
+                None => return Ok((None, None)),
+            };
             let encoded = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
             let header_value =
                 HeaderValue::from_str(&format!("Basic {encoded}")).map_err(|_| {
