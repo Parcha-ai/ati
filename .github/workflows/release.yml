@@ -52,6 +52,23 @@ jobs:
             os: macos-latest
             features: "sentry"
             suffix: "-sentry"
+          # Sentry + OTel combo (prod flavour: error reporting AND distributed tracing)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            features: "sentry,otel"
+            suffix: "-sentry-otel"
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            features: "sentry,otel"
+            suffix: "-sentry-otel"
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: "sentry,otel"
+            suffix: "-sentry-otel"
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: "sentry,otel"
+            suffix: "-sentry-otel"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -111,8 +128,9 @@ jobs:
           mkdir -p release
           for dir in artifacts/ati-*/; do
             artifact_name=$(basename "$dir" | sed 's/^ati-//')
-            # Strip -sentry suffix to get the cargo target triple
-            target=$(echo "$artifact_name" | sed 's/-sentry$//')
+            # Strip feature-suffix to recover the cargo target triple.
+            # Longest-first so `-sentry-otel` is removed before `-sentry`.
+            target=$(echo "$artifact_name" | sed -E 's/-(sentry-otel|sentry|otel)$//')
             cp "$dir/target/$target/release/ati" "release/ati-$artifact_name"
             cp "$dir"/ati-*.sha256 "release/" 2>/dev/null || true
           done
