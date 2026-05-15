@@ -104,7 +104,10 @@ mod tests {
             ("ATI_SESSION_TOKEN", Some("from-env")),
             ("ATI_SESSION_TOKEN_FILE", Some(path.to_str().unwrap())),
         ]);
-        assert_eq!(resolve_session_token().unwrap(), Some("from-env".to_string()));
+        assert_eq!(
+            resolve_session_token().unwrap(),
+            Some("from-env".to_string())
+        );
     }
 
     #[test]
@@ -134,7 +137,10 @@ mod tests {
             ("ATI_SESSION_TOKEN", None),
             ("ATI_SESSION_TOKEN_FILE", Some(path.to_str().unwrap())),
         ]);
-        assert_eq!(resolve_session_token().unwrap(), Some("hello-tok".to_string()));
+        assert_eq!(
+            resolve_session_token().unwrap(),
+            Some("hello-tok".to_string())
+        );
     }
 
     #[test]

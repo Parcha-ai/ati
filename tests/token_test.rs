@@ -172,4 +172,3 @@ scope = "tool:noop_tool"
         "should mention default path; stderr: {stderr}"
     );
 }
-
