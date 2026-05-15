@@ -2009,6 +2009,23 @@ pub(crate) struct CallMetricLabelsSlot {
     pub(crate) inner: std::sync::Mutex<Option<(String, String)>>,
 }
 
+/// Per-passthrough labels written by `handle_passthrough` after the route
+/// matches, then read by `observability_middleware` to attach a `route`
+/// label to the request counter / duration histogram. Cardinality is
+/// bounded by the number of passthrough manifests (~10 in prod), so this
+/// is safe to ship as a label.
+///
+/// Same Arc/Mutex coordination pattern as `CallMetricLabelsSlot` — see
+/// that type's docs for the design rationale.
+#[derive(Default)]
+pub(crate) struct PassthroughMetricLabelsSlot {
+    /// Manifest name of the matched passthrough route (e.g. "litellm",
+    /// "browserbase"). `None` when no route matched (404), the request
+    /// hit a named handler instead, or the slot was never written
+    /// (passthrough disabled).
+    pub(crate) route: std::sync::Mutex<Option<String>>,
+}
+
 /// Per-request observability layer. Always mints a `tracing` span so events
 /// inside handlers nest under one identifiable parent; when the `otel`
 /// feature is compiled in (and an exporter is configured), the span is
@@ -2068,6 +2085,13 @@ async fn observability_middleware(mut req: HttpRequest<Body>, next: Next) -> Res
     let labels_slot = std::sync::Arc::new(CallMetricLabelsSlot::default());
     req.extensions_mut().insert(labels_slot.clone());
 
+    // Same pattern for passthrough: `handle_passthrough` writes the
+    // matched manifest name into this slot so the middleware can attach
+    // a `route` label. Cardinality is bounded by the number of
+    // passthrough manifests configured on the proxy (~10).
+    let pt_slot = std::sync::Arc::new(PassthroughMetricLabelsSlot::default());
+    req.extensions_mut().insert(pt_slot.clone());
+
     let start = std::time::Instant::now();
     let response = next.run(req).instrument(span.clone()).await;
     let status = response.status();
@@ -2099,6 +2123,14 @@ async fn observability_middleware(mut req: HttpRequest<Body>, next: Next) -> Res
                 attrs.push(KeyValue::new("provider", provider));
                 attrs.push(KeyValue::new("tool", tool));
             }
+            // Passthrough-only: pick up the matched route's manifest
+            // name. Mutually exclusive with the per-tool labels in
+            // practice (passthrough requests don't hit `/call` and vice
+            // versa), but the middleware appends whichever is set so
+            // the metric pipeline is symmetric.
+            if let Some(pt_route) = pt_slot.route.lock().ok().and_then(|g| g.as_ref().cloned()) {
+                attrs.push(KeyValue::new("route", pt_route));
+            }
             m.proxy_requests.add(1, &attrs);
             m.proxy_request_duration_ms
                 .record(start.elapsed().as_secs_f64() * 1000.0, &attrs);
@@ -2107,7 +2139,7 @@ async fn observability_middleware(mut req: HttpRequest<Body>, next: Next) -> Res
     #[cfg(not(feature = "otel"))]
     {
         // Keep the variables referenced so the no-feature build doesn't warn.
-        let _ = (&route, &method, start, &labels_slot);
+        let _ = (&route, &method, start, &labels_slot, &pt_slot);
     }
 
     response
@@ -2852,6 +2884,144 @@ auth_type = "none"
             .clone()
             .expect("handle_call must populate the slot when tool resolution succeeds");
         assert_eq!(labels, ("echoprov".to_string(), "echoprov".to_string()));
+    }
+
+    /// Build a minimal proxy state with one passthrough route pointing at
+    /// `upstream_url`. The route name is "echoroute"; the route forwards
+    /// `/api/*` and has a deny on `/api/denied`.
+    fn state_with_passthrough_route(upstream_url: &str) -> (Arc<ProxyState>, tempfile::TempDir) {
+        let manifests_tmp = tempfile::tempdir().expect("manifests tempdir");
+        std::fs::write(
+            manifests_tmp.path().join("echoroute.toml"),
+            format!(
+                r#"
+[provider]
+name = "echoroute"
+description = "passthrough route for slot test"
+handler = "passthrough"
+base_url = "{upstream_url}"
+path_prefix = "/api"
+auth_type = "none"
+deny_paths = ["/denied"]
+"#
+            ),
+        )
+        .unwrap();
+        let registry = ManifestRegistry::load(manifests_tmp.path()).expect("load manifests");
+        let keyring = Keyring::empty();
+        let passthrough = crate::core::passthrough::PassthroughRouter::build(&registry, &keyring)
+            .expect("build passthrough router");
+        let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+        let state = Arc::new(ProxyState {
+            registry,
+            skill_registry,
+            keyring,
+            jwt_config: None,
+            jwks_json: None,
+            auth_cache: AuthCache::new(),
+            db: DbState::Disabled,
+            passthrough: Some(Arc::new(passthrough)),
+            sig_verify: Arc::new(
+                SigVerifyConfig::build(
+                    SigVerifyMode::Log,
+                    60,
+                    DEFAULT_EXEMPT_PATHS,
+                    &Keyring::empty(),
+                )
+                .expect("sig verify"),
+            ),
+        });
+        (state, manifests_tmp)
+    }
+
+    /// Issue #113: `handle_passthrough` must write the matched route's
+    /// manifest name into `PassthroughMetricLabelsSlot` so the
+    /// observability middleware can attach a `route` label to
+    /// ati.proxy.requests / ati.proxy.request_duration_ms.
+    #[tokio::test]
+    async fn handle_passthrough_writes_route_into_slot_on_match() {
+        use wiremock::matchers::{method as m_method, path as m_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let upstream = MockServer::start().await;
+        Mock::given(m_method("GET"))
+            .and(m_path("/v1/anything"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&upstream)
+            .await;
+
+        let (state, _tmp) = state_with_passthrough_route(&upstream.uri());
+        let slot = Arc::new(PassthroughMetricLabelsSlot::default());
+
+        let mut req = HttpRequest::builder()
+            .method("GET")
+            .uri("/api/v1/anything")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(slot.clone());
+
+        let _resp = crate::core::passthrough::handle_passthrough(State(state), req).await;
+
+        let route = slot
+            .route
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("handle_passthrough must populate route on match");
+        assert_eq!(route, "echoroute");
+    }
+
+    /// When the path matches the route AND triggers a deny_paths rule,
+    /// the route slot MUST still be populated — the route was matched,
+    /// just the path was rejected. (The deny COUNTER is separately
+    /// incremented at the same site; that's covered by inspection of
+    /// the metric handle in the otel-feature build.)
+    #[tokio::test]
+    async fn handle_passthrough_writes_route_into_slot_even_on_deny() {
+        let (state, _tmp) = state_with_passthrough_route("http://unused");
+        let slot = Arc::new(PassthroughMetricLabelsSlot::default());
+
+        let mut req = HttpRequest::builder()
+            .method("GET")
+            // `/api/denied` matches route "echoroute" but is in deny_paths.
+            .uri("/api/denied")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(slot.clone());
+
+        let resp = crate::core::passthrough::handle_passthrough(State(state), req).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+
+        let route = slot
+            .route
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("deny path must still attribute the request to its route");
+        assert_eq!(route, "echoroute");
+    }
+
+    /// When no route matches at all (passthrough disabled or no manifest
+    /// claims the path), the slot stays empty — the request can't be
+    /// attributed to any route.
+    #[tokio::test]
+    async fn handle_passthrough_leaves_slot_empty_when_no_route_matches() {
+        let (state, _tmp) = state_with_passthrough_route("http://unused");
+        let slot = Arc::new(PassthroughMetricLabelsSlot::default());
+
+        let mut req = HttpRequest::builder()
+            .method("GET")
+            // /unrelated/foo does NOT match the /api prefix.
+            .uri("/unrelated/foo")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(slot.clone());
+
+        let _resp = crate::core::passthrough::handle_passthrough(State(state), req).await;
+        assert!(
+            slot.route.lock().unwrap().is_none(),
+            "no route match must leave the slot empty"
+        );
     }
 
     /// Reverse: when tool resolution FAILS (unknown tool), the handler

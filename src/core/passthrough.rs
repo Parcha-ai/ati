@@ -783,6 +783,19 @@ pub async fn handle_passthrough(
     tracing::Span::current().record("route", route.name.as_str());
     tracing::Span::current().record("upstream", route.base_url.as_str());
 
+    // Write the matched route name into the per-passthrough metric slot
+    // the observability middleware allocated. Read by the middleware
+    // post-response to attach a `route` label to ati.proxy.requests and
+    // ati.proxy.request_duration_ms. Issue #113: per-upstream dashboards.
+    if let Some(slot) = req
+        .extensions()
+        .get::<Arc<crate::proxy::server::PassthroughMetricLabelsSlot>>()
+    {
+        if let Ok(mut g) = slot.route.lock() {
+            *g = Some(route.name.clone());
+        }
+    }
+
     // Compute the rewritten path BEFORE checking deny-paths, so denials are
     // expressed against the path the upstream would actually see.
     let upstream_path = rewrite_path(&path, &route);
@@ -793,6 +806,14 @@ pub async fn handle_passthrough(
             path = %upstream_path,
             "passthrough denied by deny_paths"
         );
+        // Bump the deny counter (#113) — bounded cardinality, route label
+        // only. The path itself stays in the tracing log line above.
+        #[cfg(feature = "otel")]
+        if let Some(m) = crate::core::otel::metrics() {
+            use opentelemetry::KeyValue;
+            m.passthrough_denied
+                .add(1, &[KeyValue::new("route", route.name.clone())]);
+        }
         return forbidden("path denied by policy");
     }
 

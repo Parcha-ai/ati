@@ -54,6 +54,12 @@ pub struct MetricsHandles {
     pub proxy_requests: opentelemetry::metrics::Counter<u64>,
     pub proxy_request_duration_ms: opentelemetry::metrics::Histogram<f64>,
     pub upstream_errors: opentelemetry::metrics::Counter<u64>,
+    /// Incremented when a passthrough request is rejected by the
+    /// route's `deny_paths`. Single label: `route` (manifest name).
+    /// The denied path itself stays in the tracing log line — emitting
+    /// it as a metric label would risk cardinality blow-up under an
+    /// adversarial spray.
+    pub passthrough_denied: opentelemetry::metrics::Counter<u64>,
 }
 
 static METRICS: OnceLock<MetricsHandles> = OnceLock::new();
@@ -150,6 +156,12 @@ where
         upstream_errors: meter
             .u64_counter("ati.upstream.errors")
             .with_description("Count of upstream errors observed by ATI")
+            .build(),
+        passthrough_denied: meter
+            .u64_counter("ati.passthrough.denied")
+            .with_description(
+                "Count of passthrough requests rejected by the route's deny_paths globs",
+            )
             .build(),
     };
     // First setter wins; subsequent calls (e.g. in tests) are ignored.
