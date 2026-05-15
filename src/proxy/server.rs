@@ -1996,18 +1996,17 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
 ///   2. Arc-clone keeps the middleware's read-side handle alive
 ///      independently of the request being moved into the handler.
 ///
-/// Public (rather than `pub(crate)`) so the in-crate `proxy::server::tests`
-/// can construct one directly and observe what `handle_call` writes into
-/// it. Production callers should treat this as an internal coordination
-/// type — the meaningful API surface is the otel metric attributes the
-/// observability middleware derives from it.
+/// `pub(crate)` because the in-crate `proxy::server::tests` need to
+/// construct one directly and observe what `handle_call` writes into it.
+/// External callers should treat the per-tool label as an opaque
+/// otel-metric attribute — this slot is an internal coordination type.
 #[derive(Default)]
-pub struct CallMetricLabelsSlot {
+pub(crate) struct CallMetricLabelsSlot {
     /// `(provider_name, tool_name)`. Populated by `handle_call` after
     /// tool resolution succeeds. `None` if the request errored before
     /// resolution (bad body, unknown tool) — middleware then skips the
     /// extra labels.
-    pub inner: std::sync::Mutex<Option<(String, String)>>,
+    pub(crate) inner: std::sync::Mutex<Option<(String, String)>>,
 }
 
 /// Per-request observability layer. Always mints a `tracing` span so events
@@ -2782,7 +2781,13 @@ mod tests {
     /// Build a minimal proxy state with one CLI-handler echo tool. Tools
     /// auto-register: the provider's name is also the tool's name, so the
     /// resolved labels are both "echoprov".
-    fn state_with_echo_tool() -> Arc<ProxyState> {
+    ///
+    /// Returns the TempDir alongside the state so it survives until the
+    /// caller drops it — `ManifestRegistry::load` reads the manifests
+    /// eagerly and `SkillRegistry::load("/nonexistent")` doesn't touch a
+    /// real path, so the tempdir only needs to outlive the load call.
+    /// Returning it keeps cleanup automatic (drop = unlink).
+    fn state_with_echo_tool() -> (Arc<ProxyState>, tempfile::TempDir) {
         let manifests_tmp = tempfile::tempdir().expect("manifests tempdir");
         std::fs::write(
             manifests_tmp.path().join("myecho.toml"),
@@ -2796,16 +2801,9 @@ auth_type = "none"
 "#,
         )
         .unwrap();
-        let skills_tmp = tempfile::tempdir().expect("skills tempdir");
         let registry = ManifestRegistry::load(manifests_tmp.path()).expect("load manifests");
-        // Hold tempdirs alive for the duration of the state — the registry
-        // re-reads manifests in some paths, and the skill registry walks
-        // the skills dir lazily.
-        std::mem::forget(manifests_tmp);
-        std::mem::forget(skills_tmp);
-
         let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
-        Arc::new(ProxyState {
+        let state = Arc::new(ProxyState {
             registry,
             skill_registry,
             keyring: Keyring::empty(),
@@ -2823,7 +2821,8 @@ auth_type = "none"
                 )
                 .expect("sig verify"),
             ),
-        })
+        });
+        (state, manifests_tmp)
     }
 
     /// Issue #111: when `/call` resolves a tool, the request handler MUST
@@ -2832,7 +2831,7 @@ auth_type = "none"
     /// them as metric labels for per-tool dashboards.
     #[tokio::test]
     async fn handle_call_writes_provider_and_tool_into_metric_labels_slot() {
-        let state = state_with_echo_tool();
+        let (state, _tmp) = state_with_echo_tool();
         let slot = Arc::new(CallMetricLabelsSlot::default());
 
         let body = serde_json::json!({ "tool_name": "echoprov", "args": ["hi"] });
@@ -2861,7 +2860,7 @@ auth_type = "none"
     /// `tool=` is never set with a value that isn't a real resolved tool.
     #[tokio::test]
     async fn handle_call_leaves_slot_empty_on_unknown_tool() {
-        let state = state_with_echo_tool();
+        let (state, _tmp) = state_with_echo_tool();
         let slot = Arc::new(CallMetricLabelsSlot::default());
 
         let body = serde_json::json!({ "tool_name": "does_not_exist", "args": [] });
