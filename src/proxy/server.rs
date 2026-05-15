@@ -365,6 +365,15 @@ async fn handle_call(
 ) -> impl IntoResponse {
     // Extract JWT claims from request extensions (set by auth middleware)
     let claims = req.extensions().get::<TokenClaims>().cloned();
+    // Grab the per-tool labels slot the observability middleware stashed
+    // before calling us. After tool resolution we write (provider, tool)
+    // into it; the middleware then attaches those as metric labels so
+    // dashboards can drill down by tool. Clone the Arc so we still hold
+    // a write-side handle after `req.into_body()` consumes the request.
+    let metric_labels_slot = req
+        .extensions()
+        .get::<std::sync::Arc<CallMetricLabelsSlot>>()
+        .cloned();
 
     // Parse request body. The ceiling must accommodate the worst-case upload
     // payload: `file_manager::MAX_UPLOAD_BYTES` of raw bytes, base64-inflated
@@ -445,6 +454,18 @@ async fn handle_call(
             }
         }
     };
+
+    // Record (provider, tool) for the otel request-rate / latency metrics.
+    // Done as soon as resolution succeeds — every subsequent path (scope
+    // denial, rate-limit, upstream error, success) is then properly
+    // labelled. Pre-resolution failures (bad JSON, unknown tool) skip this
+    // write and surface in metrics as `/call` without per-tool labels,
+    // which is the correct semantic ("could not attribute to a tool").
+    if let Some(ref slot) = metric_labels_slot {
+        if let Ok(mut guard) = slot.inner.lock() {
+            *guard = Some((provider.name.clone(), tool.name.clone()));
+        }
+    }
 
     // Scope enforcement from JWT claims
     if let Some(tool_scope) = &tool.scope {
@@ -1957,6 +1978,37 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .with_state(state)
 }
 
+/// Per-tool metric attributes written by the `/call` handler after tool
+/// resolution, then read by `observability_middleware` to attach
+/// `tool`/`provider` labels to the request counter and duration histogram.
+///
+/// Only `/call` populates this. Other routes (`/help`, `/skills/*`, etc.)
+/// leave the slot empty, so the middleware emits only the base
+/// `(http.route, http.request.method, http.response.status_class)`
+/// tuple for them and cardinality stays bounded.
+///
+/// Wrapped in `Arc<Mutex<Option<...>>>` because:
+///   1. The middleware needs to read it AFTER the handler has consumed
+///      the request body (i.e. after `req.into_body()`), so we can't pass
+///      via response extensions without restructuring every early-return
+///      path in `handle_call`. Pre-creating the slot lets the handler
+///      fill it in-place without owning the request.
+///   2. Arc-clone keeps the middleware's read-side handle alive
+///      independently of the request being moved into the handler.
+///
+/// `pub(crate)` because the in-crate `proxy::server::tests` need to
+/// construct one directly and observe what `handle_call` writes into it.
+/// External callers should treat the per-tool label as an opaque
+/// otel-metric attribute — this slot is an internal coordination type.
+#[derive(Default)]
+pub(crate) struct CallMetricLabelsSlot {
+    /// `(provider_name, tool_name)`. Populated by `handle_call` after
+    /// tool resolution succeeds. `None` if the request errored before
+    /// resolution (bad body, unknown tool) — middleware then skips the
+    /// extra labels.
+    pub(crate) inner: std::sync::Mutex<Option<(String, String)>>,
+}
+
 /// Per-request observability layer. Always mints a `tracing` span so events
 /// inside handlers nest under one identifiable parent; when the `otel`
 /// feature is compiled in (and an exporter is configured), the span is
@@ -1966,7 +2018,14 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
 /// `http.request.method`, `http.route`, `http.response.status_code`.
 /// `http.route` falls back to the raw path when axum hasn't matched a route
 /// yet (e.g. the passthrough fallback).
-async fn observability_middleware(req: HttpRequest<Body>, next: Next) -> Response {
+///
+/// For `/call` requests, the `/call` handler additionally writes the
+/// resolved `(provider, tool)` pair into a `CallMetricLabelsSlot` inserted
+/// into request extensions — we pick it up after `next.run` and attach
+/// those as extra metric labels so dashboards can break down request rate,
+/// latency, and error rate by tool. Other routes leave the slot empty,
+/// keeping the base label cardinality unchanged.
+async fn observability_middleware(mut req: HttpRequest<Body>, next: Next) -> Response {
     use tracing::Instrument as _;
 
     let method = req.method().clone();
@@ -2002,6 +2061,13 @@ async fn observability_middleware(req: HttpRequest<Body>, next: Next) -> Respons
     #[cfg(feature = "otel")]
     crate::core::otel::extract_request_parent_into_span(&span, req.headers());
 
+    // Pre-create the per-tool labels slot and stash a clone for the
+    // post-`next.run` read. Only the `/call` handler writes into it; for
+    // every other route this stays `None` and the middleware emits the
+    // base label tuple unchanged.
+    let labels_slot = std::sync::Arc::new(CallMetricLabelsSlot::default());
+    req.extensions_mut().insert(labels_slot.clone());
+
     let start = std::time::Instant::now();
     let response = next.run(req).instrument(span.clone()).await;
     let status = response.status();
@@ -2012,11 +2078,27 @@ async fn observability_middleware(req: HttpRequest<Body>, next: Next) -> Respons
         if let Some(m) = crate::core::otel::metrics() {
             use opentelemetry::KeyValue;
             let status_class = format!("{}xx", status.as_u16() / 100);
-            let attrs = [
+            let mut attrs = vec![
                 KeyValue::new("http.route", route.clone()),
                 KeyValue::new("http.request.method", method.to_string()),
                 KeyValue::new("http.response.status_class", status_class),
             ];
+            // `/call`-only: pick up the resolved (provider, tool) the
+            // handler wrote into the slot. Bounded cardinality — ~155
+            // tools × 3 status classes × 1 method ≈ 465 series.
+            //
+            // Cloned (not `.take()`) so an outer test harness can also
+            // observe the slot via its own Arc clone — read semantics
+            // here, not move semantics.
+            if let Some((provider, tool)) = labels_slot
+                .inner
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().cloned())
+            {
+                attrs.push(KeyValue::new("provider", provider));
+                attrs.push(KeyValue::new("tool", tool));
+            }
             m.proxy_requests.add(1, &attrs);
             m.proxy_request_duration_ms
                 .record(start.elapsed().as_secs_f64() * 1000.0, &attrs);
@@ -2025,7 +2107,7 @@ async fn observability_middleware(req: HttpRequest<Body>, next: Next) -> Respons
     #[cfg(not(feature = "otel"))]
     {
         // Keep the variables referenced so the no-feature build doesn't warn.
-        let _ = (&route, &method, start);
+        let _ = (&route, &method, start, &labels_slot);
     }
 
     response
@@ -2678,4 +2760,123 @@ fn build_scoped_prompt(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    //! In-crate tests covering wiring that can't be observed from outside
+    //! the crate (notably `CallMetricLabelsSlot` access on private types).
+
+    use super::*;
+    use crate::core::auth_generator::AuthCache;
+    use crate::core::db::DbState;
+    use crate::core::keyring::Keyring;
+    use crate::core::manifest::ManifestRegistry;
+    use crate::core::sig_verify::{SigVerifyConfig, SigVerifyMode, DEFAULT_EXEMPT_PATHS};
+    use crate::core::skill::SkillRegistry;
+    use axum::body::Body;
+    use axum::extract::State;
+    use std::sync::Arc;
+
+    /// Build a minimal proxy state with one CLI-handler echo tool. Tools
+    /// auto-register: the provider's name is also the tool's name, so the
+    /// resolved labels are both "echoprov".
+    ///
+    /// Returns the TempDir alongside the state so it survives until the
+    /// caller drops it — `ManifestRegistry::load` reads the manifests
+    /// eagerly and `SkillRegistry::load("/nonexistent")` doesn't touch a
+    /// real path, so the tempdir only needs to outlive the load call.
+    /// Returning it keeps cleanup automatic (drop = unlink).
+    fn state_with_echo_tool() -> (Arc<ProxyState>, tempfile::TempDir) {
+        let manifests_tmp = tempfile::tempdir().expect("manifests tempdir");
+        std::fs::write(
+            manifests_tmp.path().join("myecho.toml"),
+            r#"
+[provider]
+name = "echoprov"
+description = "Test echo CLI"
+handler = "cli"
+cli_command = "echo"
+auth_type = "none"
+"#,
+        )
+        .unwrap();
+        let registry = ManifestRegistry::load(manifests_tmp.path()).expect("load manifests");
+        let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+        let state = Arc::new(ProxyState {
+            registry,
+            skill_registry,
+            keyring: Keyring::empty(),
+            jwt_config: None,
+            jwks_json: None,
+            auth_cache: AuthCache::new(),
+            db: DbState::Disabled,
+            passthrough: None,
+            sig_verify: Arc::new(
+                SigVerifyConfig::build(
+                    SigVerifyMode::Log,
+                    60,
+                    DEFAULT_EXEMPT_PATHS,
+                    &Keyring::empty(),
+                )
+                .expect("sig verify"),
+            ),
+        });
+        (state, manifests_tmp)
+    }
+
+    /// Issue #111: when `/call` resolves a tool, the request handler MUST
+    /// write the resolved `(provider, tool)` pair into the
+    /// `CallMetricLabelsSlot` so the observability middleware can attach
+    /// them as metric labels for per-tool dashboards.
+    #[tokio::test]
+    async fn handle_call_writes_provider_and_tool_into_metric_labels_slot() {
+        let (state, _tmp) = state_with_echo_tool();
+        let slot = Arc::new(CallMetricLabelsSlot::default());
+
+        let body = serde_json::json!({ "tool_name": "echoprov", "args": ["hi"] });
+        let mut req = HttpRequest::builder()
+            .method("POST")
+            .uri("/call")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut().insert(slot.clone());
+
+        let _resp = handle_call(State(state), req).await;
+
+        let labels = slot
+            .inner
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("handle_call must populate the slot when tool resolution succeeds");
+        assert_eq!(labels, ("echoprov".to_string(), "echoprov".to_string()));
+    }
+
+    /// Reverse: when tool resolution FAILS (unknown tool), the handler
+    /// MUST NOT write anything — the slot stays empty so the middleware
+    /// emits the base label tuple only. This preserves the contract that
+    /// `tool=` is never set with a value that isn't a real resolved tool.
+    #[tokio::test]
+    async fn handle_call_leaves_slot_empty_on_unknown_tool() {
+        let (state, _tmp) = state_with_echo_tool();
+        let slot = Arc::new(CallMetricLabelsSlot::default());
+
+        let body = serde_json::json!({ "tool_name": "does_not_exist", "args": [] });
+        let mut req = HttpRequest::builder()
+            .method("POST")
+            .uri("/call")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut().insert(slot.clone());
+
+        let _resp = handle_call(State(state), req).await;
+
+        assert!(
+            slot.inner.lock().unwrap().is_none(),
+            "unknown-tool path must NOT populate the metric labels slot"
+        );
+    }
 }
