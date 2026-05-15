@@ -1521,3 +1521,237 @@ X-Templated = "Bearer ${example_token}"
         1 + 1 /* file_manager virtual */
     );
 }
+
+// --- forward_authorization_paths (issue #107) ----------------------------
+
+/// LiteLLM virtual-key flow: a path inside `forward_authorization_paths`
+/// must forward the sandbox's inbound Authorization and NOT inject the
+/// manifest-defined master key.
+#[tokio::test]
+async fn passthrough_forwards_authorization_on_matched_path() {
+    let upstream = MockServer::start().await;
+    // Upstream only accepts the SANDBOX's virtual key, never the master.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer sk-virtual-xxx"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "litellm"
+description = "LiteLLM-style virtual-key passthrough"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/litellm"
+auth_type = "bearer"
+auth_key_name = "litellm_master_key"
+forward_authorization_paths = ["/v1/*"]
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(
+        &manifest,
+        &[("litellm_master_key", "sk-master-MUST-NOT-LEAK")],
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/litellm/v1/chat/completions")
+        .header("authorization", "Bearer sk-virtual-xxx")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "upstream only matches when the virtual key (not the master) is forwarded"
+    );
+}
+
+/// Inverse test: a path OUTSIDE `forward_authorization_paths` keeps the
+/// today's strip+inject behaviour — sandbox Authorization is stripped,
+/// manifest master key is injected.
+#[tokio::test]
+async fn passthrough_strips_authorization_on_unmatched_path() {
+    let upstream = MockServer::start().await;
+    // /key/generate is an admin endpoint — it must see the MASTER key.
+    Mock::given(method("POST"))
+        .and(path("/key/generate"))
+        .and(header("authorization", "Bearer sk-master-MUST-LEAK-HERE"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "litellm"
+description = "LiteLLM-style virtual-key passthrough"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/litellm"
+auth_type = "bearer"
+auth_key_name = "litellm_master_key"
+forward_authorization_paths = ["/v1/*"]
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(
+        &manifest,
+        &[("litellm_master_key", "sk-master-MUST-LEAK-HERE")],
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        // /key/generate is NOT in forward_authorization_paths.
+        .uri("/litellm/key/generate")
+        // Sandbox tries to assert its own creds — must be stripped.
+        .header("authorization", "Bearer sk-sandbox-tried-to-impersonate")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "admin path must inject master key and strip the sandbox's Authorization"
+    );
+}
+
+/// Recursive glob expansion: `/v1/*` also matches `/v1/a/b/c` (same
+/// behaviour as deny_paths — `*` doesn't cross `/` so the loader
+/// auto-adds the `**` twin).
+#[tokio::test]
+async fn passthrough_forward_auth_glob_is_recursive() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/embeddings/openai/text-embedding-3-small"))
+        .and(header("authorization", "Bearer sk-virtual-deep"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "litellm"
+description = "LiteLLM-style virtual-key passthrough"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/litellm"
+auth_type = "bearer"
+auth_key_name = "litellm_master_key"
+forward_authorization_paths = ["/v1/*"]
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[("litellm_master_key", "sk-master")]);
+
+    let req = Request::builder()
+        .uri("/litellm/v1/embeddings/openai/text-embedding-3-small")
+        .header("authorization", "Bearer sk-virtual-deep")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "deeply-nested path under /v1/* must still get forward-auth treatment"
+    );
+}
+
+// --- auth_key_name miss handling (issue #108) ----------------------------
+
+/// When `auth_key_name` points at a key that isn't in the keyring, the old
+/// behaviour silently injected `Authorization: Bearer ` (empty value),
+/// producing cryptic upstream 401s. The fix logs a warning and skips
+/// injection entirely — so the upstream sees NO Authorization header, and
+/// the operator gets a clear log line to diagnose.
+#[tokio::test]
+async fn passthrough_skips_auth_when_keyring_missing_the_key() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/anything"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+auth_type = "bearer"
+auth_key_name = "absent_key"
+"#,
+        upstream.uri()
+    );
+
+    // Empty keyring — `absent_key` is not present.
+    let (app, _dir) = build_passthrough_app(&manifest, &[]);
+    let req = Request::builder()
+        .uri("/api/v1/anything")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Critical assertion: NO Authorization header reached upstream, not even
+    // an empty "Bearer ". Old behaviour would have leaked `Bearer ` here.
+    let received = upstream.received_requests().await.unwrap();
+    let r = received.last().expect("upstream got at least one request");
+    assert!(
+        r.headers.get("authorization").is_none(),
+        "auth_key_name miss must skip injection — no Authorization header should be sent upstream"
+    );
+}
+
+/// `auth_key_name` is normalised to lowercase before keyring lookup so that
+/// manifests written as `LITELLM_MASTER_KEY` resolve against `ATI_KEY_*`
+/// entries (which the keyring stores lowercase by convention).
+#[tokio::test]
+async fn passthrough_resolves_auth_key_name_case_insensitively() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/x"))
+        .and(header("authorization", "Bearer SECRET-VALUE"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "test"
+description = "t"
+handler = "passthrough"
+base_url = "{}"
+path_prefix = "/api"
+auth_type = "bearer"
+# Manifest names the key in uppercase; keyring loader stored it lowercase
+# (ATI_KEY_LITELLM_MASTER_KEY → "litellm_master_key"). Must still resolve.
+auth_key_name = "LITELLM_MASTER_KEY"
+"#,
+        upstream.uri()
+    );
+
+    let (app, _dir) = build_passthrough_app(&manifest, &[("litellm_master_key", "SECRET-VALUE")]);
+    let req = Request::builder()
+        .uri("/api/v1/x")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "uppercase auth_key_name must resolve against lowercase keyring entry"
+    );
+}

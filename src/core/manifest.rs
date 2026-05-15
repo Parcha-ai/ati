@@ -187,6 +187,24 @@ pub struct Provider {
     /// matching can write explicit `**` patterns.
     #[serde(default)]
     pub deny_paths: Vec<String>,
+    /// Glob patterns over the post-rewrite path where ATI should FORWARD the
+    /// sandbox's inbound `Authorization` header verbatim AND skip injecting
+    /// the manifest-defined auth (`auth_type` / `auth_key_name`).
+    ///
+    /// Default-empty: today's behaviour (strip inbound `Authorization`, inject
+    /// manifest auth on every request) applies to every path.
+    ///
+    /// Use case: LiteLLM virtual keys. The provider's manifest pins the master
+    /// key for admin endpoints (`/key/*`, `/user/*`) so the sandbox can't reach
+    /// them — and forwards the per-sandbox virtual key on `/v1/*` so spend
+    /// caps, RPM limits, and model allowlists are enforced per-sandbox by
+    /// LiteLLM.
+    ///
+    /// Same recursive-glob expansion as `deny_paths`: `/v1/*` also matches
+    /// `/v1/chat/completions`. Patterns are matched after `strip_prefix` and
+    /// `path_replace` — i.e. on what the upstream would see.
+    #[serde(default)]
+    pub forward_authorization_paths: Vec<String>,
     /// TCP connect timeout for the upstream call.
     #[serde(default = "default_passthrough_connect_timeout_s")]
     pub connect_timeout_seconds: u64,
@@ -587,6 +605,7 @@ impl CachedProvider {
             host_override: None,
             forward_websockets: false,
             deny_paths: Vec::new(),
+            forward_authorization_paths: Vec::new(),
             connect_timeout_seconds: default_passthrough_connect_timeout_s(),
             read_timeout_seconds: default_passthrough_read_timeout_s(),
             idle_timeout_seconds: default_passthrough_idle_timeout_s(),
@@ -1114,6 +1133,7 @@ pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
         host_override: None,
         forward_websockets: false,
         deny_paths: Vec::new(),
+        forward_authorization_paths: Vec::new(),
         connect_timeout_seconds: default_passthrough_connect_timeout_s(),
         read_timeout_seconds: default_passthrough_read_timeout_s(),
         idle_timeout_seconds: default_passthrough_idle_timeout_s(),

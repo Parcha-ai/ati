@@ -83,6 +83,7 @@ pub fn test_provider(name: &str, base_url: &str) -> Provider {
         host_override: None,
         forward_websockets: false,
         deny_paths: Vec::new(),
+        forward_authorization_paths: Vec::new(),
         connect_timeout_seconds: 5,
         read_timeout_seconds: 300,
         idle_timeout_seconds: 60,
