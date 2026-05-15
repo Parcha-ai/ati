@@ -1049,15 +1049,28 @@ async fn handle_admin_keys_issue(
 }
 
 #[cfg(feature = "db")]
+#[derive(Debug, Default, serde::Deserialize)]
+struct AdminRevokeQuery {
+    /// Optional actor identifier recorded in `ati_audit_log.actor`. Defaults
+    /// to `"admin"` when absent — the same fallback `bulk_revoke` uses when
+    /// its `by` body field is None. Lets orchestrators preserve per-operator
+    /// attribution (e.g. `?by=orch:cleanup-job-42`) without exposing the
+    /// shared admin bearer token in audit rows.
+    by: Option<String>,
+}
+
+#[cfg(feature = "db")]
 async fn handle_admin_keys_revoke(
     State(state): State<Arc<ProxyState>>,
     axum::extract::Path(hash): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<AdminRevokeQuery>,
 ) -> impl IntoResponse {
     let store = match state.key_store.as_ref() {
         Some(s) => s,
         None => return admin_unavailable(),
     };
-    match store.revoke(&hash, Some("admin")).await {
+    let by = q.by.as_deref().or(Some("admin"));
+    match store.revoke(&hash, by).await {
         Ok(true) => (StatusCode::OK, Json(serde_json::json!({"revoked": true}))),
         Ok(false) => (
             StatusCode::NOT_FOUND,
@@ -2222,7 +2235,7 @@ async fn authenticate_ati_key(
     mut req: HttpRequest<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let hash = sha256_hex(raw.as_bytes());
+    let hash = crate::core::keys::sha256_hex(raw.as_bytes());
     let store = match state.key_store.as_ref() {
         Some(s) => s,
         None => return Err(StatusCode::SERVICE_UNAVAILABLE),
@@ -2269,14 +2282,6 @@ pub struct TokenHash(pub String);
 #[derive(Debug, Clone)]
 pub struct EphemeralKeyMarker {
     pub hash: String,
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    hex::encode(digest)
 }
 
 // --- Router builder ---

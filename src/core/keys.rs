@@ -203,14 +203,29 @@ fn escape_like(input: &str) -> String {
     out
 }
 
+/// RAII guard that aborts a Tokio task on drop. Tokio's bare `JoinHandle`
+/// *detaches* on drop rather than aborting — the spawned task keeps running
+/// (and keeps its captures, including a `PgPool` clone and the listener
+/// connection, alive) indefinitely. For the listener we want the task's
+/// lifetime to be bounded by the `KeyStore`'s lifetime, so wrap the handle
+/// in this guard.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Cache-fronted key store. Cheap to clone (interior `Arc`s).
 pub struct KeyStore {
     pool: PgPool,
     cache: Cache<String, Option<AtiKey>>,
-    /// Held just to keep the listener task alive for the lifetime of the
-    /// store. Tasks are aborted on drop, which closes the standalone
-    /// listener connection.
-    _listener_handle: JoinHandle<()>,
+    /// RAII guard that aborts the LISTEN task when the `KeyStore` is dropped.
+    /// Without this, dropping the last `Arc<KeyStore>` would leak the task
+    /// (Tokio's `JoinHandle::drop` detaches), keeping the standalone listener
+    /// connection and the cloned `PgPool` alive forever.
+    _listener_handle: AbortOnDrop,
 }
 
 impl KeyStore {
@@ -226,7 +241,7 @@ impl KeyStore {
         Ok(Arc::new(KeyStore {
             pool,
             cache,
-            _listener_handle: listener_handle,
+            _listener_handle: AbortOnDrop(listener_handle),
         }))
     }
 
