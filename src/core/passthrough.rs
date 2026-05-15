@@ -43,6 +43,8 @@ pub enum PassthroughBuildError {
     BadProvider(String, String),
     #[error("provider '{0}': bad deny_paths glob '{1}': {2}")]
     BadDenyGlob(String, String, String),
+    #[error("provider '{0}': bad forward_authorization_paths glob '{1}': {2}")]
+    BadForwardAuthGlob(String, String, String),
     #[error("provider '{0}': bad header name '{1}'")]
     BadHeaderName(String, String),
     #[error("provider '{0}': bad header value '{1}'")]
@@ -275,13 +277,17 @@ fn compile_route(
     for pattern in &p.forward_authorization_paths {
         for expanded in expand_deny_pattern(pattern) {
             let glob = Glob::new(&expanded).map_err(|e| {
-                PassthroughBuildError::BadDenyGlob(p.name.clone(), expanded.clone(), e.to_string())
+                PassthroughBuildError::BadForwardAuthGlob(
+                    p.name.clone(),
+                    expanded.clone(),
+                    e.to_string(),
+                )
             })?;
             forward_auth_builder.add(glob);
         }
     }
     let forward_auth_globs = forward_auth_builder.build().map_err(|e| {
-        PassthroughBuildError::BadDenyGlob(p.name.clone(), String::new(), e.to_string())
+        PassthroughBuildError::BadForwardAuthGlob(p.name.clone(), String::new(), e.to_string())
     })?;
 
     // Resolve credentials at startup.
