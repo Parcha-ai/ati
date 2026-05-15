@@ -88,6 +88,40 @@ max_response_bytes = 16777216
 #     "/internal/*",
 # ]
 
+# --- Per-path Authorization forwarding (virtual-key support) ---
+
+# By default, ATI strips the sandbox's inbound `Authorization` and injects
+# the manifest-defined `auth_type`/`auth_key_name` credential. That's the
+# right default for routes where the sandbox should never see the upstream
+# secret (Browserbase, Grafana, LiteLLM master key, etc.).
+#
+# Some upstreams issue scoped *virtual* credentials that the sandbox
+# legitimately holds — LiteLLM virtual keys being the canonical case:
+# the supervisor mints a per-sandbox key with spend caps + RPM limits,
+# passes it to the sandbox, and the sandbox sends it as a Bearer. For
+# spend tracking to work, LiteLLM must SEE that virtual key, not the
+# master.
+#
+# `forward_authorization_paths` is an allowlist of post-rewrite path
+# globs where ATI:
+#   1. Forwards the sandbox's inbound `Authorization` header verbatim
+#   2. SKIPS injecting `auth_header` / `auth_query` from the manifest
+#
+# Same recursive-glob semantics as `deny_paths` — `/v1/*` also matches
+# `/v1/chat/completions/anything`.
+#
+# Typical LiteLLM-style config:
+#   auth_type = "bearer"
+#   auth_key_name = "litellm_master_key"
+#   forward_authorization_paths = ["/v1/*"]
+#   deny_paths = ["/config/*", "/model/*"]
+# → Admin paths are gated by the master key, `/v1/*` carries virtual keys,
+#   `/config/*` and `/model/*` are blocked outright.
+#
+# forward_authorization_paths = [
+#     "/v1/*",
+# ]
+
 # --- Extra headers (always-on, resolved from keyring at startup) ---
 
 # Values may contain `${keyring_var_name}` placeholders. Expanded once at

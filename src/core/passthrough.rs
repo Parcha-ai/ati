@@ -78,6 +78,14 @@ pub struct PassthroughRoute {
     pub extra_headers: Vec<(HeaderName, HeaderValue)>,
     /// Compiled deny-globs over the post-prefix-strip path.
     pub deny_globs: GlobSet,
+    /// Compiled globs over the post-prefix-strip path where ATI should
+    /// FORWARD the sandbox's inbound `Authorization` header verbatim AND
+    /// SKIP injecting `auth_header` (the manifest-defined credential).
+    ///
+    /// Empty GlobSet = today's behaviour: strip inbound, inject manifest.
+    /// Matched paths see the sandbox's own bearer reach upstream — required
+    /// for LiteLLM virtual keys so per-sandbox spend caps are enforced.
+    pub forward_auth_globs: GlobSet,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
     /// TCP connect timeout for the upstream. The HTTP path bakes this into
@@ -261,6 +269,21 @@ fn compile_route(
         PassthroughBuildError::BadDenyGlob(p.name.clone(), String::new(), e.to_string())
     })?;
 
+    // Build the forward-auth GlobSet with the same recursive expansion as
+    // deny_paths — `/v1/*` should also match `/v1/chat/completions`.
+    let mut forward_auth_builder = GlobSetBuilder::new();
+    for pattern in &p.forward_authorization_paths {
+        for expanded in expand_deny_pattern(pattern) {
+            let glob = Glob::new(&expanded).map_err(|e| {
+                PassthroughBuildError::BadDenyGlob(p.name.clone(), expanded.clone(), e.to_string())
+            })?;
+            forward_auth_builder.add(glob);
+        }
+    }
+    let forward_auth_globs = forward_auth_builder.build().map_err(|e| {
+        PassthroughBuildError::BadDenyGlob(p.name.clone(), String::new(), e.to_string())
+    })?;
+
     // Resolve credentials at startup.
     let (auth_header, auth_query) = resolve_auth(p, keyring)?;
 
@@ -306,6 +329,7 @@ fn compile_route(
         auth_query,
         extra_headers,
         deny_globs,
+        forward_auth_globs,
         max_request_bytes: p.max_request_bytes,
         max_response_bytes: p.max_response_bytes,
         connect_timeout_seconds: p.connect_timeout_seconds,
@@ -499,7 +523,13 @@ fn connection_hop_names(src: &HeaderMap) -> Vec<String> {
     names
 }
 
-fn filter_request_headers(src: &HeaderMap) -> HeaderMap {
+/// Filter request headers before forwarding upstream.
+///
+/// `keep_authorization` opts out of the inbound-`Authorization` strip — used
+/// by routes that list the matched path in `forward_authorization_paths` so
+/// the sandbox's bearer (e.g. a LiteLLM virtual key) reaches the upstream.
+/// All other strip rules (hop-by-hop, `x-sandbox-*`, traceparent) still apply.
+fn filter_request_headers(src: &HeaderMap, keep_authorization: bool) -> HeaderMap {
     let mut out = HeaderMap::with_capacity(src.len());
     let conn_hops = connection_hop_names(src);
     for (name, value) in src.iter() {
@@ -514,6 +544,13 @@ fn filter_request_headers(src: &HeaderMap) -> HeaderMap {
             continue;
         }
         if is_sandbox_internal_header(n) {
+            // `Authorization` is in STRIP_DOWNSTREAM but virtual-key routes
+            // need it forwarded. All other STRIP_DOWNSTREAM entries (`host`,
+            // `traceparent`, `tracestate`) keep their unconditional strip.
+            if keep_authorization && n.eq_ignore_ascii_case("authorization") {
+                out.append(name.clone(), value.clone());
+                continue;
+            }
             continue;
         }
         out.append(name.clone(), value.clone());
@@ -701,16 +738,22 @@ pub async fn handle_passthrough(
         return forbidden("path denied by policy");
     }
 
+    // Forward-auth mode: when the upstream path matches a glob in
+    // `forward_authorization_paths`, keep the sandbox's inbound Authorization
+    // and SKIP the manifest-defined auth_header. Required for LiteLLM
+    // virtual keys so per-sandbox spend caps are enforced.
+    let forward_auth = route.forward_auth_globs.is_match(&upstream_path);
+
     // WebSocket upgrade dispatch — runs only when the route explicitly
     // allows it AND the client asks for an upgrade. Otherwise fall
     // through to plain HTTP (in which case the upstream will reject the
     // upgrade itself if it doesn't speak WS).
     if route.forward_websockets && is_websocket_upgrade(req.headers()) {
-        return handle_passthrough_ws(req, route, upstream_path, query).await;
+        return handle_passthrough_ws(req, route, upstream_path, query, forward_auth).await;
     }
 
     let method = req.method().clone();
-    let req_headers = filter_request_headers(req.headers());
+    let req_headers = filter_request_headers(req.headers(), forward_auth);
     let body = req.into_body();
 
     // Enforce sync content-length cap if present — avoids streaming when we
@@ -765,13 +808,21 @@ pub async fn handle_passthrough(
     }
 
     // Manifest-defined auth header (one of bearer/header/basic).
-    if let Some((ref name, ref value)) = route.auth_header {
-        builder = builder.header(name.clone(), value.clone());
+    // Skipped when the path is in forward_authorization_paths — the
+    // sandbox's inbound Authorization was already preserved above.
+    if !forward_auth {
+        if let Some((ref name, ref value)) = route.auth_header {
+            builder = builder.header(name.clone(), value.clone());
+        }
     }
 
-    // Manifest-defined query auth.
-    if let Some((ref name, ref value)) = route.auth_query {
-        builder = builder.query(&[(name.as_str(), value.as_str())]);
+    // Manifest-defined query auth. Same forward-auth semantics: when the
+    // sandbox is supplying its own credential on this path, we don't append
+    // the manifest's `?api_key=...` either.
+    if !forward_auth {
+        if let Some((ref name, ref value)) = route.auth_query {
+            builder = builder.query(&[(name.as_str(), value.as_str())]);
+        }
     }
 
     // Extra headers from the manifest (already keyring-expanded).
@@ -951,20 +1002,26 @@ async fn handle_passthrough_ws(
     route: Arc<PassthroughRoute>,
     upstream_path: String,
     query: Option<String>,
+    forward_auth: bool,
 ) -> Response<Body> {
     // Append auth_query (if any) to the upstream URL. Routes with
     // `auth_type = "query"` carry the credential in the query string;
     // earlier PR-5 code only handled the header-based variants.
     // (Greptile P1 #98)
+    //
+    // Skipped on forward_auth paths: the sandbox is supplying its own
+    // credential and the manifest auth should not be appended.
     let mut combined_query = query.unwrap_or_default();
-    if let Some((ref name, ref value)) = route.auth_query {
-        if !combined_query.is_empty() {
-            combined_query.push('&');
+    if !forward_auth {
+        if let Some((ref name, ref value)) = route.auth_query {
+            if !combined_query.is_empty() {
+                combined_query.push('&');
+            }
+            let encoded_value = urlencode(value);
+            combined_query.push_str(name);
+            combined_query.push('=');
+            combined_query.push_str(&encoded_value);
         }
-        let encoded_value = urlencode(value);
-        combined_query.push_str(name);
-        combined_query.push('=');
-        combined_query.push_str(&encoded_value);
     }
     let upstream_url = build_ws_upstream_url(
         &route.base_url,
@@ -984,7 +1041,7 @@ async fn handle_passthrough_ws(
     // the HTTP path — and additionally strip the `sec-websocket-*`
     // handshake-control headers, which tokio_tungstenite generates fresh
     // for the upstream connection.
-    let client_headers = filter_ws_client_headers(req.headers());
+    let client_headers = filter_ws_client_headers(req.headers(), forward_auth);
 
     // Capture the client's offered subprotocols up front. axum's
     // WebSocketUpgrade::from_request consumes the request and would
@@ -1018,7 +1075,15 @@ async fn handle_passthrough_ws(
     };
     let route_for_log = route.name.clone();
     upgrade.on_upgrade(move |socket| async move {
-        if let Err(e) = pump_ws(route, upstream_url.clone(), client_headers, socket).await {
+        if let Err(e) = pump_ws(
+            route,
+            upstream_url.clone(),
+            client_headers,
+            socket,
+            forward_auth,
+        )
+        .await
+        {
             tracing::warn!(
                 route = %route_for_log,
                 error = %e,
@@ -1055,7 +1120,7 @@ fn urlencode(value: &str) -> String {
 /// What survives: `Sec-WebSocket-Protocol` (subprotocol negotiation) is
 /// explicitly KEPT — that's the one `sec-websocket-*` header upstreams
 /// can need.
-fn filter_ws_client_headers(src: &HeaderMap) -> HeaderMap {
+fn filter_ws_client_headers(src: &HeaderMap, keep_authorization: bool) -> HeaderMap {
     let mut out = HeaderMap::with_capacity(src.len());
     // RFC 7230 §6.1: headers named in `Connection:` are hop-by-hop. The HTTP
     // path strips these in `filter_request_headers`; the WS upgrade path is
@@ -1072,6 +1137,10 @@ fn filter_ws_client_headers(src: &HeaderMap) -> HeaderMap {
             continue;
         }
         if is_sandbox_internal_header(n) {
+            if keep_authorization && n.eq_ignore_ascii_case("authorization") {
+                out.append(name.clone(), value.clone());
+                continue;
+            }
             continue;
         }
         let n_lc = n.to_ascii_lowercase();
@@ -1100,6 +1169,7 @@ async fn pump_ws(
     upstream_url: String,
     client_headers: HeaderMap,
     mut sandbox: WebSocket,
+    forward_auth: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::str::FromStr;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -1126,12 +1196,14 @@ async fn pump_ws(
             up_req.headers_mut().insert("host", v);
         }
     }
-    if let Some((ref name, ref value)) = route.auth_header {
-        if let (Ok(n), Ok(v)) = (
-            tokio_tungstenite::tungstenite::http::HeaderName::from_str(name.as_str()),
-            TtHeaderValue::from_bytes(value.as_bytes()),
-        ) {
-            up_req.headers_mut().insert(n, v);
+    if !forward_auth {
+        if let Some((ref name, ref value)) = route.auth_header {
+            if let (Ok(n), Ok(v)) = (
+                tokio_tungstenite::tungstenite::http::HeaderName::from_str(name.as_str()),
+                TtHeaderValue::from_bytes(value.as_bytes()),
+            ) {
+                up_req.headers_mut().insert(n, v);
+            }
         }
     }
     for (name, value) in &route.extra_headers {
@@ -1323,6 +1395,7 @@ mod tests {
             host_override: None,
             forward_websockets: false,
             deny_paths: Vec::new(),
+            forward_authorization_paths: Vec::new(),
             connect_timeout_seconds: 5,
             read_timeout_seconds: 30,
             idle_timeout_seconds: 60,
@@ -1646,7 +1719,7 @@ mod tests {
         h.insert("authorization", "Bearer leak".parse().unwrap());
         h.insert("x-sandbox-signature", "t=1,s=ab".parse().unwrap());
         h.insert("x-keep", "yes".parse().unwrap());
-        let out = filter_request_headers(&h);
+        let out = filter_request_headers(&h, false);
         assert!(out.get("connection").is_none());
         assert!(out.get("host").is_none());
         assert!(out.get("authorization").is_none());
@@ -1671,7 +1744,7 @@ mod tests {
         );
         h.insert("tracestate", "vendor=value,other=v2".parse().unwrap());
         h.insert("x-keep", "yes".parse().unwrap());
-        let out = filter_request_headers(&h);
+        let out = filter_request_headers(&h, false);
         assert!(
             out.get("traceparent").is_none(),
             "inbound traceparent must be stripped — see W3C Trace Context §2.3"
@@ -1695,7 +1768,7 @@ mod tests {
         h.insert("x-sandbox-trace-id", "tr-xyz".parse().unwrap());
         h.insert("x-sandbox-attempt", "2".parse().unwrap());
         h.insert("x-keep", "yes".parse().unwrap());
-        let out = filter_request_headers(&h);
+        let out = filter_request_headers(&h, false);
         for sandbox_hdr in &[
             "x-sandbox-signature",
             "x-sandbox-job-id",
@@ -1707,6 +1780,31 @@ mod tests {
                 "expected {sandbox_hdr} to be stripped"
             );
         }
+        assert_eq!(out.get("x-keep").unwrap().to_str().unwrap(), "yes");
+    }
+
+    #[test]
+    fn filter_request_keeps_authorization_when_opted_in() {
+        // `keep_authorization = true` opts out of the Authorization strip
+        // for forward_authorization_paths routes (LiteLLM virtual keys).
+        // Other STRIP_DOWNSTREAM entries (host, traceparent) still strip
+        // unconditionally — only Authorization is gated by the flag.
+        let mut h = HeaderMap::new();
+        h.insert("authorization", "Bearer sk-virtual".parse().unwrap());
+        h.insert("host", "leaks.example.com".parse().unwrap());
+        h.insert("traceparent", "00-x-y-01".parse().unwrap());
+        h.insert("x-sandbox-signature", "t=1,s=ab".parse().unwrap());
+        h.insert("x-keep", "yes".parse().unwrap());
+        let out = filter_request_headers(&h, true);
+        assert_eq!(
+            out.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer sk-virtual",
+            "Authorization MUST be preserved when keep_authorization = true"
+        );
+        // Everything else still strips — only Authorization is opt-out.
+        assert!(out.get("host").is_none());
+        assert!(out.get("traceparent").is_none());
+        assert!(out.get("x-sandbox-signature").is_none());
         assert_eq!(out.get("x-keep").unwrap().to_str().unwrap(), "yes");
     }
 
