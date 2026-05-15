@@ -1,8 +1,9 @@
 /// Proxy client — forwards tool calls to an external ATI proxy server.
 ///
 /// When ATI_PROXY_URL is set, `ati run <tool>` sends tool_name + args
-/// to the proxy. Authentication is via JWT in the Authorization header
-/// (ATI_SESSION_TOKEN env var).
+/// to the proxy. Authentication is via JWT in the Authorization header,
+/// resolved by `core::token::resolve_session_token` (ATI_SESSION_TOKEN
+/// env, then ATI_SESSION_TOKEN_FILE, then /run/ati/session_token).
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -62,16 +63,23 @@ pub struct ProxyHelpResponse {
 
 const PROXY_TIMEOUT_SECS: u64 = 120;
 
-/// Build an HTTP request builder with JWT Bearer auth from ATI_SESSION_TOKEN.
+/// Build an HTTP request builder with JWT Bearer auth resolved via
+/// `core::token::resolve_session_token` (env → file env → default file).
 fn build_proxy_request(
     client: &Client,
     method: reqwest::Method,
     url: &str,
 ) -> reqwest::RequestBuilder {
     let mut req = client.request(method, url);
-    if let Ok(token) = std::env::var("ATI_SESSION_TOKEN") {
-        if !token.is_empty() {
+    match crate::core::token::resolve_session_token() {
+        Ok(Some(token)) => {
             req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // File-read error (e.g., permission denied on ATI_SESSION_TOKEN_FILE).
+            // Don't block the request; let the proxy 401 if auth is required.
+            tracing::debug!(error = %e, "session token file unreadable; sending request without Authorization");
         }
     }
     req

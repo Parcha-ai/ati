@@ -8,6 +8,7 @@ use crate::core::jwt;
 use crate::core::keyring::Keyring;
 use crate::core::manifest::ManifestRegistry;
 use crate::core::mcp_client;
+use crate::core::token;
 use crate::output;
 use crate::providers::generic;
 use crate::proxy::client as proxy_client;
@@ -455,12 +456,12 @@ async fn execute_via_proxy(
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::debug!(tool = %tool_name, ?args, proxy_url = %proxy_url, "execute via proxy");
 
-    let scopes = match std::env::var("ATI_SESSION_TOKEN") {
-        Ok(token) if !token.is_empty() => match jwt::inspect(&token) {
+    let scopes = match token::resolve_session_token() {
+        Ok(Some(t)) => match jwt::inspect(&t) {
             Ok(claims) => crate::core::scope::ScopeConfig::from_jwt(&claims),
             Err(_) => crate::core::scope::ScopeConfig::unrestricted(),
         },
-        _ => crate::core::scope::ScopeConfig::unrestricted(),
+        Ok(None) | Err(_) => crate::core::scope::ScopeConfig::unrestricted(),
     };
     let start = std::time::Instant::now();
     // Always send both the parsed args map AND the raw positional args.

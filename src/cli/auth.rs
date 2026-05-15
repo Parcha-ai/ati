@@ -1,5 +1,6 @@
 use crate::core::jwt;
 use crate::core::scope::ScopeConfig;
+use crate::core::token;
 use crate::{AuthCommands, Cli, OutputFormat};
 
 /// Execute: ati auth <subcommand>
@@ -10,12 +11,15 @@ pub async fn execute(cli: &Cli, subcmd: &AuthCommands) -> Result<(), Box<dyn std
 }
 
 fn show_status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let token = match std::env::var("ATI_SESSION_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
+    let token = match token::resolve_session_token() {
+        Ok(Some(t)) => t,
+        Ok(None) => {
             println!("No session token set (ATI_SESSION_TOKEN not configured)");
             println!("Running in unrestricted mode — all tools accessible.");
             return Ok(());
+        }
+        Err(e) => {
+            return Err(e.into());
         }
     };
 
