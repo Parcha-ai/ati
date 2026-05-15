@@ -516,8 +516,11 @@ impl KeyStore {
         Ok(rows.len() as u64)
     }
 
-    /// List active rows for a user. Used by the `ati admin keys list-sessions`
-    /// CLI for break-glass inspection. Returns at most 100 rows.
+    /// List rows for a user (most recent first, capped at 100). Includes
+    /// blocked + expired rows; callers that want only currently-usable keys
+    /// must filter with [`AtiKey::is_active`]. Used by the
+    /// `ati admin keys list-sessions` CLI for break-glass inspection, where
+    /// seeing recently-revoked / expired keys is a feature not a bug.
     pub async fn list_user_sessions(&self, user_id: &str) -> Result<Vec<AtiKey>, KeyStoreError> {
         let rows: Vec<AtiKeyRow> = sqlx::query_as(
             r#"
@@ -609,12 +612,18 @@ fn spawn_listener(pool: PgPool, cache: Cache<String, Option<AtiKey>>) -> JoinHan
         const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
         const MAX_BACKOFF: Duration = Duration::from_secs(30);
         let mut backoff = INITIAL_BACKOFF;
+        // Per-outage flag so each separate disconnect storm gets exactly one
+        // `warn` log (subsequent reconnect attempts within the same outage
+        // demote to `debug` to avoid log spam). `listen_loop` flips this back
+        // to `false` via &mut on a successful reconnect, so the next outage
+        // will warn fresh — Greptile flagged that without this reset, a
+        // long-running proxy stops warning at all after its first outage.
         let mut warned_once = false;
         loop {
-            // listen_loop resets backoff to INITIAL_BACKOFF on first successful
-            // notification — that proves the new connection is live and a
-            // subsequent disconnect should retry quickly, not at the cap.
-            match listen_loop(&pool, &cache, &mut backoff).await {
+            // listen_loop resets backoff to INITIAL_BACKOFF and warned_once to
+            // false on a successful reconnect (proof of liveness), so a future
+            // disconnect both retries quickly and logs at warn-level once.
+            match listen_loop(&pool, &cache, &mut backoff, &mut warned_once).await {
                 Ok(()) => {
                     // listen_loop only returns Ok on graceful shutdown; we
                     // drop the channel below to break the outer loop.
@@ -639,13 +648,16 @@ async fn listen_loop(
     pool: &PgPool,
     cache: &Cache<String, Option<AtiKey>>,
     backoff: &mut Duration,
+    warned_once: &mut bool,
 ) -> Result<(), sqlx::Error> {
     let mut listener = PgListener::connect_with(pool).await?;
     listener.listen(NOTIFY_CHANNEL).await?;
-    // Connection is good — reset backoff so a *future* disconnect retries
-    // quickly. Without this, a brief outage after a long-stable session
-    // would wait the cap (30s) instead of the intended 1s.
+    // Connection is good — reset backoff and the per-outage warn flag so a
+    // *future* disconnect retries quickly AND emits one fresh warn. Without
+    // these resets, a brief outage after a long-stable session would wait
+    // the cap (30s) and silently demote the warn to debug forever.
     *backoff = Duration::from_secs(1);
+    *warned_once = false;
     loop {
         let notification = listener.recv().await?;
         let hash = notification.payload();
