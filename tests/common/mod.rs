@@ -277,6 +277,8 @@ pub fn build_test_app(registry: ManifestRegistry) -> axum::Router {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     build_router(state)
 }
@@ -302,6 +304,8 @@ pub fn build_test_app_with_jwt(registry: ManifestRegistry) -> axum::Router {
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     build_router(state)
 }
@@ -331,6 +335,8 @@ pub fn build_test_app_full(
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     build_router(state)
 }

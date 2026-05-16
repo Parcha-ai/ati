@@ -93,6 +93,8 @@ forward_websockets = {forward_websockets}
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
     // Leak the tempdir so it lives for the duration of the test.
@@ -373,6 +375,8 @@ auth_key_name = "ws_query_secret"
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     let app = build_router(state);
     std::mem::forget(dir);

@@ -60,6 +60,8 @@ fn build_app_with_registry(registry: ManifestRegistry, keyring: Keyring) -> axum
             )
             .unwrap(),
         ),
+        key_store: None,
+        admin_token: None,
     });
     build_router(state)
 }
