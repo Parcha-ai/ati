@@ -339,6 +339,7 @@ class AtiOrchestrator:
         extra_scopes: list[str] | None = None,
         ttl_seconds: int = 3600,
         rate: dict[str, str] | None = None,
+        customer_id: str | None = None,
         fetch_skill_content: bool = False,
     ) -> dict[str, str | dict[str, str]]:
         """Generate env vars to inject into a sandboxed agent.
@@ -350,6 +351,10 @@ class AtiOrchestrator:
             extra_scopes: Additional raw scope strings (e.g. ``["help"]``).
             ttl_seconds: Token lifetime (default 3600).
             rate: Per-tool rate limits (e.g. ``{"tool:github:*": "10/hour"}``).
+            customer_id: Optional tenant id. When set, the proxy resolves
+                per-customer credentials (e.g. that customer's own OAuth
+                tokens for Particle) instead of Parcha-owned shared
+                credentials. None means "no tenant" — only shared rows match.
             fetch_skill_content: If True, resolve skills from proxy and include
                 SKILL.md content in the returned dict under a ``"skills"`` key.
 
@@ -372,6 +377,7 @@ class AtiOrchestrator:
             aud=self.default_aud,
             iss=self.default_iss,
             rate=rate,
+            customer_id=customer_id,
         )
 
         result: dict[str, str | dict[str, str]] = {

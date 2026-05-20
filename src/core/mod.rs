@@ -1,6 +1,8 @@
 pub mod audit;
 pub mod auth_generator;
 pub mod cli_executor;
+#[cfg(feature = "db")]
+pub mod customer_store;
 pub mod db;
 pub mod dirs;
 pub mod error;
@@ -18,6 +20,8 @@ pub mod openapi;
 #[cfg(feature = "otel")]
 pub mod otel;
 pub mod passthrough;
+#[cfg(feature = "db")]
+pub mod provider_store;
 pub mod rate;
 pub mod response;
 pub mod scope;

@@ -545,7 +545,7 @@ pub struct UploadResult {
 /// One typed sink the operator's manifest declares as a permitted upload
 /// destination. The agent can pick from these keys via `--destination <key>`;
 /// anything else is refused with a typed error.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UploadDestination {
     /// Google Cloud Storage bucket. Object goes to `<bucket>/<prefix>/<date>/<uuid>-<filename>`.

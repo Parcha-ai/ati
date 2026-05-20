@@ -21,7 +21,7 @@ pub enum ManifestError {
     Invalid(String, String),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum AuthType {
@@ -39,7 +39,7 @@ pub enum AuthType {
     Url,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
     pub name: String,
     pub description: String,
@@ -292,7 +292,7 @@ fn default_passthrough_max_resp_bytes() -> usize {
 }
 
 /// Per-operationId overrides for OpenAPI-discovered tools.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OpenApiToolOverride {
     pub hint: Option<String>,
     #[serde(default)]
@@ -317,7 +317,7 @@ pub struct OpenApiToolOverride {
 /// - `${JWT_SCOPE}` → agent's JWT `scope` claim
 /// - `${TOOL_NAME}` → tool being invoked
 /// - `${TIMESTAMP}` → current unix timestamp
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthGenerator {
     #[serde(rename = "type")]
     pub gen_type: AuthGenType,
@@ -351,14 +351,14 @@ fn default_gen_timeout() -> u64 {
     30
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthGenType {
     Command,
     Script,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthOutputFormat {
     #[default]
@@ -367,7 +367,7 @@ pub enum AuthOutputFormat {
 }
 
 /// Target for injecting a JSON-extracted credential value.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectTarget {
     /// Where to inject: "header", "env", or "query"
     #[serde(rename = "type")]
