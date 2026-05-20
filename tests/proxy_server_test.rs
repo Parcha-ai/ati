@@ -167,7 +167,7 @@ fn build_test_app(upstream_url: &str) -> axum::Router {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -184,6 +184,9 @@ fn build_test_app(upstream_url: &str) -> axum::Router {
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
 
     build_router(state)
@@ -201,7 +204,7 @@ fn build_test_app_with_jwt(upstream_url: &str) -> axum::Router {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: Some(test_jwt_config()),
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -218,6 +221,9 @@ fn build_test_app_with_jwt(upstream_url: &str) -> axum::Router {
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
 
     build_router(state)
@@ -366,7 +372,7 @@ description = "Query"
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -383,6 +389,9 @@ description = "Query"
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 
@@ -457,7 +466,7 @@ description = "ID to look up"
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -474,6 +483,9 @@ description = "ID to look up"
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 
@@ -548,7 +560,7 @@ description = "Title"
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -565,6 +577,9 @@ description = "Title"
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 
@@ -724,7 +739,7 @@ description = "Query"
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -741,6 +756,9 @@ description = "Query"
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 
@@ -1163,7 +1181,7 @@ description = "Query"
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -1180,6 +1198,9 @@ description = "Query"
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 
@@ -1269,7 +1290,7 @@ description = "Data"
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -1286,6 +1307,9 @@ description = "Data"
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 

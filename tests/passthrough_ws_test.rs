@@ -78,7 +78,7 @@ forward_websockets = {forward_websockets}
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -95,6 +95,9 @@ forward_websockets = {forward_websockets}
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
     // Leak the tempdir so it lives for the duration of the test.
@@ -360,7 +363,7 @@ auth_key_name = "ws_query_secret"
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -377,6 +380,9 @@ auth_key_name = "ws_query_secret"
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
     std::mem::forget(dir);

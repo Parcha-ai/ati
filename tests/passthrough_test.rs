@@ -68,7 +68,7 @@ fn build_passthrough_app(manifest_toml: &str, keys: &[(&str, &str)]) -> (axum::R
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -85,6 +85,9 @@ fn build_passthrough_app(manifest_toml: &str, keys: &[(&str, &str)]) -> (axum::R
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
     (app, dir)
@@ -103,7 +106,7 @@ fn build_disabled_app(manifest_toml: &str) -> (axum::Router, TempDir) {
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring: Keyring::empty(),
+        keyring: std::sync::Arc::new(Keyring::empty()),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -120,6 +123,9 @@ fn build_disabled_app(manifest_toml: &str) -> (axum::Router, TempDir) {
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
     (app, dir)
@@ -1014,7 +1020,7 @@ path_prefix = "/sessions"
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -1031,6 +1037,9 @@ path_prefix = "/sessions"
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     let app = build_router(state);
 

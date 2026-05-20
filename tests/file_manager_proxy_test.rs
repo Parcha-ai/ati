@@ -45,7 +45,7 @@ fn build_app_with_registry(registry: ManifestRegistry, keyring: Keyring) -> axum
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
-        keyring,
+        keyring: std::sync::Arc::new(keyring),
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
@@ -62,6 +62,9 @@ fn build_app_with_registry(registry: ManifestRegistry, keyring: Keyring) -> axum
         ),
         key_store: None,
         admin_token: None,
+        resolver: std::sync::Arc::new(ati::core::resolver::KeyringResolver::new(
+            ati::core::keyring::Keyring::empty(),
+        )),
     });
     build_router(state)
 }
