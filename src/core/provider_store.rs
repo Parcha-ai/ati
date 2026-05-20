@@ -38,7 +38,7 @@ pub enum ProviderStoreError {
     SerdeJson(#[from] serde_json::Error),
     #[error("invalid provider name '{0}': must match ^[a-z][a-z0-9_-]*$")]
     InvalidName(String),
-    #[error("invalid handler '{0}': expected http|mcp|openapi|cli|file_manager")]
+    #[error("invalid handler '{0}': expected http|mcp|openapi|cli|file_manager|passthrough")]
     InvalidHandler(String),
     #[error("provider '{0}' not found")]
     NotFound(String),
@@ -396,7 +396,7 @@ fn validate_name(name: &str) -> Result<(), ProviderStoreError> {
 
 fn validate_handler(h: &str) -> Result<(), ProviderStoreError> {
     match h {
-        "http" | "mcp" | "openapi" | "cli" | "file_manager" => Ok(()),
+        "http" | "mcp" | "openapi" | "cli" | "file_manager" | "passthrough" => Ok(()),
         other => Err(ProviderStoreError::InvalidHandler(other.to_string())),
     }
 }
@@ -546,7 +546,14 @@ mod tests {
 
     #[test]
     fn validate_handler_canonical() {
-        for h in ["http", "mcp", "openapi", "cli", "file_manager"] {
+        for h in [
+            "http",
+            "mcp",
+            "openapi",
+            "cli",
+            "file_manager",
+            "passthrough",
+        ] {
             validate_handler(h).unwrap();
         }
     }

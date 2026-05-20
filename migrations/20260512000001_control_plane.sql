@@ -169,6 +169,18 @@ CREATE TABLE IF NOT EXISTS ati_oauth_clients (
         (wrapped_secret IS NULL AND secret_nonce IS NULL AND secret_wrapped_dek IS NULL AND secret_kek_id IS NULL)
         OR
         (wrapped_secret IS NOT NULL AND secret_nonce IS NOT NULL AND secret_wrapped_dek IS NOT NULL AND secret_kek_id IS NOT NULL)
+    ),
+    -- Defense-in-depth: when the encrypted-secret tuple IS present, its byte
+    -- lengths must match what `core::secrets` produces — 12-byte AES-GCM-SIV
+    -- nonce and 40-byte AES-KW wrapped DEK. Without these, a buggy writer in
+    -- PR #4 could store a malformed blob that fails silently at decrypt time
+    -- in PR #3 (the resolver). Mirrors the equivalent constraints on
+    -- ati_provider_credentials and ati_oauth_tokens.
+    CONSTRAINT ati_oauth_clients_secret_nonce_len CHECK (
+        secret_nonce IS NULL OR octet_length(secret_nonce) = 12
+    ),
+    CONSTRAINT ati_oauth_clients_secret_wrap_len CHECK (
+        secret_wrapped_dek IS NULL OR octet_length(secret_wrapped_dek) = 40
     )
 );
 
