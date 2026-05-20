@@ -260,12 +260,20 @@ impl LocalKek {
 
 fn decode_master_key(value: &str) -> Result<[u8; KEY_LEN], String> {
     let trimmed = value.trim();
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(trimmed)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
-        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed))
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed))
-        .map_err(|e| format!("base64 decode: {e}"))?;
+    // Wrap the heap allocation in Zeroizing so the decoded key bytes get
+    // wiped from the freed region as soon as the Vec drops. Without this,
+    // the base64-decoded plaintext key sits in the allocator's free list
+    // until something else reuses the page — a hygiene gap flagged by
+    // Greptile (P2). The KEY_LEN-sized stack copy `out` is the caller's
+    // responsibility (LocalKek wraps it in Zeroizing).
+    let decoded = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(trimmed)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed))
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed))
+            .map_err(|e| format!("base64 decode: {e}"))?,
+    );
     if decoded.len() != KEY_LEN {
         return Err(format!(
             "expected 32 bytes after base64 decode, got {}",
