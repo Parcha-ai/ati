@@ -348,6 +348,14 @@ async fn handle_call(
 ) -> impl IntoResponse {
     // Extract JWT claims from request extensions (set by auth middleware)
     let claims = req.extensions().get::<TokenClaims>().cloned();
+    // Raw inbound bearer (Bearer-token path only — dev/no-JWT paths leave
+    // this empty). Used by `GenContext.jwt_token` so auth_generator scripts
+    // can forward the sandbox's identity to an upstream MCP. See issue #115.
+    let bearer_token: String = req
+        .extensions()
+        .get::<BearerToken>()
+        .map(|b| b.0.clone())
+        .unwrap_or_default();
 
     // Parse request body. The ceiling must accommodate the worst-case upload
     // payload: `file_manager::MAX_UPLOAD_BYTES` of raw bytes, base64-inflated
@@ -489,6 +497,7 @@ async fn handle_call(
             .unwrap_or_else(|| "*".into()),
         tool_name: call_req.tool_name.clone(),
         timestamp: crate::core::jwt::now_secs(),
+        jwt_token: bearer_token.clone(),
     };
 
     // Execute tool call — dispatch based on handler type, with timing for audit
@@ -914,9 +923,14 @@ async fn handle_jwks(State(state): State<Arc<ProxyState>>) -> impl IntoResponse 
 async fn handle_mcp(
     State(state): State<Arc<ProxyState>>,
     claims: Option<Extension<TokenClaims>>,
+    bearer: Option<Extension<BearerToken>>,
     Json(msg): Json<Value>,
 ) -> impl IntoResponse {
     let claims = claims.map(|Extension(claims)| claims);
+    // Raw inbound bearer for `GenContext.jwt_token` (issue #115). The
+    // Bearer-token path always populates this when a JWT is configured;
+    // dev mode and Ati-Key paths leave it None and we fall back to "".
+    let bearer_token: String = bearer.map(|Extension(b)| b.0).unwrap_or_default();
     let scopes = scopes_for_request(claims.as_ref(), &state);
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
@@ -1009,6 +1023,7 @@ async fn handle_mcp(
                     .unwrap_or_else(|| "*".into()),
                 tool_name: tool_name.to_string(),
                 timestamp: crate::core::jwt::now_secs(),
+                jwt_token: bearer_token.clone(),
             };
 
             let result = if provider.is_mcp() {
@@ -1793,21 +1808,29 @@ async fn auth_middleware(
         None => return Ok(next.run(req).await),
     };
 
-    // Extract Authorization: Bearer <token>
-    let auth_header = req
+    // Extract Authorization: Bearer <token>. We own the String so the
+    // `req.headers()` immutable borrow ends before we touch
+    // `req.extensions_mut()` below — needed because we now stash the raw
+    // token in the BearerToken extension (issue #115).
+    let token_owned: String = match req
         .headers()
         .get("authorization")
-        .and_then(|v| v.to_str().ok());
-
-    let token = match auth_header {
-        Some(header) if header.starts_with("Bearer ") => &header[7..],
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(header) if header.starts_with("Bearer ") => header[7..].to_string(),
         _ => return Err(StatusCode::UNAUTHORIZED),
     };
 
     // Validate JWT
-    match jwt::validate(token, jwt_config) {
+    match jwt::validate(&token_owned, jwt_config) {
         Ok(claims) => {
             tracing::debug!(sub = %claims.sub, scopes = %claims.scope, "JWT validated");
+            // Stash the *raw* bearer alongside the parsed claims so handlers
+            // can forward it to auth_generator scripts via `${JWT_TOKEN}`.
+            // We deliberately store this AFTER `validate()` succeeds — an
+            // invalid/expired token never lands in extensions and so can
+            // never reach a generator. See issue #115.
+            req.extensions_mut().insert(BearerToken(token_owned));
             req.extensions_mut().insert(claims);
             Ok(next.run(req).await)
         }
@@ -1817,6 +1840,15 @@ async fn auth_middleware(
         }
     }
 }
+
+/// Per-request extension carrying the *raw* inbound bearer (the `<token>`
+/// from `Authorization: Bearer <token>`). Inserted by `auth_middleware` only
+/// after `jwt::validate` succeeds, so an expired/forged token never leaks
+/// into this extension. Consumed by handlers building a `GenContext` so an
+/// auth_generator can forward the calling sandbox's identity to an upstream
+/// MCP via `${JWT_TOKEN}` (issue #115).
+#[derive(Debug, Clone)]
+pub struct BearerToken(pub String);
 
 // --- Router builder ---
 
