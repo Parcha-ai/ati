@@ -110,12 +110,23 @@ fn build_proxy_request(
         Ok(None) => {}
         Err(e) => {
             // File-read error (e.g., permission denied on $ENV_FILE).
-            // Don't block the request; let the proxy 401 if auth is required.
+            // For a per-provider env that errored, also try the default
+            // ATI_SESSION_TOKEN — same rationale as the Ok(None) branch
+            // above: surface a clean 401 from the proxy if the default
+            // token isn't acceptable rather than silently sending an
+            // unauthenticated request. Greptile P2 on #121: a file-perm
+            // bug on the per-provider token file should produce identical
+            // graceful-degradation behaviour as a missing env var.
             tracing::debug!(
                 env = %env_name,
                 error = %e,
-                "session token file unreadable; sending request without Authorization"
+                "session token file unreadable; trying ATI_SESSION_TOKEN fallback"
             );
+            if env_name != "ATI_SESSION_TOKEN" {
+                if let Ok(Some(token)) = crate::core::token::resolve_token("ATI_SESSION_TOKEN") {
+                    req = req.header("Authorization", format!("Bearer {token}"));
+                }
+            }
         }
     }
     req
