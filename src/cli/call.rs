@@ -353,12 +353,19 @@ async fn execute_local(
         crate::core::rate::check_and_record(tool_name, rate_config)?;
     }
 
-    // Build auth generator context from scope/JWT claims
+    // Build auth generator context from scope/JWT claims. Mirror the
+    // proxy-mode path: in direct-CLI mode the inbound bearer is whatever
+    // is in `$ATI_SESSION_TOKEN` (set by the orchestrator / parent
+    // sandbox). Empty when unset — generators that reference
+    // `${JWT_TOKEN}` will get an empty string, producing a debuggable
+    // upstream 401 rather than a silent miss. See issue #115.
+    let jwt_token = std::env::var("ATI_SESSION_TOKEN").unwrap_or_default();
     let gen_ctx = GenContext {
         jwt_sub: scopes.sub.clone(),
         jwt_scope: scopes.scopes.join(" "),
         tool_name: tool_name.to_string(),
         timestamp: crate::core::jwt::now_secs(),
+        jwt_token,
     };
     let auth_cache = AuthCache::new();
 

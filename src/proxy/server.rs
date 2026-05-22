@@ -385,6 +385,14 @@ async fn handle_call(
 ) -> impl IntoResponse {
     // Extract JWT claims from request extensions (set by auth middleware)
     let claims = req.extensions().get::<TokenClaims>().cloned();
+    // Raw inbound bearer (Bearer-token path only — Ati-Key never lands here).
+    // Used by `GenContext.jwt_token` so auth_generator scripts can forward
+    // the sandbox's identity to an upstream MCP. See issue #115.
+    let bearer_token: String = req
+        .extensions()
+        .get::<BearerToken>()
+        .map(|b| b.0.clone())
+        .unwrap_or_default();
     // Grab the per-tool labels slot the observability middleware stashed
     // before calling us. After tool resolution we write (provider, tool)
     // into it; the middleware then attaches those as metric labels so
@@ -548,6 +556,7 @@ async fn handle_call(
             .unwrap_or_else(|| "*".into()),
         tool_name: call_req.tool_name.clone(),
         timestamp: crate::core::jwt::now_secs(),
+        jwt_token: bearer_token.clone(),
     };
 
     // Execute tool call — dispatch based on handler type, with timing for audit
@@ -1248,9 +1257,14 @@ fn ati_key_to_json(key: &crate::core::keys::AtiKey) -> Value {
 async fn handle_mcp(
     State(state): State<Arc<ProxyState>>,
     claims: Option<Extension<TokenClaims>>,
+    bearer: Option<Extension<BearerToken>>,
     Json(msg): Json<Value>,
 ) -> impl IntoResponse {
     let claims = claims.map(|Extension(claims)| claims);
+    // Raw inbound bearer for `GenContext.jwt_token` (issue #115). The
+    // Bearer-token path always populates this when a JWT is configured;
+    // dev mode and Ati-Key paths leave it None and we fall back to "".
+    let bearer_token: String = bearer.map(|Extension(b)| b.0).unwrap_or_default();
     let scopes = scopes_for_request(claims.as_ref(), &state);
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
@@ -1348,6 +1362,7 @@ async fn handle_mcp(
                     .unwrap_or_else(|| "*".into()),
                 tool_name: tool_name.to_string(),
                 timestamp: crate::core::jwt::now_secs(),
+                jwt_token: bearer_token.clone(),
             };
 
             let result = if provider.is_mcp() {
@@ -2188,6 +2203,12 @@ async fn auth_middleware(
     match jwt::validate(token, jwt_config) {
         Ok(claims) => {
             tracing::debug!(sub = %claims.sub, scopes = %claims.scope, "JWT validated");
+            // Stash the *raw* bearer alongside the parsed claims so handlers
+            // can forward it to auth_generator scripts via `${JWT_TOKEN}`.
+            // We deliberately store this AFTER `validate()` succeeds — an
+            // invalid/expired token never lands in extensions and so can
+            // never reach a generator. See issue #115.
+            req.extensions_mut().insert(BearerToken(token.to_string()));
             req.extensions_mut().insert(claims);
             Ok(next.run(req).await)
         }
@@ -2197,6 +2218,15 @@ async fn auth_middleware(
         }
     }
 }
+
+/// Per-request extension carrying the *raw* inbound bearer (the `<token>`
+/// from `Authorization: Bearer <token>`). Inserted by `auth_middleware` only
+/// after `jwt::validate` succeeds, so an expired/forged token never leaks
+/// into this extension. Consumed by handlers building a `GenContext` so an
+/// auth_generator can forward the calling sandbox's identity to an upstream
+/// MCP via `${JWT_TOKEN}` (issue #115).
+#[derive(Debug, Clone)]
+pub struct BearerToken(pub String);
 
 /// Returns true if `path` is one of ATI's own named routes (vs. a passthrough
 /// route that should bypass JWT and run through the catch-all fallback).
