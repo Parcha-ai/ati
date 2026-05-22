@@ -116,6 +116,18 @@ impl TokenClaims {
 /// `config.accepted_audiences` passes. Per-tool authorization (scope check)
 /// is done separately by callers via `ScopeConfig`.
 pub fn validate(token: &str, config: &JwtConfig) -> Result<TokenClaims, JwtError> {
+    // Defense in depth: jsonwebtoken's `Validation::set_audience(&[])` silently
+    // disables audience validation, so an empty `accepted_audiences` Vec would
+    // accept any `aud` claim — a quiet security regression if a future caller
+    // builds a `JwtConfig` literal with an empty Vec or hand-crafts one in a
+    // test. `parse_audiences_env()` already guards this at the env-loading
+    // layer (Greptile P1 on #121); this guard locks the API boundary so the
+    // invariant can't drift independently. See issue #121 review.
+    if config.accepted_audiences.is_empty() {
+        return Err(JwtError::InvalidKey(
+            "accepted_audiences must not be empty; configure at least one audience".into(),
+        ));
+    }
     let mut validation = Validation::new(config.algorithm);
     // jsonwebtoken's set_audience uses "any-match" semantics: token.aud is
     // accepted iff it matches at least one entry. Passing a slice of &str
@@ -673,6 +685,36 @@ mod tests {
         claims.aud = "wrong".into();
         let token = issue(&claims, &config).unwrap();
         assert!(validate(&token, &config).is_err());
+    }
+
+    #[test]
+    fn test_empty_audiences_vec_rejected_not_bypassed() {
+        // Greptile P1 / security on #121: jsonwebtoken's
+        // Validation::set_audience(&[]) silently bypasses audience validation.
+        // validate() must hard-error on an empty accepted_audiences rather
+        // than accepting any aud — this is the API-boundary guard that
+        // mirrors parse_audiences_env()'s env-loading guard.
+        //
+        // Even a token with the "right" aud must be rejected because the
+        // config is broken at construction time.
+        let config = hs256_config_multi(vec![]);
+        let mut claims = make_claims("tool:web_search");
+        claims.aud = "ati-proxy".into();
+
+        // Issue with a separate one-element config so the token is
+        // structurally valid; the rejection should come from validate's
+        // empty-allowlist guard, not from missing aud.
+        let issuer = hs256_config_multi(vec!["ati-proxy".into()]);
+        let token = issue(&claims, &issuer).unwrap();
+
+        let err = validate(&token, &config).expect_err("empty allowlist must reject");
+        match err {
+            JwtError::InvalidKey(msg) => assert!(
+                msg.contains("accepted_audiences"),
+                "error must mention accepted_audiences; got: {msg}"
+            ),
+            other => panic!("expected InvalidKey, got {other:?}"),
+        }
     }
 
     // -------------------------------------------------------------------------
