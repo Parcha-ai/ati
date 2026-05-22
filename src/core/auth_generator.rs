@@ -173,6 +173,17 @@ impl AuthCache {
             return; // No caching
         }
         let mut cache = self.entries.lock().unwrap();
+        // Sweep expired entries on every insert. Without the token-fingerprint
+        // dimension the previous `(provider, sub)` key bounded the map to
+        // O(providers × subs), so stale entries were always overwritten and a
+        // background sweep wasn't needed. With per-token keys, rotating JWTs
+        // (the very production scenario this PR is targeting — see issue #115)
+        // create a new permanent map entry per request unless we prune. The
+        // sweep runs under the same lock we already hold for the insert, so
+        // it adds no contention; cost is O(n) over the live map, amortized
+        // across inserts. Greptile P1 on PR #117.
+        let now = Instant::now();
+        cache.retain(|_, v| now < v.expires_at);
         let key = (
             provider.to_string(),
             sub.to_string(),
@@ -182,9 +193,18 @@ impl AuthCache {
             key,
             CachedCredential {
                 cred,
-                expires_at: Instant::now() + Duration::from_secs(ttl_secs),
+                expires_at: now + Duration::from_secs(ttl_secs),
             },
         );
+    }
+
+    /// Number of map entries (live + just-expired-not-yet-swept).
+    /// Test-only helper for asserting the sweep on insert actually evicts
+    /// expired rows. Not exposed publicly to avoid encouraging callers
+    /// to depend on a particular eviction cadence.
+    #[cfg(test)]
+    pub fn entry_count(&self) -> usize {
+        self.entries.lock().unwrap().len()
     }
 }
 
@@ -681,6 +701,41 @@ mod tests {
         // Empty input gets the empty sentinel so all no-bearer paths share
         // one cache slot per (provider, sub).
         assert_eq!(token_fingerprint(""), "");
+    }
+
+    #[test]
+    fn test_auth_cache_insert_evicts_expired_entries() {
+        // Greptile P1 on PR #117: rotating per-request JWTs would create one
+        // permanent map entry per request because expired entries were never
+        // swept. The fix prunes on every `insert`. Verify the prune actually
+        // happens by inserting one entry with the smallest possible non-zero
+        // TTL (1 second), waiting for it to expire, then inserting a
+        // different key — the second insert MUST drop the first.
+        let cache = AuthCache::new();
+        let cred = GeneratedCredential {
+            value: "ephemeral".into(),
+            extra_headers: HashMap::new(),
+            extra_env: HashMap::new(),
+        };
+        cache.insert("p", "s", "old-jwt", cred.clone(), 1);
+        assert_eq!(cache.entry_count(), 1);
+
+        // Sleep past the 1s TTL. 1100ms is plenty of headroom on a busy
+        // runner without inflating test runtime.
+        std::thread::sleep(Duration::from_millis(1100));
+
+        // A second insert (different fingerprint) triggers the sweep.
+        cache.insert("p", "s", "new-jwt", cred, 60);
+        assert_eq!(
+            cache.entry_count(),
+            1,
+            "sweep on insert should have dropped the expired entry; \
+             only the new one should remain"
+        );
+
+        // Sanity-check which entry survived.
+        assert!(cache.get("p", "s", "new-jwt").is_some());
+        assert!(cache.get("p", "s", "old-jwt").is_none());
     }
 
     #[tokio::test]
