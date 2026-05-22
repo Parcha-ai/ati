@@ -128,6 +128,7 @@ fn mock_provider(base_url: &str) -> Provider {
         auth_value_prefix: None,
         auth_query_name: None,
         auth_secret_name: None,
+        auth_session_token_env: None,
         handler: String::new(),
         internal: false,
         category: None,
