@@ -18,3 +18,4 @@ pub mod scope;
 pub mod sentry_scope;
 pub mod skill;
 pub mod skillati;
+pub mod token;
