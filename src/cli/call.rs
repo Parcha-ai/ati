@@ -478,7 +478,8 @@ async fn execute_via_proxy(
     // Without raw_args, CLI positional args like `ati run bb browse status`
     // lose "browse" and "status" because parse_tool_args only captures
     // --key value pairs into the map, dropping bare positional words.
-    let exec_result = proxy_client::call_tool(proxy_url, tool_name, args, Some(raw_args)).await;
+    let exec_result =
+        proxy_client::call_tool(proxy_url, tool_name, args, Some(raw_args), None).await;
     let duration = start.elapsed();
 
     let (status, error_msg) = match &exec_result {
