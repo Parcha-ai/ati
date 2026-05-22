@@ -24,7 +24,9 @@ const DEFAULT_SESSION_TOKEN_FILE: &str = "/run/ati/session_token";
 
 /// Compute the default file path for a given session-token env var name.
 ///
-/// Convention: strip a trailing `_SESSION_TOKEN` suffix (case-insensitive),
+/// Convention: strip a trailing `_SESSION_TOKEN` suffix (either uppercase or
+/// lowercase — POSIX env var names are always uppercase in practice, so we
+/// don't bother with mixed-case forms like `Parcha_Tools_Session_Token`),
 /// lowercase the rest, prefix with `/run/ati/`. `ATI_SESSION_TOKEN` is a
 /// hardcoded exception that resolves to `/run/ati/session_token` to preserve
 /// the v0.7.x deployed path (the slugify rule alone would produce

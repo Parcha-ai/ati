@@ -25,13 +25,9 @@
 //! (the `execute_via_proxy` registry path) lives in the runtime harness;
 //! these unit-level tests pin the proxy-side acceptance contract.
 
-mod common;
-
 use ati::core::jwt::{self, JwtConfig};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use serde_json::Value;
 use tower::ServiceExt;
 
 const SECRET: &[u8] = b"per-provider-test-secret-32bytes";
@@ -110,7 +106,10 @@ method = "GET"
     )
     .expect("write manifest");
     let registry = ManifestRegistry::load(&manifests_dir).expect("load manifest");
-    std::mem::forget(dir);
+    // `ManifestRegistry::load` reads all TOML files synchronously into memory;
+    // the registry holds no file handles into `dir`, so we can drop the
+    // tempdir immediately rather than leaking it (Greptile P2 on #123).
+    drop(dir);
 
     let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
 
@@ -290,20 +289,4 @@ method = "GET"
         provider.auth_session_token_env, None,
         "absent field must default to None — backwards compat guarantee"
     );
-}
-
-// Silence unused-import warning from `common` mod (the test file is included
-// for shared test helpers; we don't use them in this file but the build
-// pulls common::* anyway).
-#[allow(dead_code)]
-fn _use_common() {
-    let _ = common::test_provider;
-}
-
-// Body-read helper kept here for future tests that need to inspect the
-// response body beyond status code.
-#[allow(dead_code)]
-async fn body_json(body: Body) -> Value {
-    let bytes = body.collect().await.expect("collect body").to_bytes();
-    serde_json::from_slice(&bytes).expect("parse body as JSON")
 }
