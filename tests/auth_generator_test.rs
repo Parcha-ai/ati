@@ -210,8 +210,9 @@ async fn test_auth_generator_caching() {
         .await
         .expect("second call should succeed");
 
-    // Verify the cache has a value for this provider+sub
-    let cached = cache.get("cache_test", "cache-agent");
+    // Verify the cache has a value for this provider+sub.
+    // Empty token == the default GenContext used above, where jwt_token = "".
+    let cached = cache.get("cache_test", "cache-agent", "");
     assert!(cached.is_some(), "credential should be cached");
 
     // Verify wiremock received both requests (both calls went through to upstream)

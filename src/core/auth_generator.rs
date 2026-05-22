@@ -49,6 +49,16 @@ pub struct GenContext {
     pub jwt_scope: String,
     pub tool_name: String,
     pub timestamp: u64,
+    /// Raw inbound bearer token (the `<token>` from `Authorization: Bearer
+    /// <token>`). Populated by the proxy from the request that triggered
+    /// this generator run, or by the CLI from `$ATI_SESSION_TOKEN` in
+    /// direct-CLI mode. Empty string when no inbound bearer is available
+    /// (dev mode, no JWT validation configured, no env var set). Exposed
+    /// to auth_generators via `${JWT_TOKEN}` so an MCP provider can forward
+    /// the calling sandbox's identity to its upstream MCP without the proxy
+    /// holding a long-lived static bearer that loses per-sandbox attribution.
+    /// See issue #115.
+    pub jwt_token: String,
 }
 
 impl Default for GenContext {
@@ -61,6 +71,7 @@ impl Default for GenContext {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            jwt_token: String::new(),
         }
     }
 }
@@ -89,9 +100,25 @@ struct CachedCredential {
     expires_at: Instant,
 }
 
-/// TTL-based credential cache, keyed by (provider_name, agent_sub).
+/// TTL-based credential cache, keyed by `(provider_name, agent_sub,
+/// token_fingerprint)`.
+///
+/// The token fingerprint is the SHA-256 of the raw inbound bearer truncated
+/// to 16 hex chars (or the empty string when no bearer was presented). We
+/// added this third dimension so a per-sandbox JWT (which rotates per request
+/// in some deployments) doesn't either (a) cache one sandbox's generated
+/// credential and serve it to another sandbox with the same `sub`, or
+/// (b) force every consumer to set `cache_ttl_secs = 0`. With the fingerprint
+/// in the key, legitimate same-sandbox reuse hits the cache and cross-sandbox
+/// reuse misses — even when `sub` happens to collide. See issue #115.
+///
+/// The fingerprint is a one-way hash, so the cache map never carries raw
+/// bearer bytes. Truncating to 16 hex chars (64 bits) is plenty for collision
+/// avoidance at this cache's scale (provider × sub already partitions the
+/// keyspace; the token dimension just needs to distinguish concurrent
+/// per-request tokens for the same agent).
 pub struct AuthCache {
-    entries: Mutex<HashMap<(String, String), CachedCredential>>,
+    entries: Mutex<HashMap<(String, String, String), CachedCredential>>,
 }
 
 impl Default for AuthCache {
@@ -102,33 +129,82 @@ impl Default for AuthCache {
     }
 }
 
+/// SHA-256 of `token`, truncated to 16 hex chars. Empty input → empty
+/// fingerprint (intentional — sentinel for "no inbound bearer" so all the
+/// no-bearer paths share one cache slot per (provider, sub)).
+pub fn token_fingerprint(token: &str) -> String {
+    if token.is_empty() {
+        return String::new();
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(digest)[..16].to_string()
+}
+
 impl AuthCache {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn get(&self, provider: &str, sub: &str) -> Option<GeneratedCredential> {
+    pub fn get(&self, provider: &str, sub: &str, token: &str) -> Option<GeneratedCredential> {
         let cache = self.entries.lock().unwrap();
-        let key = (provider.to_string(), sub.to_string());
+        let key = (
+            provider.to_string(),
+            sub.to_string(),
+            token_fingerprint(token),
+        );
         match cache.get(&key) {
             Some(entry) if Instant::now() < entry.expires_at => Some(entry.cred.clone()),
             _ => None,
         }
     }
 
-    pub fn insert(&self, provider: &str, sub: &str, cred: GeneratedCredential, ttl_secs: u64) {
+    pub fn insert(
+        &self,
+        provider: &str,
+        sub: &str,
+        token: &str,
+        cred: GeneratedCredential,
+        ttl_secs: u64,
+    ) {
         if ttl_secs == 0 {
             return; // No caching
         }
         let mut cache = self.entries.lock().unwrap();
-        let key = (provider.to_string(), sub.to_string());
+        // Sweep expired entries on every insert. Without the token-fingerprint
+        // dimension the previous `(provider, sub)` key bounded the map to
+        // O(providers × subs), so stale entries were always overwritten and a
+        // background sweep wasn't needed. With per-token keys, rotating JWTs
+        // (the very production scenario this PR is targeting — see issue #115)
+        // create a new permanent map entry per request unless we prune. The
+        // sweep runs under the same lock we already hold for the insert, so
+        // it adds no contention; cost is O(n) over the live map, amortized
+        // across inserts. Greptile P1 on PR #117.
+        let now = Instant::now();
+        cache.retain(|_, v| now < v.expires_at);
+        let key = (
+            provider.to_string(),
+            sub.to_string(),
+            token_fingerprint(token),
+        );
         cache.insert(
             key,
             CachedCredential {
                 cred,
-                expires_at: Instant::now() + Duration::from_secs(ttl_secs),
+                expires_at: now + Duration::from_secs(ttl_secs),
             },
         );
+    }
+
+    /// Number of map entries (live + just-expired-not-yet-swept).
+    /// Test-only helper for asserting the sweep on insert actually evicts
+    /// expired rows. Not exposed publicly to avoid encouraging callers
+    /// to depend on a particular eviction cadence.
+    #[cfg(test)]
+    pub fn entry_count(&self) -> usize {
+        self.entries.lock().unwrap().len()
     }
 }
 
@@ -150,9 +226,11 @@ pub async fn generate(
     keyring: &Keyring,
     cache: &AuthCache,
 ) -> Result<GeneratedCredential, AuthGenError> {
-    // 1. Check cache
+    // 1. Check cache. Key includes a fingerprint of the inbound JWT so that
+    // per-sandbox bearers don't share cached credentials across sandboxes
+    // even when they happen to land on the same `sub` (see issue #115).
     if gen.cache_ttl_secs > 0 {
-        if let Some(cached) = cache.get(&provider.name, &ctx.jwt_sub) {
+        if let Some(cached) = cache.get(&provider.name, &ctx.jwt_sub, &ctx.jwt_token) {
             return Ok(cached);
         }
     }
@@ -312,10 +390,12 @@ pub async fn generate(
         }
     };
 
-    // 6. Cache
+    // 6. Cache. See `cache.get` above for why the JWT fingerprint is part
+    // of the key.
     cache.insert(
         &provider.name,
         &ctx.jwt_sub,
+        &ctx.jwt_token,
         cred.clone(),
         gen.cache_ttl_secs,
     );
@@ -331,6 +411,8 @@ pub async fn generate(
 ///
 /// Recognized variables:
 /// - `${JWT_SUB}`, `${JWT_SCOPE}`, `${TOOL_NAME}`, `${TIMESTAMP}` — from GenContext
+/// - `${JWT_TOKEN}` — raw inbound bearer (proxy: from `Authorization: Bearer …`;
+///   CLI: from `$ATI_SESSION_TOKEN`). Empty when no inbound bearer is present.
 /// - `${anything_else}` — looked up in the keyring
 fn expand_variables(
     input: &str,
@@ -352,6 +434,14 @@ fn expand_variables(
             "JWT_SCOPE" => ctx.jwt_scope.clone(),
             "TOOL_NAME" => ctx.tool_name.clone(),
             "TIMESTAMP" => ctx.timestamp.to_string(),
+            // The raw inbound bearer. Empty in dev mode and in any context
+            // where no JWT was presented (CLI direct mode without
+            // `$ATI_SESSION_TOKEN`). Generators that *require* a non-empty
+            // token should fail explicitly inside their own script rather
+            // than relying on `expand_variables` to error — silently sending
+            // an empty bearer to the upstream is a debuggable 401, whereas
+            // synthesizing one would be a security hole.
+            "JWT_TOKEN" => ctx.jwt_token.clone(),
             _ => {
                 // Keyring lookup
                 match keyring.get(var_name) {
@@ -402,6 +492,7 @@ mod tests {
             jwt_scope: "tool:brain:*".into(),
             tool_name: "brain:query".into(),
             timestamp: 1773096459,
+            jwt_token: "eyJhbGciOiJIUzI1NiJ9.payload.sig".into(),
         };
         let keyring = Keyring::empty();
 
@@ -418,8 +509,33 @@ mod tests {
             "1773096459"
         );
         assert_eq!(
+            expand_variables("${JWT_TOKEN}", &ctx, &keyring).unwrap(),
+            "eyJhbGciOiJIUzI1NiJ9.payload.sig"
+        );
+        assert_eq!(
             expand_variables("sub=${JWT_SUB}&tool=${TOOL_NAME}", &ctx, &keyring).unwrap(),
             "sub=agent-7&tool=brain:query"
+        );
+        // The Bearer-prefix form a passthrough/MCP auth_generator would use.
+        assert_eq!(
+            expand_variables("Bearer ${JWT_TOKEN}", &ctx, &keyring).unwrap(),
+            "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"
+        );
+    }
+
+    #[test]
+    fn test_expand_variables_jwt_token_empty_when_unset() {
+        // Default context has no inbound bearer — expansion succeeds with
+        // an empty string rather than erroring. That keeps existing
+        // generators that never reference ${JWT_TOKEN} unaffected, and lets
+        // generators that DO reference it fail visibly downstream (401
+        // from the upstream) rather than silently substituting a static
+        // bootstrap token from the keyring.
+        let ctx = GenContext::default();
+        let keyring = Keyring::empty();
+        assert_eq!(
+            expand_variables("${JWT_TOKEN}", &ctx, &keyring).unwrap(),
+            ""
         );
     }
 
@@ -491,16 +607,16 @@ mod tests {
     #[test]
     fn test_auth_cache_basic() {
         let cache = AuthCache::new();
-        assert!(cache.get("provider", "sub").is_none());
+        assert!(cache.get("provider", "sub", "").is_none());
 
         let cred = GeneratedCredential {
             value: "token123".into(),
             extra_headers: HashMap::new(),
             extra_env: HashMap::new(),
         };
-        cache.insert("provider", "sub", cred.clone(), 300);
+        cache.insert("provider", "sub", "", cred.clone(), 300);
 
-        let cached = cache.get("provider", "sub").unwrap();
+        let cached = cache.get("provider", "sub", "").unwrap();
         assert_eq!(cached.value, "token123");
     }
 
@@ -512,8 +628,8 @@ mod tests {
             extra_headers: HashMap::new(),
             extra_env: HashMap::new(),
         };
-        cache.insert("provider", "sub", cred, 0);
-        assert!(cache.get("provider", "sub").is_none());
+        cache.insert("provider", "sub", "", cred, 0);
+        assert!(cache.get("provider", "sub", "").is_none());
     }
 
     #[test]
@@ -529,11 +645,97 @@ mod tests {
             extra_headers: HashMap::new(),
             extra_env: HashMap::new(),
         };
-        cache.insert("provider", "agent-1", cred1, 300);
-        cache.insert("provider", "agent-2", cred2, 300);
+        cache.insert("provider", "agent-1", "", cred1, 300);
+        cache.insert("provider", "agent-2", "", cred2, 300);
 
-        assert_eq!(cache.get("provider", "agent-1").unwrap().value, "token-a");
-        assert_eq!(cache.get("provider", "agent-2").unwrap().value, "token-b");
+        assert_eq!(
+            cache.get("provider", "agent-1", "").unwrap().value,
+            "token-a"
+        );
+        assert_eq!(
+            cache.get("provider", "agent-2", "").unwrap().value,
+            "token-b"
+        );
+    }
+
+    #[test]
+    fn test_auth_cache_per_token_isolation() {
+        // Issue #115: two sandboxes with the same `sub` but different
+        // inbound bearers must NOT share cached credentials. Otherwise the
+        // first sandbox's generated token gets served to the second.
+        let cache = AuthCache::new();
+        let cred_a = GeneratedCredential {
+            value: "for-sandbox-a".into(),
+            extra_headers: HashMap::new(),
+            extra_env: HashMap::new(),
+        };
+        let cred_b = GeneratedCredential {
+            value: "for-sandbox-b".into(),
+            extra_headers: HashMap::new(),
+            extra_env: HashMap::new(),
+        };
+        cache.insert("provider", "sandbox-svc", "jwt-A", cred_a, 300);
+        cache.insert("provider", "sandbox-svc", "jwt-B", cred_b, 300);
+
+        // Each token gets its own cached cred.
+        assert_eq!(
+            cache.get("provider", "sandbox-svc", "jwt-A").unwrap().value,
+            "for-sandbox-a"
+        );
+        assert_eq!(
+            cache.get("provider", "sandbox-svc", "jwt-B").unwrap().value,
+            "for-sandbox-b"
+        );
+        // A third unseen token misses (no leakage from either A or B).
+        assert!(cache.get("provider", "sandbox-svc", "jwt-C").is_none());
+    }
+
+    #[test]
+    fn test_token_fingerprint_stable_and_distinct() {
+        let f1 = token_fingerprint("token-one");
+        let f2 = token_fingerprint("token-two");
+        assert_eq!(token_fingerprint("token-one"), f1, "fingerprint is stable");
+        assert_ne!(f1, f2, "different tokens hash to different fingerprints");
+        assert_eq!(f1.len(), 16, "fingerprint is 16 hex chars");
+        assert!(f1.chars().all(|c| c.is_ascii_hexdigit()));
+        // Empty input gets the empty sentinel so all no-bearer paths share
+        // one cache slot per (provider, sub).
+        assert_eq!(token_fingerprint(""), "");
+    }
+
+    #[test]
+    fn test_auth_cache_insert_evicts_expired_entries() {
+        // Greptile P1 on PR #117: rotating per-request JWTs would create one
+        // permanent map entry per request because expired entries were never
+        // swept. The fix prunes on every `insert`. Verify the prune actually
+        // happens by inserting one entry with the smallest possible non-zero
+        // TTL (1 second), waiting for it to expire, then inserting a
+        // different key — the second insert MUST drop the first.
+        let cache = AuthCache::new();
+        let cred = GeneratedCredential {
+            value: "ephemeral".into(),
+            extra_headers: HashMap::new(),
+            extra_env: HashMap::new(),
+        };
+        cache.insert("p", "s", "old-jwt", cred.clone(), 1);
+        assert_eq!(cache.entry_count(), 1);
+
+        // Sleep past the 1s TTL. 1100ms is plenty of headroom on a busy
+        // runner without inflating test runtime.
+        std::thread::sleep(Duration::from_millis(1100));
+
+        // A second insert (different fingerprint) triggers the sweep.
+        cache.insert("p", "s", "new-jwt", cred, 60);
+        assert_eq!(
+            cache.entry_count(),
+            1,
+            "sweep on insert should have dropped the expired entry; \
+             only the new one should remain"
+        );
+
+        // Sanity-check which entry survived.
+        assert!(cache.get("p", "s", "new-jwt").is_some());
+        assert!(cache.get("p", "s", "old-jwt").is_none());
     }
 
     #[tokio::test]
@@ -883,6 +1085,7 @@ mod tests {
             jwt_scope: "*".into(),
             tool_name: "brain:query".into(),
             timestamp: 1234567890,
+            jwt_token: String::new(),
         };
         let keyring = Keyring::empty();
         let cache = AuthCache::new();
