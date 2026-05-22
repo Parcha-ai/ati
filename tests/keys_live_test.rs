@@ -115,7 +115,7 @@ method = "GET"
     let jwt_config = ati::core::jwt::config_from_secret(
         b"test-secret-key-32-bytes-long!!!",
         None,
-        "ati-proxy".into(),
+        vec!["ati-proxy".into()],
     );
 
     let state = Arc::new(ProxyState {

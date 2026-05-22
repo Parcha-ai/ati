@@ -270,7 +270,10 @@ mod tests {
         std::fs::write(&path, "file-tok").unwrap();
         let _e = EnvGuard::set(&[
             ("PARCHA_TOOLS_SESSION_TOKEN", None),
-            ("PARCHA_TOOLS_SESSION_TOKEN_FILE", Some(path.to_str().unwrap())),
+            (
+                "PARCHA_TOOLS_SESSION_TOKEN_FILE",
+                Some(path.to_str().unwrap()),
+            ),
         ]);
         assert_eq!(
             resolve_token("PARCHA_TOOLS_SESSION_TOKEN").unwrap(),
@@ -286,7 +289,10 @@ mod tests {
         std::fs::write(&path, "from-file").unwrap();
         let _e = EnvGuard::set(&[
             ("PARCHA_TOOLS_SESSION_TOKEN", Some("")),
-            ("PARCHA_TOOLS_SESSION_TOKEN_FILE", Some(path.to_str().unwrap())),
+            (
+                "PARCHA_TOOLS_SESSION_TOKEN_FILE",
+                Some(path.to_str().unwrap()),
+            ),
         ]);
         assert_eq!(
             resolve_token("PARCHA_TOOLS_SESSION_TOKEN").unwrap(),

@@ -149,7 +149,10 @@ fn issue(
         sandbox_id: None,
     };
 
-    // Build config from explicit args or env
+    // Build config from explicit args or env. For issuance the audience is
+    // whatever the operator put on the JWT claim (a single value), so we
+    // wrap it in a one-element vec — see `JwtConfig::accepted_audiences`
+    // (issue #121).
     let config = if let Some(path) = key_path {
         let pem =
             std::fs::read(path).map_err(|e| format!("Cannot read private key {path}: {e}"))?;
@@ -158,11 +161,11 @@ fn issue(
             Some(&pem),
             jsonwebtoken::Algorithm::ES256,
             claims.iss.clone(),
-            claims.aud.clone(),
+            vec![claims.aud.clone()],
         )?
     } else if let Some(hex_str) = secret_hex {
         let secret_bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex secret: {e}"))?;
-        jwt::config_from_secret(&secret_bytes, claims.iss.clone(), claims.aud.clone())
+        jwt::config_from_secret(&secret_bytes, claims.iss.clone(), vec![claims.aud.clone()])
     } else {
         // Try env
         jwt::config_from_env()?
@@ -204,16 +207,26 @@ fn validate(
     key_path: Option<&str>,
     secret_hex: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // For validation the audience allowlist comes from
+    // ATI_JWT_ACCEPTED_AUDIENCES (CSV) > ATI_JWT_AUDIENCE > ["ati-proxy"],
+    // matching the proxy's own resolution rules so `ati token validate`
+    // mirrors what a running proxy would accept. See issue #121.
     let config = if let Some(path) = key_path {
         let pem = std::fs::read(path).map_err(|e| format!("Cannot read public key {path}: {e}"))?;
-        let audience = std::env::var("ATI_JWT_AUDIENCE").unwrap_or_else(|_| "ati-proxy".into());
+        let audiences = jwt::parse_audiences_env();
         let issuer = std::env::var("ATI_JWT_ISSUER").ok();
-        jwt::config_from_pem(&pem, None, jsonwebtoken::Algorithm::ES256, issuer, audience)?
+        jwt::config_from_pem(
+            &pem,
+            None,
+            jsonwebtoken::Algorithm::ES256,
+            issuer,
+            audiences,
+        )?
     } else if let Some(hex_str) = secret_hex {
         let secret_bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex secret: {e}"))?;
-        let audience = std::env::var("ATI_JWT_AUDIENCE").unwrap_or_else(|_| "ati-proxy".into());
+        let audiences = jwt::parse_audiences_env();
         let issuer = std::env::var("ATI_JWT_ISSUER").ok();
-        jwt::config_from_secret(&secret_bytes, issuer, audience)
+        jwt::config_from_secret(&secret_bytes, issuer, audiences)
     } else {
         jwt::config_from_env()?
             .ok_or("No validation key available. Provide --key <path>, --secret <hex>, or set ATI_JWT_PUBLIC_KEY / ATI_JWT_SECRET.")?
