@@ -36,8 +36,15 @@ pub struct JwtConfig {
     pub algorithm: Algorithm,
     /// Expected `iss` claim (optional — skipped if None).
     pub required_issuer: Option<String>,
-    /// Expected `aud` claim.
-    pub required_audience: String,
+    /// Accepted `aud` claim values. A token whose `aud` matches **any** entry
+    /// in this list passes audience validation; the per-tool scope check
+    /// downstream still gates the actual call.
+    ///
+    /// Single-element vec preserves v0.7.x single-audience behaviour. For
+    /// multi-audience deployments (e.g. proxy accepting both `ati-proxy` and
+    /// per-MCP-audience tokens — see issue #121), populate from
+    /// `ATI_JWT_ACCEPTED_AUDIENCES` (CSV env var).
+    pub accepted_audiences: Vec<String>,
     /// Clock skew tolerance in seconds.
     pub leeway_secs: u64,
     /// Raw public key PEM bytes (for JWKS endpoint).
@@ -49,7 +56,7 @@ impl std::fmt::Debug for JwtConfig {
         f.debug_struct("JwtConfig")
             .field("algorithm", &self.algorithm)
             .field("required_issuer", &self.required_issuer)
-            .field("required_audience", &self.required_audience)
+            .field("accepted_audiences", &self.accepted_audiences)
             .field("leeway_secs", &self.leeway_secs)
             .field("has_encoding_key", &self.encoding_key.is_some())
             .finish()
@@ -104,9 +111,34 @@ impl TokenClaims {
 }
 
 /// Validate a JWT token string and return the claims.
+///
+/// A token whose `aud` claim matches **any** entry in
+/// `config.accepted_audiences` passes. Per-tool authorization (scope check)
+/// is done separately by callers via `ScopeConfig`.
 pub fn validate(token: &str, config: &JwtConfig) -> Result<TokenClaims, JwtError> {
+    // Defense in depth: jsonwebtoken's `Validation::set_audience(&[])` silently
+    // disables audience validation, so an empty `accepted_audiences` Vec would
+    // accept any `aud` claim — a quiet security regression if a future caller
+    // builds a `JwtConfig` literal with an empty Vec or hand-crafts one in a
+    // test. `parse_audiences_env()` already guards this at the env-loading
+    // layer (Greptile P1 on #121); this guard locks the API boundary so the
+    // invariant can't drift independently. See issue #121 review.
+    if config.accepted_audiences.is_empty() {
+        return Err(JwtError::InvalidKey(
+            "accepted_audiences must not be empty; configure at least one audience".into(),
+        ));
+    }
     let mut validation = Validation::new(config.algorithm);
-    validation.set_audience(&[&config.required_audience]);
+    // jsonwebtoken's set_audience uses "any-match" semantics: token.aud is
+    // accepted iff it matches at least one entry. Passing a slice of &str
+    // borrows from the Vec<String> without allocating an intermediate owned
+    // collection.
+    let auds: Vec<&str> = config
+        .accepted_audiences
+        .iter()
+        .map(String::as_str)
+        .collect();
+    validation.set_audience(&auds);
     validation.leeway = config.leeway_secs;
 
     if let Some(ref issuer) = config.required_issuer {
@@ -180,25 +212,37 @@ pub fn load_private_key_pem(pem: &[u8], alg: Algorithm) -> Result<EncodingKey, J
 }
 
 /// Create a JwtConfig from an HS256 shared secret.
-pub fn config_from_secret(secret: &[u8], issuer: Option<String>, audience: String) -> JwtConfig {
+///
+/// `audiences` is the allowlist of acceptable `aud` claim values; a token
+/// matches if its `aud` equals any entry. Single-element vec for the
+/// common single-audience case. **Empty vec is an error in v0.7.x callers
+/// that hit it indirectly — every config-creation path normalises empty to
+/// `["ati-proxy"]` (the historical default) so the proxy fails loud rather
+/// than accepting any aud silently.** See `parse_audiences_env`.
+pub fn config_from_secret(
+    secret: &[u8],
+    issuer: Option<String>,
+    audiences: Vec<String>,
+) -> JwtConfig {
     JwtConfig {
         decoding_key: DecodingKey::from_secret(secret),
         encoding_key: Some(EncodingKey::from_secret(secret)),
         algorithm: Algorithm::HS256,
         required_issuer: issuer,
-        required_audience: audience,
+        accepted_audiences: audiences,
         leeway_secs: 60,
         public_key_pem: None,
     }
 }
 
-/// Create a JwtConfig from PEM key files.
+/// Create a JwtConfig from PEM key files. See [`config_from_secret`] for
+/// the `audiences` contract.
 pub fn config_from_pem(
     public_pem: &[u8],
     private_pem: Option<&[u8]>,
     alg: Algorithm,
     issuer: Option<String>,
-    audience: String,
+    audiences: Vec<String>,
 ) -> Result<JwtConfig, JwtError> {
     let decoding_key = load_public_key_pem(public_pem, alg)?;
     let encoding_key = match private_pem {
@@ -211,7 +255,7 @@ pub fn config_from_pem(
         encoding_key,
         algorithm: alg,
         required_issuer: issuer,
-        required_audience: audience,
+        accepted_audiences: audiences,
         leeway_secs: 60,
         public_key_pem: Some(public_pem.to_vec()),
     })
@@ -268,15 +312,48 @@ pub fn public_key_to_jwks(
     }))
 }
 
+/// Resolve the accepted-audience allowlist from environment.
+///
+/// Priority (first source wins):
+/// 1. `ATI_JWT_ACCEPTED_AUDIENCES` (CSV) — operator declares an allowlist,
+///    e.g. `"ati-proxy,parcha-custom-tools"`. Used when the proxy accepts
+///    multiple aud values for per-provider audience separation (#121).
+/// 2. `ATI_JWT_AUDIENCE` (singular) — back-compat with v0.7.x single-aud
+///    deployments; wrapped in a one-element vec.
+/// 3. Default: `["ati-proxy"]` — preserves v0.7.x behaviour when nothing
+///    is set.
+///
+/// Empty/whitespace-only CSV entries are dropped. An empty list falls
+/// through to the singular env / default rather than producing
+/// `Vec::new()` (which `validate()` would interpret as "accept any aud").
+pub fn parse_audiences_env() -> Vec<String> {
+    if let Ok(csv) = std::env::var("ATI_JWT_ACCEPTED_AUDIENCES") {
+        let v: Vec<String> = csv
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    let single = std::env::var("ATI_JWT_AUDIENCE").unwrap_or_else(|_| "ati-proxy".to_string());
+    vec![single]
+}
+
 /// Build a JwtConfig from environment variables.
 ///
 /// Priority:
 /// 1. `ATI_JWT_PUBLIC_KEY` (PEM file) → ES256
 /// 2. `ATI_JWT_SECRET` (hex string) → HS256
 /// 3. Neither → None (JWT disabled)
+///
+/// The audience allowlist is sourced via [`parse_audiences_env`] —
+/// `ATI_JWT_ACCEPTED_AUDIENCES` (CSV) > `ATI_JWT_AUDIENCE` (singular) >
+/// `["ati-proxy"]` default.
 pub fn config_from_env() -> Result<Option<JwtConfig>, JwtError> {
     let issuer = std::env::var("ATI_JWT_ISSUER").ok();
-    let audience = std::env::var("ATI_JWT_AUDIENCE").unwrap_or_else(|_| "ati-proxy".to_string());
+    let audiences = parse_audiences_env();
 
     // Try ES256 first
     if let Ok(pub_key_path) = std::env::var("ATI_JWT_PUBLIC_KEY") {
@@ -292,7 +369,7 @@ pub fn config_from_env() -> Result<Option<JwtConfig>, JwtError> {
             private_pem.as_deref(),
             Algorithm::ES256,
             issuer,
-            audience,
+            audiences,
         )?;
 
         // Store raw PEM for JWKS endpoint
@@ -306,7 +383,7 @@ pub fn config_from_env() -> Result<Option<JwtConfig>, JwtError> {
         let secret_bytes = hex::decode(&secret_hex)
             .map_err(|e| JwtError::InvalidKey(format!("ATI_JWT_SECRET is not valid hex: {e}")))?;
 
-        return Ok(Some(config_from_secret(&secret_bytes, issuer, audience)));
+        return Ok(Some(config_from_secret(&secret_bytes, issuer, audiences)));
     }
 
     Ok(None)
@@ -328,7 +405,7 @@ mod tests {
         config_from_secret(
             b"test-secret-key-32-bytes-long!!!",
             None,
-            "ati-proxy".into(),
+            vec!["ati-proxy".into()],
         )
     }
 
@@ -336,7 +413,7 @@ mod tests {
         config_from_secret(
             b"test-secret-key-32-bytes-long!!!",
             Some("ati-orchestrator".into()),
-            "ati-proxy".into(),
+            vec!["ati-proxy".into()],
         )
     }
 
@@ -388,8 +465,11 @@ mod tests {
     #[test]
     fn test_wrong_secret_rejected() {
         let config1 = hs256_config();
-        let config2 =
-            config_from_secret(b"different-secret-key-32-bytes!!", None, "ati-proxy".into());
+        let config2 = config_from_secret(
+            b"different-secret-key-32-bytes!!",
+            None,
+            vec!["ati-proxy".into()],
+        );
 
         let claims = make_claims("tool:web_search");
         let token = issue(&claims, &config1).unwrap();
@@ -499,7 +579,7 @@ mod tests {
             encoding_key: None,
             algorithm: Algorithm::HS256,
             required_issuer: None,
-            required_audience: "ati-proxy".into(),
+            accepted_audiences: vec!["ati-proxy".into()],
             leeway_secs: 60,
             public_key_pem: None,
         };
@@ -540,5 +620,183 @@ mod tests {
         let decoded = validate(&token, &config).unwrap();
         assert!(decoded.ati.is_some());
         assert_eq!(decoded.ati.unwrap().v, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Multi-audience validation (issue #121).
+    //
+    // The proxy needs to accept JWTs minted for different downstream services
+    // (each with their own `aud` claim) so the sandbox can forward a
+    // per-provider-scoped token without re-minting at the proxy boundary.
+    //
+    // jsonwebtoken's `Validation::set_audience` is natively any-match across
+    // the slice, so the change is one-line. Tests here lock in the behaviour
+    // so a future refactor can't regress to single-audience matching.
+    // -------------------------------------------------------------------------
+
+    fn hs256_config_multi(audiences: Vec<String>) -> JwtConfig {
+        config_from_secret(b"test-secret-key-32-bytes-long!!!", None, audiences)
+    }
+
+    #[test]
+    fn test_multi_audience_accepts_first() {
+        let config = hs256_config_multi(vec!["ati-proxy".into(), "parcha-tools".into()]);
+        let mut claims = make_claims("tool:web_search");
+        claims.aud = "ati-proxy".into();
+
+        let token = issue(&claims, &config).unwrap();
+        let decoded = validate(&token, &config).expect("aud=ati-proxy should pass");
+        assert_eq!(decoded.aud, "ati-proxy");
+    }
+
+    #[test]
+    fn test_multi_audience_accepts_second() {
+        let config = hs256_config_multi(vec!["ati-proxy".into(), "parcha-tools".into()]);
+        let mut claims = make_claims("tool:web_search");
+        claims.aud = "parcha-tools".into();
+
+        let token = issue(&claims, &config).unwrap();
+        let decoded = validate(&token, &config).expect("aud=parcha-tools should pass");
+        assert_eq!(decoded.aud, "parcha-tools");
+    }
+
+    #[test]
+    fn test_multi_audience_rejects_out_of_list() {
+        let config = hs256_config_multi(vec!["ati-proxy".into(), "parcha-tools".into()]);
+        let mut claims = make_claims("tool:web_search");
+        claims.aud = "evil-aud".into();
+
+        let token = issue(&claims, &config).unwrap();
+        let result = validate(&token, &config);
+        assert!(result.is_err(), "aud not in allowlist must be rejected");
+    }
+
+    #[test]
+    fn test_single_audience_back_compat() {
+        // A one-element vec must behave exactly as the v0.7.x single-aud
+        // String case did — same tokens accepted, same tokens rejected.
+        let config = hs256_config_multi(vec!["ati-proxy".into()]);
+        let mut claims = make_claims("tool:web_search");
+
+        claims.aud = "ati-proxy".into();
+        let token = issue(&claims, &config).unwrap();
+        assert!(validate(&token, &config).is_ok());
+
+        claims.aud = "wrong".into();
+        let token = issue(&claims, &config).unwrap();
+        assert!(validate(&token, &config).is_err());
+    }
+
+    #[test]
+    fn test_empty_audiences_vec_rejected_not_bypassed() {
+        // Greptile P1 / security on #121: jsonwebtoken's
+        // Validation::set_audience(&[]) silently bypasses audience validation.
+        // validate() must hard-error on an empty accepted_audiences rather
+        // than accepting any aud — this is the API-boundary guard that
+        // mirrors parse_audiences_env()'s env-loading guard.
+        //
+        // Even a token with the "right" aud must be rejected because the
+        // config is broken at construction time.
+        let config = hs256_config_multi(vec![]);
+        let mut claims = make_claims("tool:web_search");
+        claims.aud = "ati-proxy".into();
+
+        // Issue with a separate one-element config so the token is
+        // structurally valid; the rejection should come from validate's
+        // empty-allowlist guard, not from missing aud.
+        let issuer = hs256_config_multi(vec!["ati-proxy".into()]);
+        let token = issue(&claims, &issuer).unwrap();
+
+        let err = validate(&token, &config).expect_err("empty allowlist must reject");
+        match err {
+            JwtError::InvalidKey(msg) => assert!(
+                msg.contains("accepted_audiences"),
+                "error must mention accepted_audiences; got: {msg}"
+            ),
+            other => panic!("expected InvalidKey, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_audiences_env (issue #121).
+    //
+    // Test using env vars requires serializing across tests; reuse the same
+    // Mutex pattern as core::token::tests::ENV_LOCK rather than re-rolling.
+    // -------------------------------------------------------------------------
+
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        prev: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(pairs: &[(&'static str, Option<&str>)]) -> Self {
+            let mut prev = Vec::new();
+            for (k, v) in pairs {
+                prev.push((*k, std::env::var(k).ok()));
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+            Self { prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.prev {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_audiences_env_csv_wins() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _e = EnvGuard::set(&[
+            ("ATI_JWT_ACCEPTED_AUDIENCES", Some("a, b ,c")),
+            ("ATI_JWT_AUDIENCE", Some("ignored-singular")),
+        ]);
+        assert_eq!(parse_audiences_env(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_audiences_env_falls_back_to_singular() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _e = EnvGuard::set(&[
+            ("ATI_JWT_ACCEPTED_AUDIENCES", None),
+            ("ATI_JWT_AUDIENCE", Some("custom-aud")),
+        ]);
+        assert_eq!(parse_audiences_env(), vec!["custom-aud"]);
+    }
+
+    #[test]
+    fn test_parse_audiences_env_default_is_ati_proxy() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _e = EnvGuard::set(&[
+            ("ATI_JWT_ACCEPTED_AUDIENCES", None),
+            ("ATI_JWT_AUDIENCE", None),
+        ]);
+        assert_eq!(parse_audiences_env(), vec!["ati-proxy"]);
+    }
+
+    #[test]
+    fn test_parse_audiences_env_csv_all_empty_falls_back() {
+        // Pathological config: "ATI_JWT_ACCEPTED_AUDIENCES=  ,  ,  ". If we
+        // honoured the empty list we'd silently accept any aud — instead
+        // fall through to the singular env / default. validate()'s contract
+        // is that the allowlist is never empty.
+        let _g = ENV_LOCK.lock().unwrap();
+        let _e = EnvGuard::set(&[
+            ("ATI_JWT_ACCEPTED_AUDIENCES", Some("  ,  ,  ")),
+            ("ATI_JWT_AUDIENCE", Some("fallback-aud")),
+        ]);
+        assert_eq!(parse_audiences_env(), vec!["fallback-aud"]);
     }
 }

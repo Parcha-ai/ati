@@ -53,6 +53,7 @@ pub fn test_provider(name: &str, base_url: &str) -> Provider {
         extra_headers: HashMap::new(),
         oauth2_token_url: None,
         auth_secret_name: None,
+        auth_session_token_env: None,
         oauth2_basic_auth: false,
         internal: false,
         handler: "http".into(),
@@ -298,7 +299,7 @@ pub fn test_jwt_config() -> JwtConfig {
     jwt::config_from_secret(
         b"test-secret-key-32-bytes-long!!!",
         None,
-        "ati-proxy".into(),
+        vec!["ati-proxy".into()],
     )
 }
 
