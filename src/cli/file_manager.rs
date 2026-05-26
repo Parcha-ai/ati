@@ -69,8 +69,14 @@ async fn run_download(
             fm::build_download_response(&result)
         }
         DispatchMode::Proxy { proxy_url } => {
-            crate::proxy::client::call_tool(proxy_url, "file_manager:download", &server_args, None)
-                .await?
+            crate::proxy::client::call_tool(
+                proxy_url,
+                "file_manager:download",
+                &server_args,
+                None,
+                None,
+            )
+            .await?
         }
     };
 
@@ -170,8 +176,14 @@ async fn run_upload(
     let response = match mode {
         DispatchMode::Local { keyring } => upload_local(&wire_args, keyring).await?,
         DispatchMode::Proxy { proxy_url } => {
-            crate::proxy::client::call_tool(proxy_url, "file_manager:upload", &wire_args, None)
-                .await?
+            crate::proxy::client::call_tool(
+                proxy_url,
+                "file_manager:upload",
+                &wire_args,
+                None,
+                None,
+            )
+            .await?
         }
     };
 

@@ -63,23 +63,70 @@ pub struct ProxyHelpResponse {
 
 const PROXY_TIMEOUT_SECS: u64 = 120;
 
-/// Build an HTTP request builder with JWT Bearer auth resolved via
-/// `core::token::resolve_session_token` (env → file env → default file).
+/// Build an HTTP request builder with JWT Bearer auth.
+///
+/// `token_env` selects which env var holds the bearer:
+///   - `None` → default `ATI_SESSION_TOKEN` (every catalog/metadata route,
+///     plus any `/call` for a provider that didn't opt into per-provider
+///     token selection).
+///   - `Some("PARCHA_TOOLS_SESSION_TOKEN")` → reads that env var (with the
+///     same `<NAME>_FILE` and default-path fallback). Used when the manifest
+///     declares `auth_session_token_env` for the target provider — see
+///     issue #121.
+///
+/// If a per-provider token env is named but unset/empty, this falls back to
+/// `ATI_SESSION_TOKEN` rather than sending the request unauthenticated.
+/// The proxy is the source of truth on whether the fallback token is
+/// acceptable (it's been audience-validated either way); silently dropping
+/// the Authorization header would make a misconfigured supervisor look
+/// like a network error to the operator.
 fn build_proxy_request(
     client: &Client,
     method: reqwest::Method,
     url: &str,
+    token_env: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let mut req = client.request(method, url);
-    match crate::core::token::resolve_session_token() {
+    let env_name = token_env.unwrap_or("ATI_SESSION_TOKEN");
+    match crate::core::token::resolve_token(env_name) {
         Ok(Some(token)) => {
             req = req.header("Authorization", format!("Bearer {token}"));
         }
+        Ok(None) if env_name != "ATI_SESSION_TOKEN" => {
+            // Provider asked for a specific env var but it's unset and the
+            // file fallback didn't yield one either. Don't drop auth on the
+            // floor — try the default token. The proxy's audience allowlist
+            // (ATI_JWT_ACCEPTED_AUDIENCES) decides whether that's acceptable;
+            // if not, we get a clean 401 instead of a silent network
+            // mystery.
+            tracing::debug!(
+                env = %env_name,
+                "per-provider token env unset; falling back to ATI_SESSION_TOKEN"
+            );
+            if let Ok(Some(token)) = crate::core::token::resolve_token("ATI_SESSION_TOKEN") {
+                req = req.header("Authorization", format!("Bearer {token}"));
+            }
+        }
         Ok(None) => {}
         Err(e) => {
-            // File-read error (e.g., permission denied on ATI_SESSION_TOKEN_FILE).
-            // Don't block the request; let the proxy 401 if auth is required.
-            tracing::debug!(error = %e, "session token file unreadable; sending request without Authorization");
+            // File-read error (e.g., permission denied on $ENV_FILE).
+            // For a per-provider env that errored, also try the default
+            // ATI_SESSION_TOKEN — same rationale as the Ok(None) branch
+            // above: surface a clean 401 from the proxy if the default
+            // token isn't acceptable rather than silently sending an
+            // unauthenticated request. Greptile P2 on #121: a file-perm
+            // bug on the per-provider token file should produce identical
+            // graceful-degradation behaviour as a missing env var.
+            tracing::debug!(
+                env = %env_name,
+                error = %e,
+                "session token file unreadable; trying ATI_SESSION_TOKEN fallback"
+            );
+            if env_name != "ATI_SESSION_TOKEN" {
+                if let Ok(Some(token)) = crate::core::token::resolve_token("ATI_SESSION_TOKEN") {
+                    req = req.header("Authorization", format!("Bearer {token}"));
+                }
+            }
         }
     }
     req
@@ -92,11 +139,19 @@ fn build_proxy_request(
 ///
 /// `args` carries key-value pairs for HTTP/MCP tools.
 /// `raw_args`, if provided, is sent as an array in the `args` field for CLI tools.
+///
+/// `token_env` selects which sandbox env var holds the bearer to send. `None`
+/// uses the default `ATI_SESSION_TOKEN` (back-compat with every caller before
+/// issue #121); `Some("PARCHA_TOOLS_SESSION_TOKEN")` reads that env var
+/// instead, falling back to the default if it's unset. The caller normally
+/// derives this from the target provider's `auth_session_token_env` field
+/// in the manifest.
 pub async fn call_tool(
     proxy_url: &str,
     tool_name: &str,
     args: &HashMap<String, Value>,
     raw_args: Option<&[String]>,
+    token_env: Option<&str>,
 ) -> Result<Value, ProxyError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
@@ -118,7 +173,7 @@ pub async fn call_tool(
         raw_args: raw_args_vec,
     };
 
-    let response = build_proxy_request(&client, reqwest::Method::POST, &url)
+    let response = build_proxy_request(&client, reqwest::Method::POST, &url, token_env)
         .json(&payload)
         .send()
         .await?;
@@ -157,7 +212,7 @@ pub async fn list_tools(proxy_url: &str, query_params: &str) -> Result<Value, Pr
         url.push('?');
         url.push_str(query_params);
     }
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
         .send()
         .await?;
     let status = response.status();
@@ -177,7 +232,7 @@ pub async fn get_tool_info(proxy_url: &str, name: &str) -> Result<Value, ProxyEr
         .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
         .build()?;
     let url = format!("{}/tools/{}", proxy_url.trim_end_matches('/'), name);
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
         .send()
         .await?;
     let status = response.status();
@@ -192,10 +247,13 @@ pub async fn get_tool_info(proxy_url: &str, name: &str) -> Result<Value, ProxyEr
 }
 
 /// Forward a raw MCP JSON-RPC message via the proxy's /mcp endpoint.
+///
+/// `token_env` works the same way as for [`call_tool`] — see issue #121.
 pub async fn call_mcp(
     proxy_url: &str,
     method: &str,
     params: Option<Value>,
+    token_env: Option<&str>,
 ) -> Result<Value, ProxyError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static MCP_ID: AtomicU64 = AtomicU64::new(1);
@@ -214,7 +272,7 @@ pub async fn call_mcp(
 
     let url = format!("{}/mcp", proxy_url.trim_end_matches('/'));
 
-    let response = build_proxy_request(&client, reqwest::Method::POST, &url)
+    let response = build_proxy_request(&client, reqwest::Method::POST, &url, token_env)
         .json(&msg)
         .send()
         .await?;
@@ -266,7 +324,7 @@ pub async fn list_skills(
         format!("{}/skills?{query_params}", proxy_url.trim_end_matches('/'))
     };
 
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
         .send()
         .await?;
     let status = response.status();
@@ -304,7 +362,7 @@ pub async fn get_skill(
         )
     };
 
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
         .send()
         .await?;
     let status = response.status();
@@ -334,7 +392,7 @@ async fn get_proxy_json(proxy_url: &str, path: &str) -> Result<serde_json::Value
         path.trim_start_matches('/')
     );
 
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
         .send()
         .await?;
     let status = response.status();
@@ -378,7 +436,7 @@ async fn get_proxy_json_with_query(
         url.push_str(&params);
     }
 
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
         .send()
         .await?;
     let status = response.status();
@@ -493,7 +551,7 @@ pub async fn resolve_skills(
 
     let url = format!("{}/skills/resolve", proxy_url.trim_end_matches('/'));
 
-    let response = build_proxy_request(&client, reqwest::Method::POST, &url)
+    let response = build_proxy_request(&client, reqwest::Method::POST, &url, None)
         .json(scopes)
         .send()
         .await?;
@@ -530,7 +588,7 @@ pub async fn call_help(
         tool: tool.map(|t| t.to_string()),
     };
 
-    let response = build_proxy_request(&client, reqwest::Method::POST, &url)
+    let response = build_proxy_request(&client, reqwest::Method::POST, &url, None)
         .json(&payload)
         .send()
         .await?;

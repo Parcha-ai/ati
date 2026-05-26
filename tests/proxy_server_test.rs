@@ -128,7 +128,7 @@ fn test_jwt_config() -> JwtConfig {
     jwt::config_from_secret(
         b"test-secret-key-32-bytes-long!!!",
         None,
-        "ati-proxy".into(),
+        vec!["ati-proxy".into()],
     )
 }
 
@@ -818,7 +818,7 @@ async fn test_jwt_auth_rejects_wrong_secret() {
     let wrong_config = jwt::config_from_secret(
         b"wrong-secret-key-32-bytes-long!!",
         None,
-        "ati-proxy".into(),
+        vec!["ati-proxy".into()],
     );
     let now = jwt::now_secs();
     let claims = TokenClaims {

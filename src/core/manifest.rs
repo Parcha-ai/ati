@@ -71,6 +71,23 @@ pub struct Provider {
     /// Second key name for OAuth2 client_secret
     #[serde(default)]
     pub auth_secret_name: Option<String>,
+    /// Optional override: name of the sandbox env var whose value is sent as
+    /// `Authorization: Bearer <value>` to the proxy when calling tools
+    /// declared by this provider. Defaults to `ATI_SESSION_TOKEN` when
+    /// `None` or when the named env var is unset/empty.
+    ///
+    /// Used for audience separation through the proxy (issue #121): the
+    /// orchestrator mints a per-MCP-audience JWT and stores it in a
+    /// dedicated env var (e.g. `PARCHA_TOOLS_SESSION_TOKEN`), the manifest
+    /// declares which env var to use for that provider, and the proxy is
+    /// configured with `ATI_JWT_ACCEPTED_AUDIENCES` to accept the
+    /// alternative audience.
+    ///
+    /// The same env → `<NAME>_FILE` → default-path resolution that
+    /// `ATI_SESSION_TOKEN` enjoys is applied (see [`core::token`]) so the
+    /// per-provider token gets the same hot-rotation semantics.
+    #[serde(default)]
+    pub auth_session_token_env: Option<String>,
     /// If true, send OAuth2 credentials via Basic Auth header instead of form body.
     /// Some providers (e.g. Sovos) require this per RFC 6749 §2.3.1.
     #[serde(default)]
@@ -572,6 +589,7 @@ impl CachedProvider {
             extra_headers: HashMap::new(),
             oauth2_token_url: None,
             auth_secret_name: None,
+            auth_session_token_env: None,
             oauth2_basic_auth: false,
             internal: false,
             handler,
@@ -1110,6 +1128,7 @@ pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
         extra_headers: HashMap::new(),
         oauth2_token_url: None,
         auth_secret_name: None,
+        auth_session_token_env: None,
         oauth2_basic_auth: false,
         internal: false,
         handler: "file_manager".to_string(),

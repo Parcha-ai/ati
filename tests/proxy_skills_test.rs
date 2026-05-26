@@ -81,7 +81,7 @@ fn test_jwt_config() -> JwtConfig {
     jwt::config_from_secret(
         b"test-secret-key-32-bytes-long!!!",
         None,
-        "ati-proxy".into(),
+        vec!["ati-proxy".into()],
     )
 }
 

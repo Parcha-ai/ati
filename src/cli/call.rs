@@ -150,7 +150,15 @@ pub async fn execute_with_registry(
     // Auto-detect: proxy mode if ATI_PROXY_URL is set
     if let Ok(proxy_url) = std::env::var("ATI_PROXY_URL") {
         tracing::debug!(proxy_url = %proxy_url, "mode: proxy");
-        return execute_via_proxy(cli, tool_name, &args, raw_args, &proxy_url).await;
+        return execute_via_proxy(
+            cli,
+            tool_name,
+            &args,
+            raw_args,
+            &proxy_url,
+            registry.as_ref(),
+        )
+        .await;
     }
 
     // Local mode: keyring + direct HTTP
@@ -460,6 +468,7 @@ async fn execute_via_proxy(
     args: &HashMap<String, Value>,
     raw_args: &[String],
     proxy_url: &str,
+    registry: Option<&ManifestRegistry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::debug!(tool = %tool_name, ?args, proxy_url = %proxy_url, "execute via proxy");
 
@@ -470,6 +479,44 @@ async fn execute_via_proxy(
         },
         Ok(None) | Err(_) => crate::core::scope::ScopeConfig::unrestricted(),
     };
+
+    // Resolve the per-provider `auth_session_token_env` (issue #121) so we
+    // can send Authorization: Bearer <per-provider-token> when the target
+    // provider has opted into audience separation through the proxy.
+    //
+    // The caller may have preloaded a registry (e.g. `ati plan execute`);
+    // otherwise lazy-load it from the standard manifests dir. If both fail
+    // we just send the default token — that's strictly backwards-compatible
+    // with every pre-#121 caller. Sandboxes provisioned by parcha-backend
+    // always have the manifests dir populated (proxy-mode contract), so
+    // the lazy-load path is the production case.
+    let registry_owned: Option<ManifestRegistry> = if registry.is_some() {
+        None
+    } else {
+        let ati_dir = common::ati_dir();
+        let manifests_dir = ati_dir.join("manifests");
+        ManifestRegistry::load(&manifests_dir).ok()
+    };
+    let registry_ref = registry.or(registry_owned.as_ref());
+    let token_env: Option<String> = registry_ref.and_then(|r| {
+        // HTTP/OpenAPI/CLI providers register tools under the registry's
+        // primary index; MCP-discovered tools land in find_mcp_provider_for_tool.
+        // Try both so per-provider tokens work for MCP-handler manifests too
+        // (that's the parcha_custom_tools case in issue #121).
+        r.get_tool(tool_name)
+            .map(|(provider, _)| provider)
+            .or_else(|| r.find_mcp_provider_for_tool(tool_name))
+            .and_then(|p| p.auth_session_token_env.clone())
+            .filter(|s| !s.trim().is_empty())
+    });
+    if let Some(ref env_name) = token_env {
+        tracing::debug!(
+            tool = %tool_name,
+            token_env = %env_name,
+            "using per-provider session token env"
+        );
+    }
+
     let start = std::time::Instant::now();
     // Always send both the parsed args map AND the raw positional args.
     // - HTTP/MCP/OpenAPI tools: proxy uses args_as_map() → reads the map
@@ -478,7 +525,14 @@ async fn execute_via_proxy(
     // Without raw_args, CLI positional args like `ati run bb browse status`
     // lose "browse" and "status" because parse_tool_args only captures
     // --key value pairs into the map, dropping bare positional words.
-    let exec_result = proxy_client::call_tool(proxy_url, tool_name, args, Some(raw_args)).await;
+    let exec_result = proxy_client::call_tool(
+        proxy_url,
+        tool_name,
+        args,
+        Some(raw_args),
+        token_env.as_deref(),
+    )
+    .await;
     let duration = start.elapsed();
 
     let (status, error_msg) = match &exec_result {
