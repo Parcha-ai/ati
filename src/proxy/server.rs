@@ -83,8 +83,40 @@ pub struct ProxyState {
     /// negatives too to avoid repeating the lookup on every request.
     /// Operator hot-reload of an allowlist requires proxy restart (same
     /// constraint as every other keyring entry today). See issue #124.
+    ///
+    /// Entries are pre-parsed `UpstreamAllowEntry` structs (scheme + host
+    /// glob + canonical path) rather than raw URL glob patterns. Glob over
+    /// raw URL strings is unsafe — `*` can cross `.`, `#`, `?`, `:` and other
+    /// URL delimiters, letting a sandbox-crafted URL satisfy a pattern while
+    /// `reqwest` connects to a different host. Greptile P0/P1 on #124.
     pub upstream_url_allowlists:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, Option<globset::GlobSet>>>>,
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Option<Vec<UpstreamAllowEntry>>>>>,
+}
+
+/// One parsed allowlist entry. Allowlist CSV entries are operator-authored
+/// URL templates like `https://parcha-tools-*.grep.ai/mcp`. We parse them
+/// into (scheme, host_label_patterns, path) at load time so per-request
+/// validation can match each component separately:
+/// - **scheme**: exact string match (case-insensitive per RFC 3986)
+/// - **host_label_patterns**: per-DNS-label globs; the runtime URL's host
+///   is split on `.` and each label matched against the corresponding
+///   pattern entry. `*` can never bridge labels because labels are matched
+///   independently.
+/// - **path**: exact match against the URL's path; query/fragment ignored
+///
+/// This is the secure shape; raw URL globs let `*` cross `.`/`#`/`?`/`:`
+/// (Greptile P0/P1 on #124). Per-label matching closes those bypasses.
+#[derive(Debug, Clone)]
+pub struct UpstreamAllowEntry {
+    /// `"https"` or `"http"` — operator-declared scheme. Exact match required.
+    pub scheme: String,
+    /// One glob per DNS label, e.g. `parcha-tools-*.grep.ai` →
+    /// `["parcha-tools-*", "grep", "ai"]`. The runtime URL's lowercased
+    /// host is split on `.` and label-by-label matched against this Vec.
+    /// Length must match exactly (no `**`-style multi-label wildcards).
+    pub host_label_patterns: Vec<glob::Pattern>,
+    /// Exact path match required. Empty operator path becomes `"/"`.
+    pub path: String,
 }
 
 /// Outcome of `X-Ati-Upstream-Url` validation for a single request. The
@@ -133,10 +165,10 @@ fn resolve_upstream_override(
             // Lazy-build the per-provider GlobSet on first use; cache for
             // process lifetime (operator hot-reload requires restart, same
             // as every other keyring entry today).
-            let glob_set = {
+            let entries = {
                 let mut cache = state.upstream_url_allowlists.lock().unwrap();
                 if !cache.contains_key(&provider.name) {
-                    let compiled: Option<globset::GlobSet> = state
+                    let compiled: Option<Vec<UpstreamAllowEntry>> = state
                         .keyring
                         .get(&allowlist_key)
                         .and_then(|csv| match build_url_allowlist(csv) {
@@ -154,56 +186,176 @@ fn resolve_upstream_override(
                 }
                 cache.get(&provider.name).cloned().flatten()
             };
-            match glob_set {
-                None => UpstreamOverride::Reject(
+            let Some(entries) = entries else {
+                return UpstreamOverride::Reject(
                     StatusCode::FORBIDDEN,
                     format!(
                         "Provider '{}' has no upstream URL allowlist configured (set ATI_KEY_{}_ALLOWED_URLS on the proxy)",
                         provider.name,
                         provider.name.to_uppercase()
                     ),
-                ),
-                Some(set) if set.is_match(url) => UpstreamOverride::Allow(url.to_string()),
-                Some(_) => UpstreamOverride::Reject(
+                );
+            };
+            // Parse the sandbox-supplied URL with `url::Url` (which canonicalizes
+            // scheme/host/path and surfaces fragment/query separately). Glob over
+            // the canonical host only — never the raw URL string — so attackers
+            // can't smuggle a different host via `.`, `#`, `?`, `:`, etc.
+            let parsed = match url::Url::parse(url) {
+                Ok(u) => u,
+                Err(e) => {
+                    return UpstreamOverride::Reject(
+                        StatusCode::BAD_REQUEST,
+                        format!("X-Ati-Upstream-Url '{url}' is not a valid URL: {e}"),
+                    );
+                }
+            };
+            if matches_allowlist(&parsed, &entries) {
+                UpstreamOverride::Allow(url.to_string())
+            } else {
+                UpstreamOverride::Reject(
                     StatusCode::FORBIDDEN,
                     format!(
                         "Upstream URL '{url}' not in provider '{}'s allowlist",
                         provider.name
                     ),
-                ),
+                )
             }
         }
     }
 }
 
-/// Compile a CSV of URL globs into a `GlobSet`. Empty entries are dropped.
-/// Returns `Ok(None)` for empty input / all-whitespace entries (caller
-/// treats this as "no allowlist", same as a missing keyring entry).
+/// Returns true iff `url`'s scheme + host + path matches at least one
+/// allowlist entry. Each component checked separately:
+/// - **scheme**: exact string match (case-insensitive per RFC 3986)
+/// - **host**: split on `.` into DNS labels; matched label-by-label against
+///   the entry's `host_label_patterns`. Label count must match exactly so
+///   `*.grep.ai` can't be satisfied by `evil.com.grep.ai` (3 labels vs 4).
+/// - **path**: exact string match (no globs). Query + fragment ignored.
 ///
-/// **Security**: every glob is built with `literal_separator(true)` so `*`
-/// cannot match across `/` boundaries. Without this, an under-specified
-/// pattern like `https://parcha-tools-*` would accept attacker URLs like
-/// `https://parcha-tools-staging.evil.com/mcp` (the `*` would swallow
-/// the rest of the URL including the attacker host). Pinned by the
-/// `glob_star_must_not_cross_path_separator` regression test.
-fn build_url_allowlist(csv: &str) -> Result<Option<globset::GlobSet>, globset::Error> {
-    let mut builder = globset::GlobSetBuilder::new();
-    let mut count = 0;
+/// Hostnames are lowercased before comparison (DNS case-insensitive). Userinfo
+/// (`user:pass@`) is rejected outright; allowlist patterns never carry it.
+/// Default ports (`:443` for https, `:80` for http) are accepted but only
+/// when the operator pattern itself doesn't pin a port; otherwise the entry
+/// would reject any URL because `url::Url` strips default ports.
+fn matches_allowlist(url: &url::Url, entries: &[UpstreamAllowEntry]) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host_lower = host.to_ascii_lowercase();
+    let host_labels: Vec<&str> = host_lower.split('.').collect();
+    let path = url.path();
+    for entry in entries {
+        if !entry.scheme.eq_ignore_ascii_case(url.scheme()) {
+            continue;
+        }
+        // Label-count check is the per-DNS-label-boundary constraint:
+        // pattern `*.grep.ai` (3 labels) cannot match `evil.com.grep.ai`
+        // (4 labels). This is the core security primitive that closes the
+        // `*`-crosses-`.` bypass Greptile flagged on #124.
+        if entry.host_label_patterns.len() != host_labels.len() {
+            continue;
+        }
+        if !entry
+            .host_label_patterns
+            .iter()
+            .zip(host_labels.iter())
+            .all(|(pat, label)| pat.matches(label))
+        {
+            continue;
+        }
+        if entry.path != path {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Compile a CSV of operator URL patterns into pre-parsed
+/// [`UpstreamAllowEntry`] structs. Each pattern is a URL template like
+/// `https://parcha-tools-*.grep.ai/mcp` — parsed with `url::Url`, then the
+/// host is split into DNS labels and each label compiled as a separate
+/// glob component. Returns `Ok(None)` for empty input / all-whitespace
+/// (caller treats as "no allowlist", same as missing keyring entry).
+///
+/// ## Why per-label host compilation
+///
+/// `glob::Pattern` doesn't natively treat `.` as a separator. Naive
+/// `Pattern::new("parcha-tools-*.grep.ai")` would let `*` swallow
+/// `evil.com` from `parcha-tools-evil.com.grep.ai`. To prevent that we
+/// reassemble the host pattern label-by-label after validating each label
+/// glob contains no embedded `.` itself. The composed `host_pattern` then
+/// uses `*` semantics that stop at label boundaries.
+///
+/// ## Why exact path match
+///
+/// Glob over paths invites the same boundary-crossing problems. MCP
+/// endpoints are conventionally `/mcp` or `/` — operators write the literal
+/// path, sandbox URLs must match exactly. Query strings and URL fragments
+/// are stripped before comparison.
+///
+/// ## Errors
+///
+/// - `pattern not a valid URL` — operator entry isn't parseable as a URL
+/// - `pattern missing host` — e.g., `https:///mcp`
+/// - `pattern host label contains '.'` — would let `*` cross DNS boundaries
+/// - `pattern has userinfo` — credentials in allowlist entries are refused
+fn build_url_allowlist(csv: &str) -> Result<Option<Vec<UpstreamAllowEntry>>, String> {
+    let mut entries = Vec::new();
     for raw in csv.split(',') {
         let pat = raw.trim();
         if pat.is_empty() {
             continue;
         }
-        let glob = globset::GlobBuilder::new(pat)
-            .literal_separator(true)
-            .build()?;
-        builder.add(glob);
-        count += 1;
+        let parsed = url::Url::parse(pat)
+            .map_err(|e| format!("upstream allowlist pattern '{pat}' is not a valid URL: {e}"))?;
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(format!(
+                "upstream allowlist pattern '{pat}' must not include userinfo"
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| format!("upstream allowlist pattern '{pat}' has no host"))?;
+        // Reject `**` outright — it's a glob escape hatch.
+        if host.contains("**") {
+            return Err(format!(
+                "upstream allowlist pattern '{pat}' must not contain '**' (use single '*' per DNS label)"
+            ));
+        }
+        let host_lower = host.to_ascii_lowercase();
+        let mut host_label_patterns = Vec::new();
+        for label in host_lower.split('.') {
+            if label.is_empty() {
+                return Err(format!(
+                    "upstream allowlist pattern '{pat}' has empty DNS label"
+                ));
+            }
+            let p = glob::Pattern::new(label).map_err(|e| {
+                format!(
+                    "upstream allowlist pattern '{pat}' has invalid host label glob '{label}': {e}"
+                )
+            })?;
+            host_label_patterns.push(p);
+        }
+        let path = if parsed.path().is_empty() {
+            "/".to_string()
+        } else {
+            parsed.path().to_string()
+        };
+        entries.push(UpstreamAllowEntry {
+            scheme: parsed.scheme().to_string(),
+            host_label_patterns,
+            path,
+        });
     }
-    if count == 0 {
+    if entries.is_empty() {
         return Ok(None);
     }
-    Ok(Some(builder.build()?))
+    Ok(Some(entries))
 }
 
 // --- Request/Response types ---
