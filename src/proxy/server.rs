@@ -588,6 +588,7 @@ async fn handle_call(
                 &state.keyring,
                 Some(&gen_ctx),
                 Some(&state.auth_cache),
+                None, // step 5 wires X-Ati-Upstream-Url here
             )
             .await
             {
@@ -1373,6 +1374,7 @@ async fn handle_mcp(
                     &state.keyring,
                     Some(&mcp_gen_ctx),
                     Some(&state.auth_cache),
+                    None, // step 5 wires X-Ati-Upstream-Url here
                 )
                 .await
             } else if provider.is_cli() {
