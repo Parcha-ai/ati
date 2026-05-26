@@ -1,6 +1,6 @@
 [package]
 name = "agent-tools-interface"
-version = "0.7.12"
+version = "0.7.13"
 edition = "2021"
 description = "Agent Tools Interface — secure CLI for AI agent tool execution"
 license = "Apache-2.0"
@@ -86,6 +86,12 @@ futures = "0.3"
 # Misc
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
+
+# URL parsing for upstream allowlist validation (issue #124 follow-up).
+# Pulled in as a direct dep so we can require canonical scheme/host/path
+# validation rather than glob-matching raw URL strings, which is bypassable
+# via `.`, `#`, and other URL delimiters.
+url = "2"
 glob = "0.3"
 rand = "0.8"
 strsim = "0.11.1"

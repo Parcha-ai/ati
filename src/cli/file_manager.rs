@@ -75,6 +75,7 @@ async fn run_download(
                 &server_args,
                 None,
                 None,
+                None,
             )
             .await?
         }
@@ -180,6 +181,7 @@ async fn run_upload(
                 proxy_url,
                 "file_manager:upload",
                 &wire_args,
+                None,
                 None,
                 None,
             )

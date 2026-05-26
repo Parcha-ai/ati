@@ -23,6 +23,7 @@ async fn test_oauth2_rejects_http_token_url() {
         auth_key_name: Some("client_id".into()),
         auth_secret_name: Some("client_secret".into()),
         auth_session_token_env: None,
+        mcp_url_env: None,
         oauth2_token_url: Some(format!("{}/oauth/token", upstream.uri())),
         ..common::test_provider("oauth_test", &upstream.uri())
     };
@@ -54,6 +55,7 @@ async fn test_oauth2_missing_client_id_key() {
         auth_key_name: None,
         auth_secret_name: Some("secret".into()),
         auth_session_token_env: None,
+        mcp_url_env: None,
         oauth2_token_url: Some("https://auth.example.com/token".into()),
         ..common::test_provider("oauth_test", "https://api.example.com")
     };
@@ -80,6 +82,7 @@ async fn test_oauth2_missing_client_secret_key() {
         auth_key_name: Some("client_id".into()),
         auth_secret_name: None,
         auth_session_token_env: None,
+        mcp_url_env: None,
         oauth2_token_url: Some("https://auth.example.com/token".into()),
         ..common::test_provider("oauth_test", "https://api.example.com")
     };
@@ -106,6 +109,7 @@ async fn test_oauth2_missing_token_url() {
         auth_key_name: Some("client_id".into()),
         auth_secret_name: Some("client_secret".into()),
         auth_session_token_env: None,
+        mcp_url_env: None,
         oauth2_token_url: None,
         ..common::test_provider("oauth_test", "https://api.example.com")
     };
@@ -132,6 +136,7 @@ async fn test_oauth2_missing_keyring_creds() {
         auth_key_name: Some("client_id".into()),
         auth_secret_name: Some("client_secret".into()),
         auth_session_token_env: None,
+        mcp_url_env: None,
         oauth2_token_url: Some("https://auth.example.com/token".into()),
         ..common::test_provider("oauth_test", "https://api.example.com")
     };

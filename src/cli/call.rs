@@ -394,6 +394,7 @@ async fn execute_local(
                 &keyring,
                 Some(&gen_ctx),
                 Some(&auth_cache),
+                None, // local-mode: no proxy hop, no override
             )
             .await
             {
@@ -516,6 +517,32 @@ async fn execute_via_proxy(
         );
     }
 
+    // Resolve the per-provider `mcp_url_env` (issue #124) so we can ship a
+    // per-request `X-Ati-Upstream-Url` header. The proxy validates against
+    // its operator-declared glob allowlist before dialling. Provider has
+    // both knobs (mcp_url + mcp_url_env)? Env var wins. Neither set on a
+    // declared mcp_url_env? Fall through to proxy's static mcp_url. The
+    // hard-error case (env unset + no fallback mcp_url) is caught earlier
+    // at manifest load — we don't redundantly check here.
+    let mcp_url_override: Option<String> = registry_ref.and_then(|r| {
+        let provider = r
+            .get_tool(tool_name)
+            .map(|(p, _)| p)
+            .or_else(|| r.find_mcp_provider_for_tool(tool_name))?;
+        let env_name = provider.mcp_url_env.as_deref()?;
+        std::env::var(env_name)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+    if let Some(ref url) = mcp_url_override {
+        tracing::debug!(
+            tool = %tool_name,
+            upstream = %url,
+            "shipping sandbox-supplied mcp_url override to proxy"
+        );
+    }
+
     let start = std::time::Instant::now();
     // Always send both the parsed args map AND the raw positional args.
     // - HTTP/MCP/OpenAPI tools: proxy uses args_as_map() → reads the map
@@ -530,6 +557,7 @@ async fn execute_via_proxy(
         args,
         Some(raw_args),
         token_env.as_deref(),
+        mcp_url_override.as_deref(),
     )
     .await;
     let duration = start.elapsed();

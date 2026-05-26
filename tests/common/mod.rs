@@ -54,6 +54,7 @@ pub fn test_provider(name: &str, base_url: &str) -> Provider {
         oauth2_token_url: None,
         auth_secret_name: None,
         auth_session_token_env: None,
+        mcp_url_env: None,
         oauth2_basic_auth: false,
         internal: false,
         handler: "http".into(),
@@ -254,6 +255,9 @@ pub fn build_test_app(registry: ManifestRegistry) -> axum::Router {
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     build_router(state)
 }
@@ -268,6 +272,9 @@ pub fn build_test_app_with_jwt(registry: ManifestRegistry) -> axum::Router {
         jwt_config: Some(test_jwt_config()),
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     build_router(state)
 }
@@ -286,6 +293,9 @@ pub fn build_test_app_full(
         jwt_config: if jwt { Some(test_jwt_config()) } else { None },
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     build_router(state)
 }
