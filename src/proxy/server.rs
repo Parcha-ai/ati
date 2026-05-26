@@ -106,21 +106,20 @@ fn resolve_upstream_override(
             let patterns = {
                 let mut cache = state.upstream_url_allowlists.lock().unwrap();
                 if !cache.contains_key(&provider.name) {
-                    let compiled: Option<Vec<glob::Pattern>> =
-                        state
-                            .keyring
-                            .get(&allowlist_key)
-                            .and_then(|csv| match build_url_allowlist(csv) {
-                                Ok(set) => set,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        provider = %provider.name,
-                                        error = %e,
-                                        "failed to compile upstream URL allowlist; treating as missing"
-                                    );
-                                    None
-                                }
-                            });
+                    let compiled: Option<Vec<glob::Pattern>> = state
+                        .keyring
+                        .get(&allowlist_key)
+                        .and_then(|csv| match build_url_allowlist(csv) {
+                            Ok(set) => set,
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider = %provider.name,
+                                    error = %e,
+                                    "failed to compile upstream URL allowlist; treating as missing"
+                                );
+                                None
+                            }
+                        });
                     cache.insert(provider.name.clone(), compiled);
                 }
                 cache.get(&provider.name).cloned().flatten()
@@ -166,7 +165,6 @@ fn build_url_allowlist(csv: &str) -> Result<Option<Vec<glob::Pattern>>, glob::Pa
     }
     Ok(Some(pats))
 }
-
 
 // --- Request/Response types ---
 
@@ -2233,7 +2231,9 @@ pub async fn run(
         jwt_config,
         jwks_json,
         auth_cache: AuthCache::new(),
-        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
 
     let app = build_router(state);

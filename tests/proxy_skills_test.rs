@@ -30,7 +30,9 @@ fn build_app_with_skills(
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
-        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     build_router(state)
 }
@@ -48,7 +50,9 @@ fn build_app_with_skills_and_jwt(
         jwt_config: Some(test_jwt_config()),
         jwks_json: None,
         auth_cache: AuthCache::new(),
-        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     build_router(state)
 }

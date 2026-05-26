@@ -160,7 +160,9 @@ async fn test_proxy_help_returns_llm_recommendations() {
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
-        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -221,7 +223,9 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
-        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -259,7 +263,9 @@ async fn test_proxy_help_missing_llm_key_returns_503() {
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
-        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -308,7 +314,9 @@ async fn test_proxy_help_llm_error_returns_502() {
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
-        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -613,7 +621,9 @@ async fn test_proxy_help_excludes_internal_tools() {
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
-        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 

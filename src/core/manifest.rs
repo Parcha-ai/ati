@@ -650,7 +650,6 @@ impl ManifestRegistry {
                 }
             }
 
-
             // For CLI providers with no [[tools]], auto-register one implicit tool
             if manifest.provider.is_cli() && manifest.tools.is_empty() {
                 let tool_name = manifest.provider.name.clone();

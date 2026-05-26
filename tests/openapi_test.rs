@@ -761,7 +761,9 @@ auth_type = "none"
         jwt_config: None,
         jwks_json: None,
         auth_cache: ati::core::auth_generator::AuthCache::new(),
-        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
 
     let app = ati::proxy::server::build_router(state);

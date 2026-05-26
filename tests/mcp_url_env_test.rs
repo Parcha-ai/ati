@@ -88,19 +88,6 @@ method = "GET"
         jwt_config: None, // dev mode for these tests; not exercising JWT
         jwks_json: None,
         auth_cache: AuthCache::new(),
-        db: ati::core::db::DbState::Disabled,
-        passthrough: None,
-        sig_verify: std::sync::Arc::new(
-            ati::core::sig_verify::SigVerifyConfig::build(
-                ati::core::sig_verify::SigVerifyMode::Log,
-                60,
-                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
-                &ati::core::keyring::Keyring::empty(),
-            )
-            .unwrap(),
-        ),
-        key_store: None,
-        admin_token: None,
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
