@@ -394,6 +394,7 @@ async fn execute_local(
                 &keyring,
                 Some(&gen_ctx),
                 Some(&auth_cache),
+                None, // local-mode: no proxy hop, no override
             )
             .await
             {

@@ -162,15 +162,22 @@ impl McpClient {
     /// For stdio: spawns the subprocess with env vars resolved from keyring.
     /// For HTTP: creates an HTTP client with auth headers.
     pub async fn connect(provider: &Provider, keyring: &Keyring) -> Result<Self, McpError> {
-        Self::connect_with_gen(provider, keyring, None, None).await
+        Self::connect_with_gen(provider, keyring, None, None, None).await
     }
 
     /// Connect to an MCP server, optionally using a dynamic auth generator.
+    ///
+    /// `override_mcp_url`: when `Some`, overrides the provider's static
+    /// `mcp_url` for this connection. Used by the proxy to honour a
+    /// sandbox-supplied `X-Ati-Upstream-Url` after validating it against the
+    /// per-provider allowlist (issue #124). Ignored on stdio transport
+    /// (which has no URL — guarded at manifest load time).
     pub async fn connect_with_gen(
         provider: &Provider,
         keyring: &Keyring,
         gen_ctx: Option<&GenContext>,
         auth_cache: Option<&AuthCache>,
+        override_mcp_url: Option<&str>,
     ) -> Result<Self, McpError> {
         let transport = match provider.mcp_transport_type() {
             "stdio" => {
@@ -241,9 +248,15 @@ impl McpClient {
                 })
             }
             "http" => {
-                let url = provider.mcp_url.as_deref().ok_or_else(|| {
-                    McpError::Config("mcp_url required for HTTP transport".into())
-                })?;
+                // Pre-validated sandbox-supplied URL wins over the static
+                // manifest field. The proxy has already glob-matched the
+                // override against the operator's allowlist before calling
+                // us; we trust the override here (issue #124).
+                let url = override_mcp_url
+                    .or(provider.mcp_url.as_deref())
+                    .ok_or_else(|| {
+                        McpError::Config("mcp_url required for HTTP transport".into())
+                    })?;
 
                 // Build auth header: generator takes priority over static keyring
                 let auth_header = if let Some(gen) = &provider.auth_generator {
@@ -852,10 +865,15 @@ pub async fn execute(
     args: &HashMap<String, Value>,
     keyring: &Keyring,
 ) -> Result<Value, McpError> {
-    execute_with_gen(provider, tool_name, args, keyring, None, None).await
+    execute_with_gen(provider, tool_name, args, keyring, None, None, None).await
 }
 
 /// Execute an MCP tool call with optional dynamic auth generator.
+///
+/// `override_mcp_url`: when `Some`, overrides `provider.mcp_url` for this
+/// call. The proxy passes a sandbox-supplied URL here after glob-matching
+/// it against the operator's per-provider allowlist (issue #124). Ignored
+/// on stdio transport (guarded at manifest load time).
 pub async fn execute_with_gen(
     provider: &Provider,
     tool_name: &str,
@@ -863,8 +881,11 @@ pub async fn execute_with_gen(
     keyring: &Keyring,
     gen_ctx: Option<&GenContext>,
     auth_cache: Option<&AuthCache>,
+    override_mcp_url: Option<&str>,
 ) -> Result<Value, McpError> {
-    let client = McpClient::connect_with_gen(provider, keyring, gen_ctx, auth_cache).await?;
+    let client =
+        McpClient::connect_with_gen(provider, keyring, gen_ctx, auth_cache, override_mcp_url)
+            .await?;
 
     // Strip provider prefix: "github:read_file" → "read_file"
     let mcp_tool_name = tool_name
