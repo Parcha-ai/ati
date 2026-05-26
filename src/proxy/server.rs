@@ -179,6 +179,13 @@ fn resolve_upstream_override(
 /// Compile a CSV of URL globs into a `GlobSet`. Empty entries are dropped.
 /// Returns `Ok(None)` for empty input / all-whitespace entries (caller
 /// treats this as "no allowlist", same as a missing keyring entry).
+///
+/// **Security**: every glob is built with `literal_separator(true)` so `*`
+/// cannot match across `/` boundaries. Without this, an under-specified
+/// pattern like `https://parcha-tools-*` would accept attacker URLs like
+/// `https://parcha-tools-staging.evil.com/mcp` (the `*` would swallow
+/// the rest of the URL including the attacker host). Pinned by the
+/// `glob_star_must_not_cross_path_separator` regression test.
 fn build_url_allowlist(csv: &str) -> Result<Option<globset::GlobSet>, globset::Error> {
     let mut builder = globset::GlobSetBuilder::new();
     let mut count = 0;
@@ -187,7 +194,10 @@ fn build_url_allowlist(csv: &str) -> Result<Option<globset::GlobSet>, globset::E
         if pat.is_empty() {
             continue;
         }
-        builder.add(globset::Glob::new(pat)?);
+        let glob = globset::GlobBuilder::new(pat)
+            .literal_separator(true)
+            .build()?;
+        builder.add(glob);
         count += 1;
     }
     if count == 0 {
