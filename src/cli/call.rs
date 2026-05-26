@@ -531,6 +531,7 @@ async fn execute_via_proxy(
         args,
         Some(raw_args),
         token_env.as_deref(),
+        None, // step 4 wires Provider.mcp_url_env here
     )
     .await;
     let duration = start.elapsed();
