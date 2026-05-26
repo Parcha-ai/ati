@@ -110,6 +110,23 @@ pub struct Provider {
     /// URL for HTTP/Streamable HTTP MCP server
     #[serde(default)]
     pub mcp_url: Option<String>,
+    /// Optional override: name of the sandbox env var whose value the ATI
+    /// client ships to the proxy via the `X-Ati-Upstream-Url` header. The
+    /// proxy validates the URL against a keyring-stored glob allowlist
+    /// (`<provider>_allowed_urls`) and uses it as the MCP upstream for the
+    /// request, overriding [`mcp_url`].
+    ///
+    /// Used for per-environment routing through a shared proxy (issue #124):
+    /// one ATI proxy serves sandboxes from preview/staging/prod; each
+    /// sandbox's backend sets a per-env URL in the named env var; the proxy
+    /// validates against the operator-declared allowlist and dials the
+    /// right upstream.
+    ///
+    /// **Requires `mcp_transport = "http"`** — manifest load fails if
+    /// combined with stdio (stdio MCPs don't have URLs). Falls back to
+    /// `mcp_url` if the env var is unset or the header is absent.
+    #[serde(default)]
+    pub mcp_url_env: Option<String>,
     /// Environment variables to pass to stdio subprocess
     #[serde(default)]
     pub mcp_env: HashMap<String, String>,
@@ -590,6 +607,7 @@ impl CachedProvider {
             oauth2_token_url: None,
             auth_secret_name: None,
             auth_session_token_env: None,
+            mcp_url_env: None,
             oauth2_basic_auth: false,
             internal: false,
             handler,
@@ -717,6 +735,45 @@ impl ManifestRegistry {
                             ),
                         ));
                     }
+                }
+            }
+
+            // mcp_url_env is meaningful only for HTTP-transport MCP providers.
+            // stdio MCPs have no URL — silently ignoring the field would leak
+            // a misconfigured manifest through to runtime. Issue #124.
+            if let Some(ref env_name) = manifest.provider.mcp_url_env {
+                let trimmed = env_name.trim();
+                if trimmed.is_empty() {
+                    return Err(ManifestError::Invalid(
+                        path.display().to_string(),
+                        "mcp_url_env must not be empty when set".to_string(),
+                    ));
+                }
+                // POSIX env var names: [A-Z_][A-Z0-9_]*. We accept lowercase
+                // too for permissiveness — the actual env lookup is
+                // case-sensitive and the operator picks the name.
+                let valid_name = trimmed.chars().enumerate().all(|(i, c)| {
+                    if i == 0 {
+                        c.is_ascii_alphabetic() || c == '_'
+                    } else {
+                        c.is_ascii_alphanumeric() || c == '_'
+                    }
+                });
+                if !valid_name {
+                    return Err(ManifestError::Invalid(
+                        path.display().to_string(),
+                        format!("mcp_url_env '{env_name}' is not a valid POSIX env var name"),
+                    ));
+                }
+                let transport = manifest.provider.mcp_transport.as_deref().unwrap_or("");
+                if !manifest.provider.is_mcp() || transport != "http" {
+                    return Err(ManifestError::Invalid(
+                        path.display().to_string(),
+                        format!(
+                            "mcp_url_env requires handler = \"mcp\" and mcp_transport = \"http\" (got handler = \"{}\", transport = \"{}\")",
+                            manifest.provider.handler, transport
+                        ),
+                    ));
                 }
             }
 
@@ -1129,6 +1186,7 @@ pub(crate) fn register_file_manager_provider(registry: &mut ManifestRegistry) {
         oauth2_token_url: None,
         auth_secret_name: None,
         auth_session_token_env: None,
+        mcp_url_env: None,
         oauth2_basic_auth: false,
         internal: false,
         handler: "file_manager".to_string(),

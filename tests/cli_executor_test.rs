@@ -26,6 +26,7 @@ fn make_cli_provider(
         oauth2_token_url: None,
         auth_secret_name: None,
         auth_session_token_env: None,
+        mcp_url_env: None,
         oauth2_basic_auth: false,
         internal: false,
         handler: "cli".to_string(),
