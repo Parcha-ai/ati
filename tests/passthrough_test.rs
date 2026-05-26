@@ -85,6 +85,9 @@ fn build_passthrough_app(manifest_toml: &str, keys: &[(&str, &str)]) -> (axum::R
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
     (app, dir)
@@ -120,6 +123,9 @@ fn build_disabled_app(manifest_toml: &str) -> (axum::Router, TempDir) {
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
     (app, dir)
@@ -1031,6 +1037,9 @@ path_prefix = "/sessions"
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 

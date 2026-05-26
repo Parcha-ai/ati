@@ -138,6 +138,9 @@ method = "GET"
         ),
         key_store: Some(store),
         admin_token,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     (dir, state)
 }

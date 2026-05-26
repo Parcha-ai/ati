@@ -173,6 +173,9 @@ async fn test_proxy_help_returns_llm_recommendations() {
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -246,6 +249,9 @@ async fn test_proxy_help_sends_tool_context_in_prompt() {
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -296,6 +302,9 @@ async fn test_proxy_help_missing_llm_key_returns_503() {
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -357,6 +366,9 @@ async fn test_proxy_help_llm_error_returns_502() {
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -674,6 +686,9 @@ async fn test_proxy_help_excludes_internal_tools() {
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 

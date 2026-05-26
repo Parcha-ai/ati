@@ -57,6 +57,9 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     })
 }
 
