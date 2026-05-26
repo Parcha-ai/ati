@@ -49,6 +49,7 @@ fn build_app_with_registry(registry: ManifestRegistry, keyring: Keyring) -> axum
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
     build_router(state)
 }

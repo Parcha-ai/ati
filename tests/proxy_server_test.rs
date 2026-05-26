@@ -170,6 +170,7 @@ fn build_test_app(upstream_url: &str) -> axum::Router {
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     build_router(state)
@@ -191,6 +192,7 @@ fn build_test_app_with_jwt(upstream_url: &str) -> axum::Router {
         jwt_config: Some(test_jwt_config()),
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     build_router(state)
@@ -341,6 +343,7 @@ description = "Query"
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
     let app = build_router(state);
 
@@ -419,6 +422,7 @@ description = "ID to look up"
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
     let app = build_router(state);
 
@@ -497,6 +501,7 @@ description = "Title"
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
     let app = build_router(state);
 
@@ -660,6 +665,7 @@ description = "Query"
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
     let app = build_router(state);
 
@@ -1086,6 +1092,7 @@ description = "Query"
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
     let app = build_router(state);
 
@@ -1179,6 +1186,7 @@ description = "Data"
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
     let app = build_router(state);
 
