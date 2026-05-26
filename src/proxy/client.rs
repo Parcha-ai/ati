@@ -85,8 +85,16 @@ fn build_proxy_request(
     method: reqwest::Method,
     url: &str,
     token_env: Option<&str>,
+    override_mcp_url: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let mut req = client.request(method, url);
+    // X-Ati-Upstream-Url tells the proxy which upstream to dial for this
+    // request (issue #124). The proxy validates against an operator-declared
+    // glob allowlist before honouring it. Only attached when the caller
+    // resolved a per-provider override; absent on catalog/metadata routes.
+    if let Some(upstream) = override_mcp_url {
+        req = req.header("X-Ati-Upstream-Url", upstream);
+    }
     let env_name = token_env.unwrap_or("ATI_SESSION_TOKEN");
     match crate::core::token::resolve_token(env_name) {
         Ok(Some(token)) => {
@@ -146,12 +154,20 @@ fn build_proxy_request(
 /// instead, falling back to the default if it's unset. The caller normally
 /// derives this from the target provider's `auth_session_token_env` field
 /// in the manifest.
+///
+/// `override_mcp_url` is sent as an `X-Ati-Upstream-Url` header for the
+/// proxy to honour as the MCP upstream URL for this request (issue #124).
+/// The proxy validates against an operator-declared glob allowlist before
+/// dialling. Caller normally derives this from the target provider's
+/// `mcp_url_env` field — empty/unset stays `None`, falls through to the
+/// proxy's static `mcp_url` resolution.
 pub async fn call_tool(
     proxy_url: &str,
     tool_name: &str,
     args: &HashMap<String, Value>,
     raw_args: Option<&[String]>,
     token_env: Option<&str>,
+    override_mcp_url: Option<&str>,
 ) -> Result<Value, ProxyError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
@@ -173,10 +189,16 @@ pub async fn call_tool(
         raw_args: raw_args_vec,
     };
 
-    let response = build_proxy_request(&client, reqwest::Method::POST, &url, token_env)
-        .json(&payload)
-        .send()
-        .await?;
+    let response = build_proxy_request(
+        &client,
+        reqwest::Method::POST,
+        &url,
+        token_env,
+        override_mcp_url,
+    )
+    .json(&payload)
+    .send()
+    .await?;
     let status = response.status();
 
     if !status.is_success() {
@@ -212,7 +234,7 @@ pub async fn list_tools(proxy_url: &str, query_params: &str) -> Result<Value, Pr
         url.push('?');
         url.push_str(query_params);
     }
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None, None)
         .send()
         .await?;
     let status = response.status();
@@ -232,7 +254,7 @@ pub async fn get_tool_info(proxy_url: &str, name: &str) -> Result<Value, ProxyEr
         .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS))
         .build()?;
     let url = format!("{}/tools/{}", proxy_url.trim_end_matches('/'), name);
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None, None)
         .send()
         .await?;
     let status = response.status();
@@ -249,11 +271,14 @@ pub async fn get_tool_info(proxy_url: &str, name: &str) -> Result<Value, ProxyEr
 /// Forward a raw MCP JSON-RPC message via the proxy's /mcp endpoint.
 ///
 /// `token_env` works the same way as for [`call_tool`] — see issue #121.
+///
+/// `override_mcp_url` works the same way as for [`call_tool`] — see issue #124.
 pub async fn call_mcp(
     proxy_url: &str,
     method: &str,
     params: Option<Value>,
     token_env: Option<&str>,
+    override_mcp_url: Option<&str>,
 ) -> Result<Value, ProxyError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static MCP_ID: AtomicU64 = AtomicU64::new(1);
@@ -272,10 +297,16 @@ pub async fn call_mcp(
 
     let url = format!("{}/mcp", proxy_url.trim_end_matches('/'));
 
-    let response = build_proxy_request(&client, reqwest::Method::POST, &url, token_env)
-        .json(&msg)
-        .send()
-        .await?;
+    let response = build_proxy_request(
+        &client,
+        reqwest::Method::POST,
+        &url,
+        token_env,
+        override_mcp_url,
+    )
+    .json(&msg)
+    .send()
+    .await?;
     let status = response.status();
 
     if status == reqwest::StatusCode::ACCEPTED {
@@ -324,7 +355,7 @@ pub async fn list_skills(
         format!("{}/skills?{query_params}", proxy_url.trim_end_matches('/'))
     };
 
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None, None)
         .send()
         .await?;
     let status = response.status();
@@ -362,7 +393,7 @@ pub async fn get_skill(
         )
     };
 
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None, None)
         .send()
         .await?;
     let status = response.status();
@@ -392,7 +423,7 @@ async fn get_proxy_json(proxy_url: &str, path: &str) -> Result<serde_json::Value
         path.trim_start_matches('/')
     );
 
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None, None)
         .send()
         .await?;
     let status = response.status();
@@ -436,7 +467,7 @@ async fn get_proxy_json_with_query(
         url.push_str(&params);
     }
 
-    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None)
+    let response = build_proxy_request(&client, reqwest::Method::GET, &url, None, None)
         .send()
         .await?;
     let status = response.status();
@@ -551,7 +582,7 @@ pub async fn resolve_skills(
 
     let url = format!("{}/skills/resolve", proxy_url.trim_end_matches('/'));
 
-    let response = build_proxy_request(&client, reqwest::Method::POST, &url, None)
+    let response = build_proxy_request(&client, reqwest::Method::POST, &url, None, None)
         .json(scopes)
         .send()
         .await?;
@@ -588,7 +619,7 @@ pub async fn call_help(
         tool: tool.map(|t| t.to_string()),
     };
 
-    let response = build_proxy_request(&client, reqwest::Method::POST, &url, None)
+    let response = build_proxy_request(&client, reqwest::Method::POST, &url, None, None)
         .json(&payload)
         .send()
         .await?;
