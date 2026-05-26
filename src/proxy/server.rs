@@ -133,7 +133,26 @@ fn resolve_upstream_override(
                         provider.name.to_uppercase()
                     ),
                 ),
-                Some(pats) if pats.iter().any(|p| p.matches(url)) => {
+                Some(pats)
+                    if pats.iter().any(|p| {
+                        // require_literal_separator: true makes `*` stop at
+                        // `/` boundaries. Without it, a pattern like
+                        // `https://parcha-tools-*` would match
+                        // `https://parcha-tools-staging.evil.com/mcp` (the
+                        // `*` would swallow the rest of the URL including
+                        // the attacker host). With it set, `*` only matches
+                        // within a single path/host segment — exactly the
+                        // semantics we want for URL allowlist globs.
+                        p.matches_with(
+                            url,
+                            glob::MatchOptions {
+                                case_sensitive: true,
+                                require_literal_separator: true,
+                                require_literal_leading_dot: false,
+                            },
+                        )
+                    }) =>
+                {
                     UpstreamOverride::Allow(url.to_string())
                 }
                 Some(_) => UpstreamOverride::Reject(

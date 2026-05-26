@@ -160,6 +160,49 @@ async fn header_outside_allowlist_returns_403() {
     );
 }
 
+// Greptile-flagged P1 regression: glob `*` MUST NOT cross URL path/host
+// boundaries. Without `require_literal_separator: true`, a pattern like
+// `https://parcha-tools-*` would match `https://parcha-tools-staging.evil.com/mcp`
+// because `*` greedily swallows the rest of the string including the attacker
+// host. This test pins the bypass closed: only same-segment matches allowed.
+#[tokio::test]
+async fn glob_star_must_not_cross_path_separator() {
+    // Pattern intentionally LACKS the literal `.example.com/mcp` tail so
+    // the bug, if present, would let a wildcard URL through.
+    let app = build_app(/* with_env_var */ true, Some("https://parcha-tools-*"));
+    // Attacker URL: starts with `parcha-tools-` (prefix match) but the rest
+    // crosses a host boundary into evil.com. Vulnerable code would 200/502;
+    // fixed code returns 403.
+    let (status, _body) =
+        call_with_header(app, Some("https://parcha-tools-staging.evil.com/mcp")).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "glob * must not match across `/` or `.` boundaries — \
+         attacker URL got past the allowlist"
+    );
+}
+
+// Same regression class, but the `*` in the path tries to swallow
+// additional path segments. Pattern allows `/mcp` but not `/mcp/secret`.
+#[tokio::test]
+async fn glob_star_must_not_swallow_path_segments() {
+    let app = build_app(
+        /* with_env_var */ true,
+        Some("https://parcha-tools.example.com/*"),
+    );
+    // Attacker tries `/mcp/../admin` (path-traversal-style). With separator
+    // protection, the `*` matches only `mcp` and the trailing `/admin` part
+    // is unmatched → 403.
+    let (status, _body) =
+        call_with_header(app, Some("https://parcha-tools.example.com/mcp/admin")).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "glob * in path must not swallow additional segments"
+    );
+}
+
 // Case 6: header sent, allowlist matches → request reaches mcp_client
 // (which then errors trying to dial the unreachable URL). The proof the
 // override took effect is that we DID NOT get a 400/403 — the request
