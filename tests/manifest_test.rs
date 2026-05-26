@@ -697,3 +697,158 @@ endpoint = "/test"
     assert!(gen.env.is_empty());
     assert!(gen.inject.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// mcp_url_env (issue #124)
+//
+// Manifest-load validation ensures the field is only accepted on
+// http-transport MCP providers with a valid POSIX env var name. Runtime
+// dispatch behaviour is covered by tests/mcp_url_env_test.rs.
+// ---------------------------------------------------------------------------
+
+fn write_manifest(toml: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).expect("manifests dir");
+    std::fs::write(manifests_dir.join("p.toml"), toml).expect("write manifest");
+    (dir, manifests_dir)
+}
+
+#[test]
+fn manifest_mcp_url_env_round_trip() {
+    let (_dir, manifests_dir) = write_manifest(
+        r#"
+[provider]
+name = "parcha_tools"
+description = "test"
+handler = "mcp"
+mcp_transport = "http"
+mcp_url = "https://parcha-tools.example.com/mcp"
+mcp_url_env = "PARCHA_TOOLS_MCP_URL"
+"#,
+    );
+    let registry = ati::core::manifest::ManifestRegistry::load(&manifests_dir).expect("load");
+    let provider = registry
+        .find_mcp_provider_for_tool("parcha_tools:any")
+        .unwrap_or_else(|| {
+            // No tools registered for HTTP MCP discovered at runtime; look it up by name via the index.
+            registry
+                .get_tool("parcha_tools:any")
+                .map(|(p, _)| p)
+                .expect("provider must be present even without discovered tools")
+        });
+    assert_eq!(
+        provider.mcp_url_env.as_deref(),
+        Some("PARCHA_TOOLS_MCP_URL")
+    );
+}
+
+#[test]
+fn manifest_mcp_url_env_rejects_stdio_transport() {
+    let (_dir, manifests_dir) = write_manifest(
+        r#"
+[provider]
+name = "broken_stdio"
+description = "test"
+handler = "mcp"
+mcp_transport = "stdio"
+mcp_command = "echo"
+mcp_url_env = "BROKEN_STDIO_URL"
+"#,
+    );
+    let err = match ati::core::manifest::ManifestRegistry::load(&manifests_dir) {
+        Err(e) => e,
+        Ok(_) => panic!("load must fail for mcp_url_env + stdio"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("mcp_url_env") && msg.contains("http"),
+        "expected rejection message to mention mcp_url_env + http; got: {msg}"
+    );
+}
+
+#[test]
+fn manifest_mcp_url_env_rejects_non_mcp_handler() {
+    let (_dir, manifests_dir) = write_manifest(
+        r#"
+[provider]
+name = "broken_http"
+description = "test"
+handler = "http"
+base_url = "https://example.com"
+mcp_url_env = "BROKEN_HTTP_URL"
+"#,
+    );
+    let err = match ati::core::manifest::ManifestRegistry::load(&manifests_dir) {
+        Err(e) => e,
+        Ok(_) => panic!("load must fail for mcp_url_env on non-mcp handler"),
+    };
+    assert!(err.to_string().contains("mcp_url_env"));
+}
+
+#[test]
+fn manifest_mcp_url_env_rejects_invalid_posix_name() {
+    let (_dir, manifests_dir) = write_manifest(
+        r#"
+[provider]
+name = "bad_name"
+description = "test"
+handler = "mcp"
+mcp_transport = "http"
+mcp_url = "https://example.com/mcp"
+mcp_url_env = "1NOT_VALID_STARTS_WITH_DIGIT"
+"#,
+    );
+    let err = match ati::core::manifest::ManifestRegistry::load(&manifests_dir) {
+        Err(e) => e,
+        Ok(_) => panic!("load must fail for non-POSIX env var name"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("mcp_url_env") && msg.contains("POSIX"),
+        "expected rejection to mention POSIX env var name; got: {msg}"
+    );
+}
+
+#[test]
+fn manifest_mcp_url_env_rejects_empty() {
+    let (_dir, manifests_dir) = write_manifest(
+        r#"
+[provider]
+name = "empty"
+description = "test"
+handler = "mcp"
+mcp_transport = "http"
+mcp_url = "https://example.com/mcp"
+mcp_url_env = "   "
+"#,
+    );
+    let err = match ati::core::manifest::ManifestRegistry::load(&manifests_dir) {
+        Err(e) => e,
+        Ok(_) => panic!("load must fail for empty mcp_url_env"),
+    };
+    assert!(err.to_string().contains("mcp_url_env"));
+}
+
+#[test]
+fn manifest_mcp_url_env_absent_loads_cleanly() {
+    // Backwards-compat: any v0.7.x manifest without mcp_url_env still loads.
+    let (_dir, manifests_dir) = write_manifest(
+        r#"
+[provider]
+name = "legacy"
+description = "test"
+handler = "mcp"
+mcp_transport = "http"
+mcp_url = "https://example.com/mcp"
+"#,
+    );
+    let registry = ati::core::manifest::ManifestRegistry::load(&manifests_dir)
+        .expect("legacy manifest must load");
+    // Verify the field defaults to None.
+    let provider = registry
+        .find_mcp_provider_for_tool("legacy:any")
+        .or_else(|| registry.get_tool("legacy:any").map(|(p, _)| p))
+        .expect("provider present");
+    assert_eq!(provider.mcp_url_env, None);
+}
