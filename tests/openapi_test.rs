@@ -774,6 +774,9 @@ auth_type = "none"
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
 
     let app = ati::proxy::server::build_router(state);

@@ -95,6 +95,9 @@ forward_websockets = {forward_websockets}
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
     // Leak the tempdir so it lives for the duration of the test.
@@ -377,6 +380,9 @@ auth_key_name = "ws_query_secret"
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
     std::mem::forget(dir);

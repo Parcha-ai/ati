@@ -77,6 +77,285 @@ pub struct ProxyState {
     /// `ATI_ADMIN_TOKEN` env var at startup. `None` disables the admin
     /// endpoints (they return 503).
     pub admin_token: Option<String>,
+    /// Per-provider upstream-URL allowlists, compiled lazily on first
+    /// per-request validation and cached for the process lifetime. Keyed
+    /// by provider name. `None` value = keyring entry missing; we cache
+    /// negatives too to avoid repeating the lookup on every request.
+    /// Operator hot-reload of an allowlist requires proxy restart (same
+    /// constraint as every other keyring entry today). See issue #124.
+    ///
+    /// Entries are pre-parsed `UpstreamAllowEntry` structs (scheme + host
+    /// glob + canonical path) rather than raw URL glob patterns. Glob over
+    /// raw URL strings is unsafe — `*` can cross `.`, `#`, `?`, `:` and other
+    /// URL delimiters, letting a sandbox-crafted URL satisfy a pattern while
+    /// `reqwest` connects to a different host. Greptile P0/P1 on #124.
+    pub upstream_url_allowlists:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Option<Vec<UpstreamAllowEntry>>>>>,
+}
+
+/// One parsed allowlist entry. Allowlist CSV entries are operator-authored
+/// URL templates like `https://parcha-tools-*.grep.ai/mcp`. We parse them
+/// into (scheme, host_label_patterns, path) at load time so per-request
+/// validation can match each component separately:
+/// - **scheme**: exact string match (case-insensitive per RFC 3986)
+/// - **host_label_patterns**: per-DNS-label globs; the runtime URL's host
+///   is split on `.` and each label matched against the corresponding
+///   pattern entry. `*` can never bridge labels because labels are matched
+///   independently.
+/// - **path**: exact match against the URL's path; query/fragment ignored
+///
+/// This is the secure shape; raw URL globs let `*` cross `.`/`#`/`?`/`:`
+/// (Greptile P0/P1 on #124). Per-label matching closes those bypasses.
+#[derive(Debug, Clone)]
+pub struct UpstreamAllowEntry {
+    /// `"https"` or `"http"` — operator-declared scheme. Exact match required.
+    pub scheme: String,
+    /// One glob per DNS label, e.g. `parcha-tools-*.grep.ai` →
+    /// `["parcha-tools-*", "grep", "ai"]`. The runtime URL's lowercased
+    /// host is split on `.` and label-by-label matched against this Vec.
+    /// Length must match exactly (no `**`-style multi-label wildcards).
+    pub host_label_patterns: Vec<glob::Pattern>,
+    /// Exact path match required. Empty operator path becomes `"/"`.
+    pub path: String,
+}
+
+/// Outcome of `X-Ati-Upstream-Url` validation for a single request. The
+/// proxy handler turns `Reject` into an HTTP response and `Allow` into a
+/// param threaded down to `mcp_client::execute_with_gen`. See issue #124.
+#[derive(Debug)]
+enum UpstreamOverride {
+    /// No header sent, no override needed. The MCP client will use
+    /// `provider.mcp_url` as today.
+    None,
+    /// Header sent, validated against the operator allowlist. The MCP
+    /// client should dial this URL instead of `provider.mcp_url`.
+    Allow(String),
+    /// Header sent, but the request must be rejected. Carries the HTTP
+    /// status and a human-readable message for the response body.
+    Reject(StatusCode, String),
+}
+
+/// Resolve the optional sandbox-supplied upstream URL for a single
+/// `/call` request. Six cases per the issue #124 spec:
+///   1. Header absent + `mcp_url_env` absent → `None`.
+///   2. Header present + `mcp_url_env` absent → 400 reject (fail loud).
+///   3. Header absent + `mcp_url_env` present → `None` (mcp_client falls
+///      back to `provider.mcp_url`).
+///   4. Header present + `mcp_url_env` present + keyring has no allowlist
+///      → 403 reject (fail closed; operator must opt in).
+///   5. Header present + URL doesn't match any glob → 403 reject.
+///   6. Header present + URL matches → `Allow(url)`.
+fn resolve_upstream_override(
+    state: &ProxyState,
+    provider: &crate::core::manifest::Provider,
+    header_value: Option<&str>,
+) -> UpstreamOverride {
+    let provider_accepts_override = provider.mcp_url_env.is_some();
+    match (header_value, provider_accepts_override) {
+        (None, _) => UpstreamOverride::None,
+        (Some(_), false) => UpstreamOverride::Reject(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "X-Ati-Upstream-Url sent for provider '{}' which does not declare mcp_url_env",
+                provider.name
+            ),
+        ),
+        (Some(url), true) => {
+            let allowlist_key = format!("{}_allowed_urls", provider.name);
+            // Lazy-build the per-provider GlobSet on first use; cache for
+            // process lifetime (operator hot-reload requires restart, same
+            // as every other keyring entry today).
+            let entries = {
+                let mut cache = state.upstream_url_allowlists.lock().unwrap();
+                if !cache.contains_key(&provider.name) {
+                    let compiled: Option<Vec<UpstreamAllowEntry>> = state
+                        .keyring
+                        .get(&allowlist_key)
+                        .and_then(|csv| match build_url_allowlist(csv) {
+                            Ok(set) => set,
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider = %provider.name,
+                                    error = %e,
+                                    "failed to compile upstream URL allowlist; treating as missing"
+                                );
+                                None
+                            }
+                        });
+                    cache.insert(provider.name.clone(), compiled);
+                }
+                cache.get(&provider.name).cloned().flatten()
+            };
+            let Some(entries) = entries else {
+                return UpstreamOverride::Reject(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "Provider '{}' has no upstream URL allowlist configured (set ATI_KEY_{}_ALLOWED_URLS on the proxy)",
+                        provider.name,
+                        provider.name.to_uppercase()
+                    ),
+                );
+            };
+            // Parse the sandbox-supplied URL with `url::Url` (which canonicalizes
+            // scheme/host/path and surfaces fragment/query separately). Glob over
+            // the canonical host only — never the raw URL string — so attackers
+            // can't smuggle a different host via `.`, `#`, `?`, `:`, etc.
+            let parsed = match url::Url::parse(url) {
+                Ok(u) => u,
+                Err(e) => {
+                    return UpstreamOverride::Reject(
+                        StatusCode::BAD_REQUEST,
+                        format!("X-Ati-Upstream-Url '{url}' is not a valid URL: {e}"),
+                    );
+                }
+            };
+            if matches_allowlist(&parsed, &entries) {
+                UpstreamOverride::Allow(url.to_string())
+            } else {
+                UpstreamOverride::Reject(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "Upstream URL '{url}' not in provider '{}'s allowlist",
+                        provider.name
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/// Returns true iff `url`'s scheme + host + path matches at least one
+/// allowlist entry. Each component checked separately:
+/// - **scheme**: exact string match (case-insensitive per RFC 3986)
+/// - **host**: split on `.` into DNS labels; matched label-by-label against
+///   the entry's `host_label_patterns`. Label count must match exactly so
+///   `*.grep.ai` can't be satisfied by `evil.com.grep.ai` (3 labels vs 4).
+/// - **path**: exact string match (no globs). Query + fragment ignored.
+///
+/// Hostnames are lowercased before comparison (DNS case-insensitive). Userinfo
+/// (`user:pass@`) is rejected outright; allowlist patterns never carry it.
+/// Default ports (`:443` for https, `:80` for http) are accepted but only
+/// when the operator pattern itself doesn't pin a port; otherwise the entry
+/// would reject any URL because `url::Url` strips default ports.
+fn matches_allowlist(url: &url::Url, entries: &[UpstreamAllowEntry]) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host_lower = host.to_ascii_lowercase();
+    let host_labels: Vec<&str> = host_lower.split('.').collect();
+    let path = url.path();
+    for entry in entries {
+        if !entry.scheme.eq_ignore_ascii_case(url.scheme()) {
+            continue;
+        }
+        // Label-count check is the per-DNS-label-boundary constraint:
+        // pattern `*.grep.ai` (3 labels) cannot match `evil.com.grep.ai`
+        // (4 labels). This is the core security primitive that closes the
+        // `*`-crosses-`.` bypass Greptile flagged on #124.
+        if entry.host_label_patterns.len() != host_labels.len() {
+            continue;
+        }
+        if !entry
+            .host_label_patterns
+            .iter()
+            .zip(host_labels.iter())
+            .all(|(pat, label)| pat.matches(label))
+        {
+            continue;
+        }
+        if entry.path != path {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Compile a CSV of operator URL patterns into pre-parsed
+/// [`UpstreamAllowEntry`] structs. Each pattern is a URL template like
+/// `https://parcha-tools-*.grep.ai/mcp` — parsed with `url::Url`, then the
+/// host is split into DNS labels and each label compiled as a separate
+/// glob component. Returns `Ok(None)` for empty input / all-whitespace
+/// (caller treats as "no allowlist", same as missing keyring entry).
+///
+/// ## Why per-label host compilation
+///
+/// `glob::Pattern` doesn't natively treat `.` as a separator. Naive
+/// `Pattern::new("parcha-tools-*.grep.ai")` would let `*` swallow
+/// `evil.com` from `parcha-tools-evil.com.grep.ai`. To prevent that we
+/// reassemble the host pattern label-by-label after validating each label
+/// glob contains no embedded `.` itself. The composed `host_pattern` then
+/// uses `*` semantics that stop at label boundaries.
+///
+/// ## Why exact path match
+///
+/// Glob over paths invites the same boundary-crossing problems. MCP
+/// endpoints are conventionally `/mcp` or `/` — operators write the literal
+/// path, sandbox URLs must match exactly. Query strings and URL fragments
+/// are stripped before comparison.
+///
+/// ## Errors
+///
+/// - `pattern not a valid URL` — operator entry isn't parseable as a URL
+/// - `pattern missing host` — e.g., `https:///mcp`
+/// - `pattern host label contains '.'` — would let `*` cross DNS boundaries
+/// - `pattern has userinfo` — credentials in allowlist entries are refused
+fn build_url_allowlist(csv: &str) -> Result<Option<Vec<UpstreamAllowEntry>>, String> {
+    let mut entries = Vec::new();
+    for raw in csv.split(',') {
+        let pat = raw.trim();
+        if pat.is_empty() {
+            continue;
+        }
+        let parsed = url::Url::parse(pat)
+            .map_err(|e| format!("upstream allowlist pattern '{pat}' is not a valid URL: {e}"))?;
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(format!(
+                "upstream allowlist pattern '{pat}' must not include userinfo"
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| format!("upstream allowlist pattern '{pat}' has no host"))?;
+        // Reject `**` outright — it's a glob escape hatch.
+        if host.contains("**") {
+            return Err(format!(
+                "upstream allowlist pattern '{pat}' must not contain '**' (use single '*' per DNS label)"
+            ));
+        }
+        let host_lower = host.to_ascii_lowercase();
+        let mut host_label_patterns = Vec::new();
+        for label in host_lower.split('.') {
+            if label.is_empty() {
+                return Err(format!(
+                    "upstream allowlist pattern '{pat}' has empty DNS label"
+                ));
+            }
+            let p = glob::Pattern::new(label).map_err(|e| {
+                format!(
+                    "upstream allowlist pattern '{pat}' has invalid host label glob '{label}': {e}"
+                )
+            })?;
+            host_label_patterns.push(p);
+        }
+        let path = if parsed.path().is_empty() {
+            "/".to_string()
+        } else {
+            parsed.path().to_string()
+        };
+        entries.push(UpstreamAllowEntry {
+            scheme: parsed.scheme().to_string(),
+            host_label_patterns,
+            path,
+        });
+    }
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(entries))
 }
 
 // --- Request/Response types ---
@@ -403,6 +682,17 @@ async fn handle_call(
         .get::<std::sync::Arc<CallMetricLabelsSlot>>()
         .cloned();
 
+    // Pull the sandbox-supplied upstream URL out of the inbound headers
+    // before `into_body()` consumes them. Validation against the operator
+    // allowlist happens after tool resolution — we need the provider to
+    // know which keyring allowlist entry to consult. See issue #124.
+    let upstream_url_header: Option<String> = req
+        .headers()
+        .get("x-ati-upstream-url")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     // Parse request body. The ceiling must accommodate the worst-case upload
     // payload: `file_manager::MAX_UPLOAD_BYTES` of raw bytes, base64-inflated
     // (~1.34×), plus a few KB of JSON framing. Anti-abuse is enforced
@@ -559,6 +849,31 @@ async fn handle_call(
         jwt_token: bearer_token.clone(),
     };
 
+    // Validate any sandbox-supplied X-Ati-Upstream-Url against the operator's
+    // per-provider allowlist (issue #124). Reject paths exit early with a
+    // clean status; the Allow path threads through to mcp_client below.
+    let override_mcp_url: Option<String> =
+        match resolve_upstream_override(&state, provider, upstream_url_header.as_deref()) {
+            UpstreamOverride::None => None,
+            UpstreamOverride::Allow(url) => Some(url),
+            UpstreamOverride::Reject(status, msg) => {
+                tracing::warn!(
+                    provider = %provider.name,
+                    tool = %call_req.tool_name,
+                    status = status.as_u16(),
+                    reason = %msg,
+                    "rejecting sandbox-supplied upstream URL"
+                );
+                return (
+                    status,
+                    Json(CallResponse {
+                        result: Value::Null,
+                        error: Some(msg),
+                    }),
+                );
+            }
+        };
+
     // Execute tool call — dispatch based on handler type, with timing for audit
     let agent_sub = claims.as_ref().map(|c| c.sub.clone()).unwrap_or_default();
     let job_id = claims
@@ -588,6 +903,7 @@ async fn handle_call(
                 &state.keyring,
                 Some(&gen_ctx),
                 Some(&state.auth_cache),
+                override_mcp_url.as_deref(),
             )
             .await
             {
@@ -1258,6 +1574,7 @@ async fn handle_mcp(
     State(state): State<Arc<ProxyState>>,
     claims: Option<Extension<TokenClaims>>,
     bearer: Option<Extension<BearerToken>>,
+    headers: axum::http::HeaderMap,
     Json(msg): Json<Value>,
 ) -> impl IntoResponse {
     let claims = claims.map(|Extension(claims)| claims);
@@ -1265,6 +1582,13 @@ async fn handle_mcp(
     // Bearer-token path always populates this when a JWT is configured;
     // dev mode and Ati-Key paths leave it None and we fall back to "".
     let bearer_token: String = bearer.map(|Extension(b)| b.0).unwrap_or_default();
+    // Sandbox-supplied upstream URL for MCP tools/call (issue #124). The
+    // proxy validates against the per-provider allowlist before honouring.
+    let upstream_url_header: Option<String> = headers
+        .get("x-ati-upstream-url")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let scopes = scopes_for_request(claims.as_ref(), &state);
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
@@ -1351,6 +1675,32 @@ async fn handle_mcp(
 
             tracing::debug!(%tool_name, provider = %provider.name, "MCP tools/call");
 
+            // Validate any sandbox-supplied X-Ati-Upstream-Url against the
+            // operator's per-provider allowlist (issue #124). For MCP JSON-RPC
+            // we encode rejections as JSON-RPC error codes:
+            //   - -32602 (invalid params) for header-without-mcp_url_env
+            //   - -32001 (access denied) for allowlist misses
+            let override_mcp_url: Option<String> =
+                match resolve_upstream_override(&state, provider, upstream_url_header.as_deref()) {
+                    UpstreamOverride::None => None,
+                    UpstreamOverride::Allow(url) => Some(url),
+                    UpstreamOverride::Reject(status, msg) => {
+                        let code = if status == StatusCode::BAD_REQUEST {
+                            -32602
+                        } else {
+                            -32001
+                        };
+                        tracing::warn!(
+                            provider = %provider.name,
+                            tool = %tool_name,
+                            status = status.as_u16(),
+                            reason = %msg,
+                            "rejecting sandbox-supplied upstream URL on /mcp"
+                        );
+                        return jsonrpc_error(id, code, &msg);
+                    }
+                };
+
             let mcp_gen_ctx = GenContext {
                 jwt_sub: claims
                     .as_ref()
@@ -1373,6 +1723,7 @@ async fn handle_mcp(
                     &state.keyring,
                     Some(&mcp_gen_ctx),
                     Some(&state.auth_cache),
+                    override_mcp_url.as_deref(),
                 )
                 .await
             } else if provider.is_cli() {
@@ -3044,6 +3395,9 @@ pub async fn run(
         sig_verify,
         key_store,
         admin_token,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
 
     // Hot-reload secret on SIGHUP — `ati edge rotate-keyring` (PR 3) re-encrypts
@@ -3438,6 +3792,9 @@ auth_type = "none"
             ),
             key_store: None,
             admin_token: None,
+            upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         });
         (state, manifests_tmp)
     }
@@ -3517,6 +3874,9 @@ deny_paths = ["/denied"]
             ),
             key_store: None,
             admin_token: None,
+            upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         });
         (state, manifests_tmp)
     }

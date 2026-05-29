@@ -62,6 +62,9 @@ fn build_app_with_registry(registry: ManifestRegistry, keyring: Keyring) -> axum
         ),
         key_store: None,
         admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     build_router(state)
 }
