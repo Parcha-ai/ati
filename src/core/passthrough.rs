@@ -53,6 +53,8 @@ pub enum PassthroughBuildError {
     ClientBuild(String, reqwest::Error),
     #[error("provider '{0}': base_url is not a valid URL: {1}")]
     BadBaseUrl(String, String),
+    #[error("provider '{0}': {1} contains an unresolved ${{...}} placeholder after keyring expansion: '{2}' — set the matching keyring entry (e.g. ATI_KEY_<NAME>) on this proxy")]
+    UnresolvedUpstreamVar(String, String, String),
 }
 
 /// A compiled passthrough route: everything frozen at startup.
@@ -243,12 +245,30 @@ fn compile_route(
     p: &Provider,
     keyring: &Keyring,
 ) -> Result<PassthroughRoute, PassthroughBuildError> {
+    // Resolve `${key}` keyring placeholders before parsing, so a single
+    // manifest can front a different per-environment upstream on each proxy
+    // (issue #127). Symmetric with mcp_client's mcp_url resolution.
+    //
+    // `url::Url::parse` is NOT a reliable fail-loud signal for an unresolved
+    // var: `https://${missing}` parses as a *valid* URL (host becomes the
+    // literal `${missing}`), so the proxy would boot and only fail at first
+    // request with a DNS error. We guard explicitly: any residual `${` after
+    // expansion is a misconfiguration we refuse to start with.
+    let resolved_base = resolve_env_value(&p.base_url, keyring);
+    if resolved_base.contains("${") {
+        return Err(PassthroughBuildError::UnresolvedUpstreamVar(
+            p.name.clone(),
+            "base_url".into(),
+            resolved_base,
+        ));
+    }
+
     // Validate the base_url parses as an absolute URL. We don't store the
     // parsed url::Url because we build the upstream URL from string concat —
     // but the parse step catches typos at startup instead of at first call.
-    let parsed = url::Url::parse(&p.base_url)
+    let parsed = url::Url::parse(&resolved_base)
         .map_err(|e| PassthroughBuildError::BadBaseUrl(p.name.clone(), e.to_string()))?;
-    let base_url = p.base_url.trim_end_matches('/').to_string();
+    let base_url = resolved_base.trim_end_matches('/').to_string();
 
     // Build the deny-paths GlobSet. Glob `*` does NOT cross `/`, so a naive
     // `/config/*` would silently miss `/config/a/b` — a sandbox could escape
@@ -304,6 +324,24 @@ fn compile_route(
         extra_headers.push((header_name, header_value));
     }
 
+    // Resolve `${key}` placeholders in host_override too (issue #127), with
+    // the same fail-loud guard as base_url. Operators commonly set both to
+    // the same `${gateway_host}` so SNI/Host match the dialed upstream.
+    let host_override = match &p.host_override {
+        Some(h) => {
+            let resolved = resolve_env_value(h, keyring);
+            if resolved.contains("${") {
+                return Err(PassthroughBuildError::UnresolvedUpstreamVar(
+                    p.name.clone(),
+                    "host_override".into(),
+                    resolved,
+                ));
+            }
+            Some(resolved)
+        }
+        None => None,
+    };
+
     // Build the per-route reqwest client. SNI follows the URL host (which we
     // control via base_url). Reqwest negotiates HTTP/1.1 vs HTTP/2 automatically
     // based on ALPN.
@@ -330,7 +368,7 @@ fn compile_route(
         strip_prefix: p.strip_prefix,
         path_replace: p.path_replace.clone(),
         base_url,
-        host_override: p.host_override.clone(),
+        host_override,
         auth_header,
         auth_query,
         extra_headers,
@@ -1921,5 +1959,86 @@ mod tests {
             "content-length must be stripped when cap is active"
         );
         assert!(out.get("content-type").is_some());
+    }
+
+    // --- base_url / host_override interpolation (issue #127) ----------------
+    //
+    // Passthrough providers can now vary their upstream per proxy instance via
+    // `${key}` keyring placeholders in base_url / host_override, so a single
+    // manifest serves every environment. Unresolved placeholders fail loud at
+    // route-build time (a residual `${` is a misconfiguration we refuse to
+    // start with — url::Url::parse would otherwise accept `https://${missing}`
+    // as a valid URL and only fail at first request).
+
+    #[test]
+    fn base_url_interpolates_keyring_var() {
+        let kr = keyring_with(&[("gw_host", "gateway.example.com")]);
+        let mut p = passthrough_provider("llm_gateway");
+        p.base_url = "https://${gw_host}".to_string();
+        let route = compile_route(&p, &kr).expect("compile");
+        assert_eq!(route.base_url, "https://gateway.example.com");
+    }
+
+    #[test]
+    fn host_override_interpolates_keyring_var() {
+        let kr = keyring_with(&[("gw_host", "gateway.example.com")]);
+        let mut p = passthrough_provider("llm_gateway");
+        p.base_url = "https://${gw_host}".to_string();
+        p.host_override = Some("${gw_host}".to_string());
+        let route = compile_route(&p, &kr).expect("compile");
+        assert_eq!(route.host_override.as_deref(), Some("gateway.example.com"));
+    }
+
+    #[test]
+    fn base_url_unresolved_var_fails_loud() {
+        // The key regression: `https://${missing}` parses as a *valid* URL,
+        // so without the residual-`${` guard the proxy would boot and only
+        // fail at first request. compile_route must refuse to build.
+        let kr = dummy_keyring(); // empty — nothing resolves
+        let mut p = passthrough_provider("llm_gateway");
+        p.base_url = "https://${missing_host}".to_string();
+        let err = match compile_route(&p, &kr) {
+            Err(e) => e,
+            Ok(_) => panic!("compile_route must reject an unresolved base_url ${{var}}"),
+        };
+        match err {
+            PassthroughBuildError::UnresolvedUpstreamVar(provider, field, value) => {
+                assert_eq!(provider, "llm_gateway");
+                assert_eq!(field, "base_url");
+                assert!(value.contains("${missing_host}"), "value: {value}");
+            }
+            other => panic!("expected UnresolvedUpstreamVar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_override_unresolved_var_fails_loud() {
+        let kr = keyring_with(&[("gw_host", "gateway.example.com")]);
+        let mut p = passthrough_provider("llm_gateway");
+        // base_url resolves fine; only host_override is broken.
+        p.base_url = "https://${gw_host}".to_string();
+        p.host_override = Some("${missing_host}".to_string());
+        let err = match compile_route(&p, &kr) {
+            Err(e) => e,
+            Ok(_) => panic!("compile_route must reject an unresolved host_override ${{var}}"),
+        };
+        match err {
+            PassthroughBuildError::UnresolvedUpstreamVar(_, field, _) => {
+                assert_eq!(field, "host_override");
+            }
+            other => panic!("expected UnresolvedUpstreamVar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn base_url_literal_unchanged_back_compat() {
+        // A manifest with no ${} must behave exactly as before.
+        let kr = dummy_keyring();
+        let mut p = passthrough_provider("plain");
+        p.base_url = "https://gateway.example.com".to_string();
+        p.host_override = Some("gateway.example.com".to_string());
+        let route = compile_route(&p, &kr).expect("compile");
+        assert_eq!(route.base_url, "https://gateway.example.com");
+        assert_eq!(route.host_override.as_deref(), Some("gateway.example.com"));
     }
 }
