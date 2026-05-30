@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools-interface"
-version = "0.8.0-rc.5"
+version = "0.8.0-rc.6"
 dependencies = [
  "aes-gcm",
  "aes-gcm-siv",
