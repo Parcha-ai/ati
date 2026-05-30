@@ -60,6 +60,14 @@ pub struct MetricsHandles {
     /// it as a metric label would risk cardinality blow-up under an
     /// adversarial spray.
     pub passthrough_denied: opentelemetry::metrics::Counter<u64>,
+    /// Incremented when a passthrough streaming body (request OR response)
+    /// is terminated by an error or by the body cap. Labels: `route`,
+    /// `direction` (`request`|`response`), `kind` (`upstream`|`cap`).
+    /// Before #130, upstream stream errors were silently re-wrapped as
+    /// `io::Error::other` and surfaced to the client as `unexpected EOF`
+    /// with zero ATI-side signal — this counter is the metric companion
+    /// to the `tracing::warn!` added in `MaxBytesStream::poll_next`.
+    pub passthrough_stream_errors: opentelemetry::metrics::Counter<u64>,
 }
 
 static METRICS: OnceLock<MetricsHandles> = OnceLock::new();
@@ -161,6 +169,12 @@ where
             .u64_counter("ati.passthrough.denied")
             .with_description(
                 "Count of passthrough requests rejected by the route's deny_paths globs",
+            )
+            .build(),
+        passthrough_stream_errors: meter
+            .u64_counter("ati.passthrough.stream_errors")
+            .with_description(
+                "Count of passthrough streaming-body terminations (upstream error or body cap hit), labeled by route/direction/kind",
             )
             .build(),
     };
