@@ -376,13 +376,18 @@ fn compile_route(
     // passthrough holds a single connection open across long server-side
     // pauses.
     //
-    // Set to the same 300s ceiling as `read_timeout_seconds`: the application
-    // already gives up at 300s, so the kernel timer should not be tighter.
+    // Track the per-route `read_timeout_seconds` so the kernel timer is
+    // never tighter than the application timer. A route that bumps its
+    // read_timeout above the default to support extra-long completions
+    // automatically gets a matching TCP_USER_TIMEOUT — without this, the
+    // kernel would still kill the connection at the old default while
+    // the operator thought they had extended it (Greptile #133 finding).
+    //
     // The method is `#[cfg]`-gated on Linux/Android/Fuchsia in reqwest, so
     // we mirror the gate here for portability with non-Linux builds.
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "fuchsia"))]
     {
-        builder = builder.tcp_user_timeout(Duration::from_secs(300));
+        builder = builder.tcp_user_timeout(Duration::from_secs(p.read_timeout_seconds));
     }
 
     let client = builder
