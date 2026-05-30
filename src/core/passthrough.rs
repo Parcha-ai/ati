@@ -895,7 +895,6 @@ fn format_error_chain<E: std::error::Error>(err: &E) -> String {
     out
 }
 
-
 // --- Path rewriting ---------------------------------------------------------
 
 /// Compute the upstream path from the incoming path, applying `strip_prefix`
@@ -2034,12 +2033,8 @@ mod tests {
             Err(FakeUpstreamError { source: cause }),
         ];
         let s = stream::iter(chunks);
-        let mut capped = MaxBytesStream::new_labeled(
-            s,
-            0,
-            "test-route".to_string(),
-            StreamDirection::Response,
-        );
+        let mut capped =
+            MaxBytesStream::new_labeled(s, 0, "test-route".to_string(), StreamDirection::Response);
         let first = capped.next().await.unwrap();
         assert!(first.is_ok());
         let second = capped
@@ -2077,12 +2072,8 @@ mod tests {
             Ok(Bytes::from(vec![0u8; 20])),
         ];
         let s = stream::iter(chunks);
-        let mut capped = MaxBytesStream::new_labeled(
-            s,
-            0,
-            "test-route".to_string(),
-            StreamDirection::Response,
-        );
+        let mut capped =
+            MaxBytesStream::new_labeled(s, 0, "test-route".to_string(), StreamDirection::Response);
         // Drain the stream.
         while let Some(item) = capped.next().await {
             item.expect("chunk should be ok");
@@ -2114,12 +2105,8 @@ mod tests {
             Ok(Bytes::from(vec![0u8; 10])),
         ];
         let s = stream::iter(chunks);
-        let mut capped = MaxBytesStream::new_labeled(
-            s,
-            0,
-            "test-route".to_string(),
-            StreamDirection::Response,
-        );
+        let mut capped =
+            MaxBytesStream::new_labeled(s, 0, "test-route".to_string(), StreamDirection::Response);
         let first = capped.next().await.unwrap();
         assert!(first.is_err(), "first poll should surface the error");
         // After the error, tripped is latched → None, NOT the second Ok.
