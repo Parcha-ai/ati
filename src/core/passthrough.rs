@@ -343,10 +343,11 @@ fn compile_route(
     };
 
     // Build the per-route reqwest client. SNI follows the URL host (which we
-    // control via base_url). Reqwest negotiates HTTP/1.1 vs HTTP/2 automatically
-    // based on ALPN.
+    // control via base_url). Our reqwest is built with `default-features = false`
+    // and does NOT enable the `http2` feature, so this client negotiates
+    // HTTP/1.1 only — ALPN never offers h2.
     let _ = parsed;
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(p.idle_timeout_seconds))
         .timeout(Duration::from_secs(p.read_timeout_seconds))
         .connect_timeout(Duration::from_secs(p.connect_timeout_seconds))
@@ -357,7 +358,39 @@ fn compile_route(
         // host the upstream redirects to — reqwest strips `Authorization` on
         // cross-origin hops but does NOT strip arbitrary custom headers. That's
         // a credential-leak vector flagged by Greptile review #2 on PR #95.
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+
+    // Issue #130: override reqwest's Linux-only `TCP_USER_TIMEOUT = 30s` default.
+    //
+    // reqwest 0.12.23+ ships with `tcp_user_timeout: Some(Duration::from_secs(30))`
+    // hardcoded in `ClientBuilder::new()` on Linux/Android/Fuchsia. See
+    // https://github.com/seanmonstar/reqwest/blob/v0.12.28/src/async_impl/client.rs
+    //
+    // For the streaming passthrough this is catastrophic: SSE responses from
+    // LLM upstreams (Anthropic /v1/messages, OpenAI /v1/chat/completions) sit
+    // quiet for 30–90+ seconds while the model thinks, and `TCP_USER_TIMEOUT`
+    // fires `ETIMEDOUT` on the body read mid-stream. Surfaces to the client
+    // as `unexpected EOF` at the edge (issue #130 staging trace). Every other
+    // reqwest builder in ATI (file_manager, gcs, mcp_client, help, skills)
+    // completes its request well under 30s, so they never hit this — only
+    // passthrough holds a single connection open across long server-side
+    // pauses.
+    //
+    // Track the per-route `read_timeout_seconds` so the kernel timer is
+    // never tighter than the application timer. A route that bumps its
+    // read_timeout above the default to support extra-long completions
+    // automatically gets a matching TCP_USER_TIMEOUT — without this, the
+    // kernel would still kill the connection at the old default while
+    // the operator thought they had extended it (Greptile #133 finding).
+    //
+    // The method is `#[cfg]`-gated on Linux/Android/Fuchsia in reqwest, so
+    // we mirror the gate here for portability with non-Linux builds.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "fuchsia"))]
+    {
+        builder = builder.tcp_user_timeout(Duration::from_secs(p.read_timeout_seconds));
+    }
+
+    let client = builder
         .build()
         .map_err(|e| PassthroughBuildError::ClientBuild(p.name.clone(), e))?;
 
@@ -808,11 +841,27 @@ where
                 // re-bump the counter). Greptile #131 finding.
                 *this.tripped = true;
                 let chain = format_error_chain(&e);
+                // Detect the body-read-timeout case (the issue #130 root
+                // cause from reqwest's 30s TCP_USER_TIMEOUT default) and
+                // surface it as a distinct `kind`. Reqwest's decoder
+                // re-wraps body timeouts as the misleading "error decoding
+                // response body" prefix (https://github.com/seanmonstar/
+                // reqwest/issues/2839), so the only reliable signal is
+                // walking the source chain for an `io::Error` with kind
+                // TimedOut. The dedicated label lets operators alert on
+                // timeout-bleed vs other upstream errors without grepping
+                // the freeform `error` field.
+                let kind = if error_chain_is_timeout(&e) {
+                    "timeout"
+                } else {
+                    "upstream"
+                };
                 tracing::warn!(
                     route = %this.route_name,
                     direction = %this.direction.as_str(),
                     bytes_received = *this.seen,
                     chunks_received = *this.chunks,
+                    kind = kind,
                     error = %chain,
                     "passthrough stream terminated by upstream error"
                 );
@@ -824,7 +873,7 @@ where
                         &[
                             KeyValue::new("route", this.route_name.clone()),
                             KeyValue::new("direction", this.direction.as_str()),
-                            KeyValue::new("kind", "upstream"),
+                            KeyValue::new("kind", kind),
                         ],
                     );
                 }
@@ -893,6 +942,27 @@ fn format_error_chain<E: std::error::Error>(err: &E) -> String {
         source = cause.source();
     }
     out
+}
+
+/// Walk an error's `source()` chain looking for an `io::Error` with
+/// `ErrorKind::TimedOut`. Returns true if any link in the chain is a
+/// timeout — this is what reqwest's body-decoder mis-wraps as the
+/// misleading "error decoding response body" prefix (see
+/// https://github.com/seanmonstar/reqwest/issues/2839). Detecting it
+/// gives us a stable `kind="timeout"` label on the warn line + metric
+/// so operators can alert on the issue #130 failure mode specifically
+/// instead of grepping the freeform `error` field.
+fn error_chain_is_timeout<E: std::error::Error + 'static>(err: &E) -> bool {
+    let mut current: Option<&dyn std::error::Error> = Some(err);
+    while let Some(e) = current {
+        if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == std::io::ErrorKind::TimedOut {
+                return true;
+            }
+        }
+        current = e.source();
+    }
+    false
 }
 
 // --- Path rewriting ---------------------------------------------------------
@@ -2182,6 +2252,74 @@ mod tests {
         let chain = format_error_chain(&outer);
         assert!(chain.starts_with("outer"));
         assert!(chain.contains("deadline elapsed"));
+    }
+
+    #[test]
+    fn error_chain_is_timeout_detects_buried_io_timedout() {
+        // Issue #130: the reqwest decoder wraps body-read timeouts as
+        // "error decoding response body: ... operation timed out" with
+        // the actual `io::Error{kind: TimedOut}` buried two-plus levels
+        // deep in the source chain. error_chain_is_timeout MUST walk the
+        // chain and downcast to spot it, otherwise we can't apply the
+        // stable kind="timeout" label on the warn line + metric.
+        //
+        // The test fakes a `reqwest::Error`-shaped wrapper (Display
+        // says "error decoding response body", source() returns the
+        // real `io::Error`) so the chain reaches `kind: TimedOut`. We
+        // intentionally avoid `io::Error::other` as a synthetic chain
+        // link — its `source()` returns `None` on stable, which is
+        // its own footgun separate from this test.
+        #[derive(Debug)]
+        struct ReqwestLikeWrap {
+            cause: std::io::Error,
+        }
+        impl std::fmt::Display for ReqwestLikeWrap {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "error decoding response body")
+            }
+        }
+        impl std::error::Error for ReqwestLikeWrap {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.cause)
+            }
+        }
+
+        // Buried timeout — must be detected.
+        let cause = std::io::Error::new(std::io::ErrorKind::TimedOut, "operation timed out");
+        let outer = ReqwestLikeWrap { cause };
+        assert!(
+            error_chain_is_timeout(&outer),
+            "buried io::ErrorKind::TimedOut must surface as timeout=true"
+        );
+
+        // Non-timeout io error — must NOT be detected.
+        let cause_other = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "h2 GOAWAY");
+        let outer_other = ReqwestLikeWrap { cause: cause_other };
+        assert!(
+            !error_chain_is_timeout(&outer_other),
+            "ConnectionReset must not be classified as timeout"
+        );
+
+        // No io::Error in chain at all — must NOT be detected.
+        #[derive(Debug)]
+        struct PlainErr;
+        impl std::fmt::Display for PlainErr {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "plain")
+            }
+        }
+        impl std::error::Error for PlainErr {}
+        assert!(
+            !error_chain_is_timeout(&PlainErr),
+            "non-io error chain must not be classified as timeout"
+        );
+
+        // Top-level io::Error{TimedOut} (no wrapping) — must also detect.
+        let direct = std::io::Error::new(std::io::ErrorKind::TimedOut, "direct timeout");
+        assert!(
+            error_chain_is_timeout(&direct),
+            "top-level io::ErrorKind::TimedOut must be detected"
+        );
     }
 
     #[test]
