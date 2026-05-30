@@ -801,6 +801,12 @@ where
                 // route + direction is bleeding and WHY — issue #130 in the
                 // wild surfaced as `unexpected EOF` at Caddy with no ATI logs
                 // at all.
+                //
+                // Mirror the cap path: latch `tripped` so any re-poll after
+                // the error returns `Ready(None)` instead of polling the
+                // inner stream again (which could double-fire the warn and
+                // re-bump the counter). Greptile #131 finding.
+                *this.tripped = true;
                 let chain = format_error_chain(&e);
                 tracing::warn!(
                     route = %this.route_name,
@@ -825,7 +831,13 @@ where
                 Poll::Ready(Some(Err(std::io::Error::other(e))))
             }
             Poll::Ready(Some(Ok(chunk))) => {
-                *this.chunks = this.chunks.saturating_add(1);
+                // Cap check happens BEFORE incrementing the chunk counter
+                // so the warn log on a cap trip reports the number of
+                // chunks that fit, not the trip-inducing chunk itself. The
+                // good-chunk path bumps the counter after the cap clears,
+                // which keeps `chunk_count()` accurate for the test
+                // surface and the debug-summary line. Greptile #131
+                // finding.
                 if *this.max > 0 {
                     let new_total = this.seen.saturating_add(chunk.len());
                     if new_total > *this.max {
@@ -859,6 +871,7 @@ where
                 } else {
                     *this.seen = this.seen.saturating_add(chunk.len());
                 }
+                *this.chunks = this.chunks.saturating_add(1);
                 Poll::Ready(Some(Ok(chunk)))
             }
         }
@@ -2080,6 +2093,81 @@ mod tests {
         // We can't inspect it directly without exposing it, but the Drop
         // path covers the warn-vs-debug distinction; the public bytes_seen
         // / chunk_count getters above are the test surface.
+    }
+
+    #[tokio::test]
+    async fn max_bytes_stream_upstream_error_latches_tripped() {
+        // Regression for Greptile #131: the upstream-error arm must set
+        // `tripped = true` (mirroring the cap path) so a re-poll after
+        // the error doesn't re-poll the inner stream and re-fire the
+        // warn / re-bump the counter. We can't observe the warn from
+        // the test, but we CAN observe that subsequent polls return
+        // None without consuming any further items from the inner
+        // stream — which is the contract `tripped` enforces.
+        use futures::stream;
+        let cause = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        let chunks: Vec<Result<Bytes, FakeUpstreamError>> = vec![
+            Err(FakeUpstreamError { source: cause }),
+            // If `tripped` is NOT set, this second chunk would be polled
+            // and surfaced to the caller. With `tripped` latched, it
+            // stays in the inner stream and we get None.
+            Ok(Bytes::from(vec![0u8; 10])),
+        ];
+        let s = stream::iter(chunks);
+        let mut capped = MaxBytesStream::new_labeled(
+            s,
+            0,
+            "test-route".to_string(),
+            StreamDirection::Response,
+        );
+        let first = capped.next().await.unwrap();
+        assert!(first.is_err(), "first poll should surface the error");
+        // After the error, tripped is latched → None, NOT the second Ok.
+        assert!(
+            capped.next().await.is_none(),
+            "tripped should latch and prevent re-poll of inner stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_bytes_stream_cap_trip_does_not_count_failing_chunk() {
+        // Regression for Greptile #131: when the cap warn fires, the
+        // `chunks_received` field should reflect the chunks that FIT
+        // before the trip, not include the trip-inducing chunk itself.
+        // The good-chunk path increments only after the cap check
+        // clears, so `chunk_count()` observed on the wrapper at the
+        // moment of trip equals the number of successfully delivered
+        // chunks.
+        use futures::stream;
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+            Ok(Bytes::from(vec![0u8; 50])),
+            Ok(Bytes::from(vec![0u8; 50])),
+            // This third chunk pushes past 150 → triggers cap.
+            Ok(Bytes::from(vec![0u8; 100])),
+        ];
+        let s = stream::iter(chunks);
+        let mut capped = MaxBytesStream::new_labeled(
+            s,
+            150,
+            "test-route".to_string(),
+            StreamDirection::Response,
+        );
+        // Two chunks fit.
+        assert!(capped.next().await.unwrap().is_ok());
+        assert!(capped.next().await.unwrap().is_ok());
+        assert_eq!(capped.chunk_count(), 2, "two chunks fit before cap");
+        assert_eq!(capped.bytes_seen(), 100);
+        // Third chunk trips the cap.
+        let third = capped.next().await.unwrap();
+        assert!(third.is_err());
+        // After the trip, chunk_count() and bytes_seen() reflect the
+        // PRE-trip state: the failing chunk is not counted in either.
+        assert_eq!(
+            capped.chunk_count(),
+            2,
+            "trip-inducing chunk must not be counted"
+        );
+        assert_eq!(capped.bytes_seen(), 100);
     }
 
     #[test]
