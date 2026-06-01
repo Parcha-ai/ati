@@ -777,6 +777,9 @@ auth_type = "none"
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
 
     let app = ati::proxy::server::build_router(state);
