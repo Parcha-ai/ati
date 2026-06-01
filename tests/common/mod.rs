@@ -258,6 +258,9 @@ pub fn build_test_app(registry: ManifestRegistry) -> axum::Router {
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     build_router(state)
 }
@@ -273,6 +276,9 @@ pub fn build_test_app_with_jwt(registry: ManifestRegistry) -> axum::Router {
         jwks_json: None,
         auth_cache: AuthCache::new(),
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
     });
@@ -294,6 +300,9 @@ pub fn build_test_app_full(
         jwks_json: None,
         auth_cache: AuthCache::new(),
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
     });

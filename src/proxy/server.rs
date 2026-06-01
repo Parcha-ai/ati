@@ -57,7 +57,40 @@ pub struct ProxyState {
     /// `reqwest` connects to a different host. Greptile P0/P1 on #124.
     pub upstream_url_allowlists:
         Arc<std::sync::Mutex<std::collections::HashMap<String, Option<Vec<UpstreamAllowEntry>>>>>,
+    /// Lazy-discovered MCP `inputSchema` cache for sandbox-supplied-URL
+    /// providers (issue #135).
+    ///
+    /// For providers with `handler = "mcp"` + `mcp_url_env` set, the URL
+    /// isn't proxy-resident so we cannot discover tools at boot; operators
+    /// must declare tool *names* statically in the manifest, but the
+    /// *schemas* are gaps unless they mirror them by hand. This cache
+    /// holds schemas fetched on demand via `tools/list` against the
+    /// sandbox-supplied upstream when an `ati tool info` / `tools/list`
+    /// request asks for one and the static entry has `input_schema: None`.
+    ///
+    /// Keyed by `(provider_name, upstream_url)` so different sandboxes
+    /// pointed at different upstreams each get their own cache entry.
+    /// Value is `Option<HashMap<tool_name, inputSchema>>`:
+    ///   - `Some(map)` — fetched successfully; serve `map[tool_name]`.
+    ///   - `None` — fetched and the dial / list failed; remember the
+    ///     negative result so we don't re-attempt on every subsequent
+    ///     request. Cache lives for the process lifetime (matching the
+    ///     allowlist cache; operator hot-reload requires restart).
+    ///
+    /// Lookup never blocks a response: a discovery miss falls back to
+    /// the static `Tool.input_schema` (which is `None` in the exact case
+    /// this cache exists to handle), preserving today's behavior.
+    pub lazy_schema_cache: LazySchemaCache,
 }
+
+/// Type alias for the issue #135 lazy-schema cache. Keyed by
+/// `(provider_name, upstream_url)`. The value is `Option<map>` so the
+/// negative result (dial failed / list failed) can be cached too —
+/// avoids retrying a known-bad upstream on every subsequent request.
+/// Named so clippy's `type_complexity` lint doesn't fire on the field.
+pub type LazySchemaCache = Arc<
+    std::sync::Mutex<std::collections::HashMap<(String, String), Option<HashMap<String, Value>>>>,
+>;
 
 /// One parsed allowlist entry. Allowlist CSV entries are operator-authored
 /// URL templates like `https://parcha-tools-*.grep.ai/mcp`. We parse them
@@ -188,6 +221,132 @@ fn resolve_upstream_override(
             }
         }
     }
+}
+
+/// Issue #135 helper: extract a validated sandbox-supplied upstream URL
+/// from request headers for a given provider, or `None` if absent/rejected.
+///
+/// Wraps `resolve_upstream_override` for the REST tool-info path. REST
+/// callers can't surface a structured rejection like `/call` does
+/// (those are JSON-RPC errors); they just need "do we have a URL to
+/// discover from, yes or no". A rejected URL silently becomes `None`
+/// here — the handler will fall back to the static schema (today's
+/// behavior), which is exactly the graceful-degradation contract the
+/// issue acceptance criteria asks for.
+fn extract_upstream_url(
+    state: &ProxyState,
+    provider: &Provider,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    let header_value = headers
+        .get("x-ati-upstream-url")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    match resolve_upstream_override(state, provider, header_value) {
+        UpstreamOverride::Allow(url) => Some(url),
+        UpstreamOverride::None => None,
+        UpstreamOverride::Reject(status, msg) => {
+            tracing::debug!(
+                provider = %provider.name,
+                status = status.as_u16(),
+                reason = %msg,
+                "lazy schema discovery: upstream URL rejected, falling back to static schema"
+            );
+            None
+        }
+    }
+}
+
+/// Issue #135 helper: lazily fetch the per-tool `inputSchema` map for a
+/// sandbox-supplied-URL MCP provider whose static manifest entries declare
+/// tool names but no schemas. Results are cached per `(provider, upstream_url)`
+/// for the process lifetime — both positive (the schema map) and negative
+/// (the upstream was unreachable / the dial failed) — so a steady-state of
+/// `ati tool info` calls only pays the discovery cost once per sandbox URL.
+///
+/// Returns `None` when:
+///   - the provider isn't `handler = "mcp"` with `mcp_url_env` set (we have
+///     nothing to discover from);
+///   - no validated upstream URL is in scope for this request;
+///   - or the discovery attempt failed and the cache has the negative result.
+///
+/// Never propagates an error to the caller: a discovery miss falls back to
+/// today's behavior (return `Tool.input_schema`, which is `None` in the case
+/// this helper exists to handle), so a flaky upstream cannot turn a working
+/// `tool info` endpoint into a 5xx.
+async fn lazy_fetch_schemas(
+    state: &ProxyState,
+    provider: &Provider,
+    upstream_url: &str,
+) -> Option<HashMap<String, Value>> {
+    let key = (provider.name.clone(), upstream_url.to_string());
+
+    // Cache hit (positive or negative) — return without dialing.
+    {
+        let cache = state.lazy_schema_cache.lock().ok()?;
+        if let Some(cached) = cache.get(&key) {
+            return cached.clone();
+        }
+    }
+
+    // Cache miss: dial the upstream, run tools/list, build the schema map.
+    // We deliberately use the same `connect_with_gen` path the /call handler
+    // takes (issue #124), so allowlist semantics and transport selection
+    // stay identical — no second code path to keep in sync.
+    let discovered: Option<HashMap<String, Value>> = match mcp_client::McpClient::connect_with_gen(
+        provider,
+        &state.keyring,
+        None,
+        Some(&state.auth_cache),
+        Some(upstream_url),
+    )
+    .await
+    {
+        Ok(client) => {
+            let result = client.list_tools().await;
+            client.disconnect().await;
+            match result {
+                Ok(tools) => {
+                    let mut map = HashMap::new();
+                    for t in tools {
+                        if let Some(schema) = t.input_schema {
+                            map.insert(t.name, schema);
+                        }
+                    }
+                    Some(map)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = %provider.name,
+                        upstream = %upstream_url,
+                        error = %e,
+                        "lazy schema discovery: tools/list failed"
+                    );
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider.name,
+                upstream = %upstream_url,
+                error = %e,
+                "lazy schema discovery: MCP connect failed"
+            );
+            None
+        }
+    };
+
+    // Cache both positive and negative results to avoid re-dialing on every
+    // subsequent tool-info request — operators who fix a misconfigured
+    // upstream URL will need to restart the proxy (same constraint as the
+    // allowlist cache).
+    if let Ok(mut cache) = state.lazy_schema_cache.lock() {
+        cache.insert(key, discovered.clone());
+    }
+    discovered
 }
 
 /// Returns true iff `url`'s scheme + host + path matches at least one
@@ -1344,13 +1503,42 @@ async fn handle_mcp(
 
         "tools/list" => {
             let visible_tools = visible_tools_for_scopes(&state, &scopes);
+
+            // Issue #135: lazily discover schemas for sandbox-supplied-URL
+            // MCP providers whose static manifest entries lack input_schema.
+            // Same per-provider batching as GET /tools so a multi-tool
+            // provider only triggers one upstream tools/list per request.
+            let mut schemas_by_provider: HashMap<String, HashMap<String, Value>> = HashMap::new();
+            for (provider, tool) in visible_tools.iter() {
+                if tool.input_schema.is_some() {
+                    continue;
+                }
+                if provider.handler != "mcp" || provider.mcp_url_env.is_none() {
+                    continue;
+                }
+                if schemas_by_provider.contains_key(&provider.name) {
+                    continue;
+                }
+                let Some(url) = extract_upstream_url(&state, provider, &headers) else {
+                    continue;
+                };
+                if let Some(map) = lazy_fetch_schemas(&state, provider, &url).await {
+                    schemas_by_provider.insert(provider.name.clone(), map);
+                }
+            }
+
             let mcp_tools: Vec<Value> = visible_tools
                 .iter()
-                .map(|(_provider, tool)| {
+                .map(|(provider, tool)| {
+                    let schema = tool.input_schema.clone().or_else(|| {
+                        schemas_by_provider
+                            .get(&provider.name)
+                            .and_then(|m| m.get(&tool.name).cloned())
+                    });
                     serde_json::json!({
                         "name": tool.name,
                         "description": tool.description,
-                        "inputSchema": tool.input_schema.clone().unwrap_or(serde_json::json!({
+                        "inputSchema": schema.unwrap_or(serde_json::json!({
                             "type": "object",
                             "properties": {}
                         }))
@@ -1542,6 +1730,7 @@ fn jsonrpc_error(id: Option<Value>, code: i64, message: &str) -> (StatusCode, Js
 async fn handle_tools_list(
     State(state): State<Arc<ProxyState>>,
     claims: Option<Extension<TokenClaims>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(query): axum::extract::Query<ToolsQuery>,
 ) -> impl IntoResponse {
     tracing::debug!(
@@ -1554,7 +1743,7 @@ async fn handle_tools_list(
     let scopes = scopes_for_request(claims.as_ref(), &state);
     let all_tools = visible_tools_for_scopes(&state, &scopes);
 
-    let tools: Vec<Value> = all_tools
+    let filtered: Vec<&(&Provider, &Tool)> = all_tools
         .iter()
         .filter(|(provider, tool)| {
             if let Some(ref p) = query.provider {
@@ -1573,7 +1762,41 @@ async fn handle_tools_list(
             }
             true
         })
+        .collect();
+
+    // Issue #135: group filtered tools by provider so we run at most one
+    // `tools/list` dial per provider per request, then serve schemas from
+    // the resulting map. Without this, a 4-tool MCP provider would trigger
+    // 4 redundant discoveries on the first request. Caching helps after
+    // the first hit, but the in-request batching avoids 4 lock-and-dial
+    // cycles on a cold cache.
+    let mut schemas_by_provider: HashMap<String, HashMap<String, Value>> = HashMap::new();
+    for (provider, tool) in filtered.iter().copied() {
+        if tool.input_schema.is_some() {
+            continue;
+        }
+        if provider.handler != "mcp" || provider.mcp_url_env.is_none() {
+            continue;
+        }
+        if schemas_by_provider.contains_key(&provider.name) {
+            continue;
+        }
+        let Some(upstream_url) = extract_upstream_url(&state, provider, &headers) else {
+            continue;
+        };
+        if let Some(map) = lazy_fetch_schemas(&state, provider, &upstream_url).await {
+            schemas_by_provider.insert(provider.name.clone(), map);
+        }
+    }
+
+    let tools: Vec<Value> = filtered
+        .into_iter()
         .map(|(provider, tool)| {
+            let input_schema = tool.input_schema.clone().or_else(|| {
+                schemas_by_provider
+                    .get(&provider.name)
+                    .and_then(|m| m.get(&tool.name).cloned())
+            });
             serde_json::json!({
                 "name": tool.name,
                 "description": tool.description,
@@ -1581,7 +1804,7 @@ async fn handle_tools_list(
                 "method": format!("{:?}", tool.method),
                 "tags": tool.tags,
                 "skills": provider.skills,
-                "input_schema": tool.input_schema,
+                "input_schema": input_schema,
             })
         })
         .collect();
@@ -1593,6 +1816,7 @@ async fn handle_tools_list(
 async fn handle_tool_info(
     State(state): State<Arc<ProxyState>>,
     claims: Option<Extension<TokenClaims>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     tracing::debug!(tool = %name, "GET /tools/:name");
@@ -1621,6 +1845,13 @@ async fn handle_tool_info(
                 }
             }
 
+            // Issue #135: when the static manifest entry has no
+            // input_schema AND this is a sandbox-supplied-URL MCP
+            // provider AND the request carried a valid upstream URL,
+            // lazily discover the schema via tools/list against that
+            // upstream. Cached per (provider, url) for the process.
+            let input_schema = resolve_lazy_input_schema(&state, provider, tool, &headers).await;
+
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1632,7 +1863,7 @@ async fn handle_tool_info(
                     "tags": tool.tags,
                     "hint": tool.hint,
                     "skills": skills,
-                    "input_schema": tool.input_schema,
+                    "input_schema": input_schema,
                     "scope": tool.scope,
                 })),
             )
@@ -1642,6 +1873,35 @@ async fn handle_tool_info(
             Json(serde_json::json!({"error": format!("Tool '{name}' not found")})),
         ),
     }
+}
+
+/// Resolve the effective `input_schema` for a tool response, with the
+/// issue #135 lazy-discovery overlay. Returns the static schema when
+/// present, otherwise tries one MCP `tools/list` against the sandbox-
+/// supplied upstream (if the request carries one for this provider),
+/// otherwise falls back to `None` (today's behavior).
+async fn resolve_lazy_input_schema(
+    state: &ProxyState,
+    provider: &Provider,
+    tool: &Tool,
+    headers: &axum::http::HeaderMap,
+) -> Option<Value> {
+    // Fast path — static schema present, no discovery needed. This is the
+    // overwhelming majority of calls (every OpenAPI tool, every hand-
+    // written HTTP tool, every MCP tool that bothered to mirror the
+    // schema). The expensive path runs only for the issue #135 case:
+    // mcp_url_env-driven providers whose operators chose to NOT mirror
+    // the schema by hand.
+    if let Some(ref schema) = tool.input_schema {
+        return Some(schema.clone());
+    }
+    // Only mcp providers with mcp_url_env have a chance of discovery.
+    if provider.handler != "mcp" || provider.mcp_url_env.is_none() {
+        return None;
+    }
+    let upstream_url = extract_upstream_url(state, provider, headers)?;
+    let schemas = lazy_fetch_schemas(state, provider, &upstream_url).await?;
+    schemas.get(&tool.name).cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -2449,6 +2709,9 @@ pub async fn run(
         jwks_json,
         auth_cache: AuthCache::new(),
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
     });
