@@ -78,9 +78,10 @@ async fn mount_mcp_upstream(server: &MockServer, tools_response: serde_json::Val
 }
 
 /// Build an axum Router wired with the issue #135 manifest pattern:
-/// MCP provider with `mcp_url_env`, two statically named tools (one
-/// without schema, one without — both meant to be filled by lazy
-/// discovery), and a hostname-glob allowlist that admits the wiremock
+/// MCP provider with `mcp_url_env`, two statically named tools (both
+/// without `input_schema` so the lazy-discovery code path fires — the
+/// upstream stub then decides which tools get a schema and which stay
+/// null), and a hostname-glob allowlist that admits the wiremock
 /// server's host.
 fn build_app(upstream_host_glob: &str) -> axum::Router {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -405,6 +406,70 @@ async fn lazy_schema_cache_avoids_redundant_upstream_calls() {
     assert!(
         tools_list_count <= 1,
         "expected at most 1 upstream tools/list (cache hit on 2nd call); saw {tools_list_count}: {received:?}"
+    );
+}
+
+// ---------- Greptile #136: per-request batching short-circuits siblings ----------
+//
+// `GET /tools` lists multiple tools. For a single MCP provider with N
+// tools all needing lazy schemas, the proxy MUST dial the upstream
+// AT MOST ONCE per request — every sibling tool after the first should
+// short-circuit on `schemas_by_provider.contains_key(...)`. This is
+// true on both the success path (positive map cached) and the failure
+// path (empty-map sentinel cached); we test the success path here.
+#[tokio::test]
+async fn tools_list_batches_one_dial_per_provider_per_request() {
+    let upstream = MockServer::start().await;
+    mount_mcp_upstream(
+        &upstream,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [
+                    {
+                        "name": "parcha_tools:has_schema",
+                        "description": "",
+                        "inputSchema": {"type": "object"}
+                    },
+                    {
+                        "name": "parcha_tools:no_schema",
+                        "description": "",
+                        "inputSchema": {"type": "object", "properties": {"x": {"type": "string"}}}
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+
+    let app = build_app(HOST_GLOB);
+    let upstream_url = format!("{}/mcp", upstream.uri());
+
+    // One GET /tools, two tools needing lazy schemas, same provider.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/tools")
+        .header("X-Ati-Upstream-Url", &upstream_url)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Exactly one upstream tools/list — the second tool short-circuits on
+    // the batched provider entry, not on the negative-result cache that
+    // fires only across requests.
+    let received: Vec<_> = upstream.received_requests().await.unwrap_or_default();
+    let tools_list_count = received
+        .iter()
+        .filter(|r| {
+            let s = std::str::from_utf8(&r.body).unwrap_or("");
+            s.contains("\"tools/list\"")
+        })
+        .count();
+    assert_eq!(
+        tools_list_count, 1,
+        "expected exactly 1 upstream tools/list for a 2-tool provider in one GET /tools; saw {tools_list_count}"
     );
 }
 

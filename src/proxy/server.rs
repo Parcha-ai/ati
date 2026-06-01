@@ -1508,6 +1508,10 @@ async fn handle_mcp(
             // MCP providers whose static manifest entries lack input_schema.
             // Same per-provider batching as GET /tools so a multi-tool
             // provider only triggers one upstream tools/list per request.
+            // An entry is recorded for the provider on every decision-path
+            // (including URL-missing and discovery-failed) so the
+            // `contains_key` short-circuit fires for sibling tools.
+            // Greptile #136 finding.
             let mut schemas_by_provider: HashMap<String, HashMap<String, Value>> = HashMap::new();
             for (provider, tool) in visible_tools.iter() {
                 if tool.input_schema.is_some() {
@@ -1519,12 +1523,13 @@ async fn handle_mcp(
                 if schemas_by_provider.contains_key(&provider.name) {
                     continue;
                 }
-                let Some(url) = extract_upstream_url(&state, provider, &headers) else {
-                    continue;
+                let map = match extract_upstream_url(&state, provider, &headers) {
+                    Some(url) => lazy_fetch_schemas(&state, provider, &url)
+                        .await
+                        .unwrap_or_default(),
+                    None => HashMap::new(),
                 };
-                if let Some(map) = lazy_fetch_schemas(&state, provider, &url).await {
-                    schemas_by_provider.insert(provider.name.clone(), map);
-                }
+                schemas_by_provider.insert(provider.name.clone(), map);
             }
 
             let mcp_tools: Vec<Value> = visible_tools
@@ -1770,6 +1775,13 @@ async fn handle_tools_list(
     // 4 redundant discoveries on the first request. Caching helps after
     // the first hit, but the in-request batching avoids 4 lock-and-dial
     // cycles on a cold cache.
+    //
+    // We record an entry for the provider on EVERY path through the per-
+    // provider decision (including the URL-missing and discovery-failed
+    // paths) so the `contains_key` short-circuit fires for every sibling
+    // tool. An empty `HashMap` value is the sentinel for "tried and got
+    // nothing"; the lookup loop below treats it the same as a true miss.
+    // Greptile #136 finding.
     let mut schemas_by_provider: HashMap<String, HashMap<String, Value>> = HashMap::new();
     for (provider, tool) in filtered.iter().copied() {
         if tool.input_schema.is_some() {
@@ -1781,12 +1793,13 @@ async fn handle_tools_list(
         if schemas_by_provider.contains_key(&provider.name) {
             continue;
         }
-        let Some(upstream_url) = extract_upstream_url(&state, provider, &headers) else {
-            continue;
+        let map = match extract_upstream_url(&state, provider, &headers) {
+            Some(upstream_url) => lazy_fetch_schemas(&state, provider, &upstream_url)
+                .await
+                .unwrap_or_default(),
+            None => HashMap::new(),
         };
-        if let Some(map) = lazy_fetch_schemas(&state, provider, &upstream_url).await {
-            schemas_by_provider.insert(provider.name.clone(), map);
-        }
+        schemas_by_provider.insert(provider.name.clone(), map);
     }
 
     let tools: Vec<Value> = filtered
