@@ -581,6 +581,33 @@ pub fn capture_error_with_scope(
         if class.is_quota_class() {
             return;
         }
+        // Build the exception event manually so we can pin its `message`
+        // to the same class literal the tracing-bridge event uses.
+        //
+        // Why this matters: `report_upstream_error` fires a tracing event
+        // whose title is the class literal (e.g. `"upstream bad_input"`),
+        // and Sentry groups it by that title under the shared fingerprint.
+        // If we let `sentry::capture_error` build the second event with
+        // its default behavior, Sentry sets the new event's title from
+        // `exception[0].value` (the underlying error's Display, like
+        // `"HttpError: ApiError { status: 400, … }"`). Sentry's "latest
+        // event wins for title" rule then drifts the operator-visible
+        // bucket title away from the clean class literal — the headline
+        // improvement the PR is built around (Greptile P2 on PR #137).
+        //
+        // Fix: set `Event.message` to the class literal up front. The
+        // exception chain is still attached, the fingerprint still
+        // groups, and the title stays stable.
+        let class_literal = match class {
+            UpstreamErrorClass::AuthError => "upstream auth_error",
+            UpstreamErrorClass::BadInput => "upstream bad_input",
+            UpstreamErrorClass::Quota => "upstream quota",
+            UpstreamErrorClass::RateLimited => "upstream rate_limited",
+            UpstreamErrorClass::ServerError => "upstream server_error",
+            UpstreamErrorClass::TransportError => "upstream transport_error",
+        };
+        let mut event = sentry::event_from_error(err);
+        event.message = Some(class_literal.to_string());
         with_upstream_scope(
             provider,
             operation_id,
@@ -590,26 +617,41 @@ pub fn capture_error_with_scope(
             &msg_short,
             class,
             || {
-                sentry::capture_error(err);
+                sentry::capture_event(event);
             },
         );
     }
 }
 
-/// Attach JWT identity (sub, sandbox_id, job_id, organization, audience)
-/// to the current Sentry scope so every event raised during this request
-/// is searchable by those facets. Set once at the start of `/call`,
-/// `/mcp`, and `/help` handlers.
+/// Attach JWT identity (sub, sandbox_id, job_id) to the current Sentry
+/// scope so every event raised during this request is searchable by
+/// those facets. Set once at the start of `/call`, `/mcp`, and `/help`
+/// handlers.
 ///
-/// Sentry's `configure_scope` mutates the per-thread scope; subsequent
-/// `with_scope` pushes layer on top without losing what we set here.
-/// Cleared automatically when the tokio worker reaches the next request
-/// because Sentry's scope is request-keyed by the `with_scope` blocks
-/// the report helpers push.
+/// **Tags MUST be cleared, not just conditionally set.** `configure_scope`
+/// mutates the thread-local hub scope, and tokio reuses worker threads
+/// across requests. If request A had `sandbox_id = "alice"` and request
+/// B on the same worker thread has no `sandbox_id` in its JWT, a naive
+/// `if let Some(id) = ... { set_tag(...) }` leaves "alice" stamped on
+/// every event raised during request B — a multi-tenant data bleed
+/// flagged by Greptile P1 on PR #137. The fix: unconditionally
+/// `remove_tag` for every optional field at the top of the helper, then
+/// set the ones we actually have.
+///
+/// `sub` is the only required JWT claim (auth middleware would reject
+/// the request otherwise), so we always set it. `user` is similarly
+/// always present.
 #[allow(unused_variables)]
 pub fn set_jwt_sentry_scope(claims: &TokenClaims) {
     #[cfg(feature = "sentry")]
     sentry::configure_scope(|scope| {
+        // Clear optional tags from any prior request that ran on this
+        // worker thread before stamping the new request's identity.
+        // remove_tag is a no-op if the tag isn't present, so it's safe
+        // to call on cold workers too.
+        scope.remove_tag("sandbox_id");
+        scope.remove_tag("job_id");
+
         scope.set_tag("sub", claims.sub.as_str());
         if let Some(ref id) = claims.sandbox_id {
             scope.set_tag("sandbox_id", id.as_str());
@@ -619,7 +661,10 @@ pub fn set_jwt_sentry_scope(claims: &TokenClaims) {
         }
         // Sentry's `user.id` is the standard slot for the auth subject —
         // populating it lets the issue page show "users affected" counts
-        // and gives the search UI a first-class facet.
+        // and gives the search UI a first-class facet. set_user(Some(..))
+        // overwrites any prior value so no `set_user(None)` clear is
+        // needed (unlike the optional tags above which would silently
+        // bleed through).
         scope.set_user(Some(sentry::User {
             id: Some(claims.sub.clone()),
             ..Default::default()
@@ -1018,5 +1063,215 @@ mod tests {
     #[test]
     fn truncate_short_message_untouched() {
         assert_eq!(scrub_and_truncate("short", 100), "short");
+    }
+
+    // --- Greptile P2 on #137: title pinning on the capture_error path ---
+
+    /// Mirrors what `capture_error_with_scope` does internally to build
+    /// the event it captures. Test surface for the title-pinning fix:
+    /// without setting `message`, the issue title would drift to the
+    /// raw error Display and overwrite the clean class literal that
+    /// `report_upstream_error` is built around.
+    #[cfg(feature = "sentry")]
+    fn build_captured_event_for_test(
+        err: &(dyn std::error::Error + 'static),
+        class: UpstreamErrorClass,
+    ) -> sentry::protocol::Event<'static> {
+        let class_literal = match class {
+            UpstreamErrorClass::AuthError => "upstream auth_error",
+            UpstreamErrorClass::BadInput => "upstream bad_input",
+            UpstreamErrorClass::Quota => "upstream quota",
+            UpstreamErrorClass::RateLimited => "upstream rate_limited",
+            UpstreamErrorClass::ServerError => "upstream server_error",
+            UpstreamErrorClass::TransportError => "upstream transport_error",
+        };
+        let mut event = sentry::event_from_error(err);
+        event.message = Some(class_literal.to_string());
+        event
+    }
+
+    #[cfg(feature = "sentry")]
+    #[test]
+    fn captured_event_message_pins_class_literal_not_error_display() {
+        // The user-visible bug Greptile flagged: `sentry::event_from_error`
+        // leaves `Event.message = None`, and Sentry's UI falls back to
+        // the underlying error's Display for the issue title. Two events
+        // share the same fingerprint, but the second one's Display
+        // clobbers the first's clean class literal in the title bar.
+        //
+        // Fix shape: pin `Event.message` to the class literal BEFORE
+        // capturing the event. The exception block is unchanged, so the
+        // chain still ships; only the title is pinned.
+        let inner = std::io::Error::other("operation timed out");
+        let event = build_captured_event_for_test(&inner, UpstreamErrorClass::BadInput);
+        assert_eq!(event.message.as_deref(), Some("upstream bad_input"));
+        // Sanity: the exception chain is still there (the whole point of
+        // calling `capture_error` in the first place).
+        assert!(
+            !event.exception.is_empty(),
+            "expected the exception block to be populated by event_from_error"
+        );
+        // And the inner error's Display is preserved in the exception
+        // value, just not bleeding into the title field.
+        let exc = event
+            .exception
+            .values
+            .first()
+            .expect("at least one exception");
+        assert_eq!(exc.value.as_deref(), Some("operation timed out"));
+    }
+
+    // --- Greptile P1 on #137: set_jwt_sentry_scope tag-clear regression ---
+    //
+    // Async runtime workers are reused across requests, and
+    // `sentry::configure_scope` mutates the per-thread hub permanently.
+    // Without an explicit `remove_tag`, a prior request's `sandbox_id` /
+    // `job_id` would bleed into the next request on the same worker
+    // thread — a multi-tenant data leak. These tests use sentry's test
+    // transport to inspect actual emitted events.
+    #[cfg(feature = "sentry")]
+    #[test]
+    fn set_jwt_sentry_scope_clears_stale_sandbox_id_between_requests() {
+        let events = sentry::test::with_captured_events(|| {
+            // Request A: full identity.
+            let claims_a = TokenClaims {
+                iss: None,
+                sub: "agent_alice".into(),
+                aud: "ati-proxy".into(),
+                iat: 0,
+                exp: 0,
+                jti: None,
+                scope: String::new(),
+                ati: None,
+                sandbox_id: Some("sandbox_alpha".into()),
+                job_id: Some("job_42".into()),
+            };
+            set_jwt_sentry_scope(&claims_a);
+            sentry::capture_message("during request A", sentry::Level::Error);
+
+            // Request B on the same worker thread: claims have no
+            // sandbox_id and no job_id. The stale values from request
+            // A MUST NOT bleed onto request B's events.
+            let claims_b = TokenClaims {
+                iss: None,
+                sub: "agent_bob".into(),
+                aud: "ati-proxy".into(),
+                iat: 0,
+                exp: 0,
+                jti: None,
+                scope: String::new(),
+                ati: None,
+                sandbox_id: None,
+                job_id: None,
+            };
+            set_jwt_sentry_scope(&claims_b);
+            sentry::capture_message("during request B", sentry::Level::Error);
+        });
+
+        assert_eq!(events.len(), 2, "expected two captured events");
+        let a = events
+            .iter()
+            .find(|e| e.message.as_deref() == Some("during request A"))
+            .expect("event A");
+        let b = events
+            .iter()
+            .find(|e| e.message.as_deref() == Some("during request B"))
+            .expect("event B");
+
+        // Request A's event has the full identity.
+        assert_eq!(a.tags.get("sub").map(String::as_str), Some("agent_alice"));
+        assert_eq!(
+            a.tags.get("sandbox_id").map(String::as_str),
+            Some("sandbox_alpha")
+        );
+        assert_eq!(a.tags.get("job_id").map(String::as_str), Some("job_42"));
+
+        // Request B's event has ONLY the sub it carried. No bleed.
+        assert_eq!(b.tags.get("sub").map(String::as_str), Some("agent_bob"));
+        assert!(
+            !b.tags.contains_key("sandbox_id"),
+            "sandbox_id from prior request bled through: {:?}",
+            b.tags.get("sandbox_id")
+        );
+        assert!(
+            !b.tags.contains_key("job_id"),
+            "job_id from prior request bled through: {:?}",
+            b.tags.get("job_id")
+        );
+    }
+
+    #[cfg(feature = "sentry")]
+    #[test]
+    fn set_jwt_sentry_scope_replaces_user_between_requests() {
+        // `set_user(Some(..))` always overwrites the prior value, so a
+        // dedicated `set_user(None)` clear isn't needed. This test pins
+        // that invariant so future refactors don't silently break it.
+        fn claims_for(sub: &str) -> TokenClaims {
+            TokenClaims {
+                iss: None,
+                sub: sub.into(),
+                aud: "ati-proxy".into(),
+                iat: 0,
+                exp: 0,
+                jti: None,
+                scope: String::new(),
+                ati: None,
+                sandbox_id: None,
+                job_id: None,
+            }
+        }
+        let events = sentry::test::with_captured_events(|| {
+            set_jwt_sentry_scope(&claims_for("agent_alice"));
+            sentry::capture_message("A", sentry::Level::Error);
+
+            set_jwt_sentry_scope(&claims_for("agent_bob"));
+            sentry::capture_message("B", sentry::Level::Error);
+        });
+
+        let a = events
+            .iter()
+            .find(|e| e.message.as_deref() == Some("A"))
+            .unwrap();
+        let b = events
+            .iter()
+            .find(|e| e.message.as_deref() == Some("B"))
+            .unwrap();
+        assert_eq!(
+            a.user.as_ref().and_then(|u| u.id.as_deref()),
+            Some("agent_alice")
+        );
+        assert_eq!(
+            b.user.as_ref().and_then(|u| u.id.as_deref()),
+            Some("agent_bob"),
+            "Request B's user.id should be its own sub, not Alice's stale value"
+        );
+    }
+
+    #[cfg(feature = "sentry")]
+    #[test]
+    fn captured_event_message_pins_every_class() {
+        // Lock in the class → literal mapping so future renames of the
+        // tracing-event literals don't silently desync with the
+        // capture-error path.
+        let err = std::io::Error::other("x");
+        let cases = [
+            (UpstreamErrorClass::AuthError, "upstream auth_error"),
+            (UpstreamErrorClass::BadInput, "upstream bad_input"),
+            (UpstreamErrorClass::Quota, "upstream quota"),
+            (UpstreamErrorClass::RateLimited, "upstream rate_limited"),
+            (UpstreamErrorClass::ServerError, "upstream server_error"),
+            (
+                UpstreamErrorClass::TransportError,
+                "upstream transport_error",
+            ),
+        ];
+        for (class, expected_title) in cases {
+            let event = build_captured_event_for_test(&err, class);
+            assert_eq!(
+                event.message.as_deref(),
+                Some(expected_title),
+                "class {class:?} should pin title to {expected_title:?}"
+            );
+        }
     }
 }
