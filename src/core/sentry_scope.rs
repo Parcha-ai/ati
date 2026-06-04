@@ -1,22 +1,129 @@
 //! Sentry scope helpers for proxy-side upstream error classification.
 //!
-//! Adds structured tags and a per-{provider, operation_id, upstream_status}
-//! fingerprint so each root-cause bucket becomes a distinct Sentry issue
-//! instead of one "ati command failed" mega-bucket. Also routes log level
-//! by status class (info/warn/error).
+//! Adds structured tags + a class-based dynamic event title so each error
+//! class becomes a distinct Sentry issue bucket instead of every failure
+//! collapsing into one generic "upstream server error" bucket. Also routes
+//! log level by status class (info/warn/error).
 //!
-//! See issue #81 for context.
+//! Title strategy: Sentry's tracing bridge maps `tracing::error!` messages
+//! to event titles, and Sentry groups events by title when no fingerprint
+//! is set. We dispatch the report into 5 buckets — `auth_error`,
+//! `bad_input`, `rate_limited`, `server_error`, `transport_error` — each
+//! with its own literal-string `tracing::error!`. Provider/operation/
+//! status live as tags so each bucket is filterable per-provider without
+//! splitting the buckets per-provider.
+//!
+//! See issue #81 for the original context; the redesign closes the
+//! "Sentry errors really fucking suck" report — generic titles, missing
+//! source chains, lying tags.
 
-/// Split a proxy tool_name (`"provider:operation_id"`) into its parts.
-/// Tool names missing a separator are treated as having an unknown operation.
-pub fn split_tool_name(tool_name: &str) -> (String, String) {
-    match tool_name.split_once(crate::core::manifest::TOOL_SEP) {
-        Some((p, op)) if !p.is_empty() && !op.is_empty() => (p.to_string(), op.to_string()),
-        // Preserve the bare provider prefix (no trailing colon) when op is
-        // missing or empty, so Sentry tags stay clean.
-        Some((p, _)) if !p.is_empty() => (p.to_string(), "unknown".to_string()),
-        _ => (tool_name.to_string(), "unknown".to_string()),
+use crate::core::jwt::TokenClaims;
+
+/// Coarse classification of an upstream failure. Each class maps to a
+/// distinct Sentry bucket via a unique literal `tracing::error!` /
+/// `tracing::warn!` message — that's how grouping survives across
+/// providers without collapsing every error into one mega-bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamErrorClass {
+    /// 401 / 403 / 407 — credentials missing, revoked, or insufficient.
+    AuthError,
+    /// 400 / 404 (non-no-records) / 422 — request shape was wrong.
+    BadInput,
+    /// 402 — out of credit; not actionable code-side. Always Warning.
+    Quota,
+    /// 429 — rate limited. Often actionable as a retry; Warning level.
+    RateLimited,
+    /// 5xx — upstream service broke.
+    ServerError,
+    /// 0 — no HTTP status (DNS, TCP, TLS, MCP transport error, etc.).
+    TransportError,
+}
+
+impl UpstreamErrorClass {
+    pub fn classify(upstream_status: u16) -> Self {
+        match upstream_status {
+            401 | 403 | 407 => Self::AuthError,
+            400 | 404 | 422 => Self::BadInput,
+            402 => Self::Quota,
+            429 => Self::RateLimited,
+            500..=599 => Self::ServerError,
+            _ => Self::TransportError,
+        }
     }
+
+    /// Short, stable label used in Sentry tags + event extras.
+    pub fn as_tag(self) -> &'static str {
+        match self {
+            Self::AuthError => "auth_error",
+            Self::BadInput => "bad_input",
+            Self::Quota => "quota",
+            Self::RateLimited => "rate_limited",
+            Self::ServerError => "server_error",
+            Self::TransportError => "transport_error",
+        }
+    }
+
+    /// True for classes that should NOT page on-call. The Sentry
+    /// `before_send` hook drops these silently to keep the issue list
+    /// useful — they still appear as breadcrumbs inside the next real
+    /// event so context isn't lost.
+    pub fn is_quota_class(self) -> bool {
+        matches!(self, Self::Quota | Self::RateLimited)
+    }
+}
+
+/// Split a proxy tool reference into `(provider, operation_id)`.
+///
+/// Three input shapes are common in the wild:
+///   - `"finnhub:price_target"` — explicit `provider:op` (recent OpenAPI tools).
+///   - `"pdl_person_enrichment"` — flat, no separator, prefixed with
+///     provider name (PDL, datalastic, several others).
+///   - `"web_search"` — flat, no separator, no prefix (`parallel` MCP-ish).
+///
+/// We always know the resolved `provider_name` at the call site because
+/// the registry told us. Use that as the source of truth, then derive
+/// the operation by stripping a `{provider}:` or `{provider}_` prefix
+/// when present. Never fabricate "unknown" — if we can't split cleanly,
+/// the operation tag IS the tool_name verbatim (still useful for grouping
+/// and search). The old "unknown" sentinel made every flat-named tool
+/// land in one mega-bucket.
+pub fn provider_and_op(provider_name: &str, tool_name: &str) -> (String, String) {
+    // Explicit `provider:op` wins regardless of provider_name (handles the
+    // colon-namespaced OpenAPI naming).
+    if let Some((p, op)) = tool_name.split_once(crate::core::manifest::TOOL_SEP) {
+        if !p.is_empty() && !op.is_empty() {
+            return (p.to_string(), op.to_string());
+        }
+    }
+    // Flat name — try to strip the provider as a colon-or-underscore prefix.
+    // Underscore is the convention PDL uses (`pdl_person_enrichment` →
+    // operation = `person_enrichment`).
+    if let Some(rest) = tool_name
+        .strip_prefix(&format!("{provider_name}:"))
+        .or_else(|| tool_name.strip_prefix(&format!("{provider_name}_")))
+    {
+        if !rest.is_empty() {
+            return (provider_name.to_string(), rest.to_string());
+        }
+    }
+    // No prefix — the tool_name IS the operation under this provider.
+    (provider_name.to_string(), tool_name.to_string())
+}
+
+/// Back-compat shim for call sites that still don't know the resolved
+/// provider name. New code should call `provider_and_op` directly.
+///
+/// Falls back to the old colon-only split for `provider:op` style names.
+/// For flat tool names with no separator, returns the tool name as the
+/// operation (NOT "unknown" — never lie about what failed) and an empty
+/// provider, which the caller is expected to overwrite.
+pub fn split_tool_name(tool_name: &str) -> (String, String) {
+    if let Some((p, op)) = tool_name.split_once(crate::core::manifest::TOOL_SEP) {
+        if !p.is_empty() && !op.is_empty() {
+            return (p.to_string(), op.to_string());
+        }
+    }
+    (String::new(), tool_name.to_string())
 }
 
 /// Scrub obvious PII patterns (UUIDs, emails, IPv4s, long hex tokens) from a
@@ -305,13 +412,22 @@ pub fn is_no_records_body(error_type: Option<&str>, error_message: Option<&str>)
     false
 }
 
-/// Attach structured tags + fingerprint to the current Sentry scope and emit a
-/// tracing event at the appropriate level for the given upstream status class.
+/// Attach structured tags + class-based dynamic title to the current Sentry
+/// scope and emit a tracing event at the appropriate level for the upstream
+/// status class.
 ///
-/// Levels:
-///   402 / 403 / 422 → warn (expected client-side upstream error, Sentry event
-///                            at warning level for filtering, does not page)
-///   all others      → error (includes 5xx, network failures, unknown)
+/// Buckets (event title literal):
+///   - `auth_error`      → 401, 403, 407 (Error)
+///   - `bad_input`       → 400, 404 (non-no-records), 422 (Error)
+///   - `quota`           → 402 (Warning; dropped by `before_send`)
+///   - `rate_limited`    → 429 (Warning; dropped by `before_send`)
+///   - `server_error`    → 5xx (Error)
+///   - `transport_error` → 0 / unknown (Error)
+///
+/// Each title is a distinct literal so `sentry-tracing` creates a separate
+/// Sentry issue per class. The (provider, operation_id, status) live as
+/// tags so each bucket stays per-provider searchable without splitting
+/// into one bucket per provider.
 ///
 /// When the `sentry` feature is off, emits the tracing event only.
 pub fn report_upstream_error(
@@ -325,12 +441,15 @@ pub fn report_upstream_error(
     let msg_short = error_message
         .map(|m| scrub_and_truncate(m, 140))
         .unwrap_or_default();
+    let class = UpstreamErrorClass::classify(upstream_status);
 
     // `sentry::with_scope` pushes a temporary scope for the duration of the
     // closure, then pops it — so tags never leak across requests running on
     // the same tokio worker thread. The tracing macros inside the closure
-    // are picked up by `sentry_tracing::layer()` and emitted with these tags
-    // attached.
+    // are picked up by `sentry_tracing::layer()` and emitted with these
+    // tags attached. `class` becomes its own tag so operators can filter
+    // a single bucket by error shape without grouping each subclass into
+    // its own issue.
     with_upstream_scope(
         provider,
         operation_id,
@@ -338,40 +457,227 @@ pub fn report_upstream_error(
         proxy_status,
         error_type,
         &msg_short,
-        || match upstream_status {
-            402 | 403 | 422 => {
-                tracing::warn!(
-                    provider,
-                    operation_id,
-                    upstream_status,
-                    proxy_status,
-                    error_type = error_type.unwrap_or(""),
-                    msg = %msg_short,
-                    "upstream client error"
-                );
-                // sentry-tracing maps warn → breadcrumb by default. We want an
-                // actual event for warn-tier upstream errors so operators can
-                // search by tag — capture explicitly at Warning level.
-                #[cfg(feature = "sentry")]
-                sentry::capture_message(
-                    &format!("upstream client error ({upstream_status}) {provider}:{operation_id}"),
-                    sentry::Level::Warning,
-                );
-            }
-            _ => tracing::error!(
+        class,
+        || {
+            emit_classified(
+                class,
                 provider,
                 operation_id,
                 upstream_status,
                 proxy_status,
-                error_type = error_type.unwrap_or(""),
-                msg = %msg_short,
-                "upstream server error"
-            ),
+                error_type,
+                &msg_short,
+            )
         },
     );
 }
 
+/// Each arm carries its own LITERAL `tracing::*!` message because the
+/// `sentry-tracing` bridge maps the literal to the Sentry event title,
+/// and Sentry groups events by title. Five literals → five distinct
+/// Sentry issue buckets. All the variable detail lives in fields.
+fn emit_classified(
+    class: UpstreamErrorClass,
+    provider: &str,
+    operation_id: &str,
+    upstream_status: u16,
+    proxy_status: u16,
+    error_type: Option<&str>,
+    msg_short: &str,
+) {
+    let error_type = error_type.unwrap_or("");
+    match class {
+        UpstreamErrorClass::AuthError => tracing::error!(
+            provider,
+            operation_id,
+            upstream_status,
+            proxy_status,
+            class = class.as_tag(),
+            error_type,
+            msg = %msg_short,
+            "upstream auth_error"
+        ),
+        UpstreamErrorClass::BadInput => tracing::error!(
+            provider,
+            operation_id,
+            upstream_status,
+            proxy_status,
+            class = class.as_tag(),
+            error_type,
+            msg = %msg_short,
+            "upstream bad_input"
+        ),
+        UpstreamErrorClass::Quota => tracing::warn!(
+            provider,
+            operation_id,
+            upstream_status,
+            proxy_status,
+            class = class.as_tag(),
+            error_type,
+            msg = %msg_short,
+            "upstream quota"
+        ),
+        UpstreamErrorClass::RateLimited => tracing::warn!(
+            provider,
+            operation_id,
+            upstream_status,
+            proxy_status,
+            class = class.as_tag(),
+            error_type,
+            msg = %msg_short,
+            "upstream rate_limited"
+        ),
+        UpstreamErrorClass::ServerError => tracing::error!(
+            provider,
+            operation_id,
+            upstream_status,
+            proxy_status,
+            class = class.as_tag(),
+            error_type,
+            msg = %msg_short,
+            "upstream server_error"
+        ),
+        UpstreamErrorClass::TransportError => tracing::error!(
+            provider,
+            operation_id,
+            upstream_status,
+            proxy_status,
+            class = class.as_tag(),
+            error_type,
+            msg = %msg_short,
+            "upstream transport_error"
+        ),
+    }
+}
+
+/// Attach the structured Rust error (with its full `source()` chain) to
+/// the current Sentry scope and capture it as an exception event. This
+/// is what gives the issue page a real "Exception" block with the
+/// reqwest / `HttpError` / `McpError` source chain — without this, all
+/// Sentry sees is the tracing-bridge's flat title + tags.
+///
+/// Pair with `report_upstream_error`: that one creates the
+/// titled/grouped issue, this one attaches the structured context.
+/// When the `sentry` feature is off, this is a no-op.
+#[allow(unused_variables)]
+pub fn capture_error_with_scope(
+    err: &(dyn std::error::Error + 'static),
+    provider: &str,
+    operation_id: &str,
+    upstream_status: u16,
+    proxy_status: u16,
+    error_type: Option<&str>,
+    error_message: Option<&str>,
+) {
+    #[cfg(feature = "sentry")]
+    {
+        let msg_short = error_message
+            .map(|m| scrub_and_truncate(m, 140))
+            .unwrap_or_default();
+        let class = UpstreamErrorClass::classify(upstream_status);
+        // Skip quota / rate-limit classes — they're already dropped by
+        // before_send and we don't want to spend the quota encoding the
+        // backtrace just to throw it away.
+        if class.is_quota_class() {
+            return;
+        }
+        // Build the exception event manually so we can pin its `message`
+        // to the same class literal the tracing-bridge event uses.
+        //
+        // Why this matters: `report_upstream_error` fires a tracing event
+        // whose title is the class literal (e.g. `"upstream bad_input"`),
+        // and Sentry groups it by that title under the shared fingerprint.
+        // If we let `sentry::capture_error` build the second event with
+        // its default behavior, Sentry sets the new event's title from
+        // `exception[0].value` (the underlying error's Display, like
+        // `"HttpError: ApiError { status: 400, … }"`). Sentry's "latest
+        // event wins for title" rule then drifts the operator-visible
+        // bucket title away from the clean class literal — the headline
+        // improvement the PR is built around (Greptile P2 on PR #137).
+        //
+        // Fix: set `Event.message` to the class literal up front. The
+        // exception chain is still attached, the fingerprint still
+        // groups, and the title stays stable.
+        let class_literal = match class {
+            UpstreamErrorClass::AuthError => "upstream auth_error",
+            UpstreamErrorClass::BadInput => "upstream bad_input",
+            UpstreamErrorClass::Quota => "upstream quota",
+            UpstreamErrorClass::RateLimited => "upstream rate_limited",
+            UpstreamErrorClass::ServerError => "upstream server_error",
+            UpstreamErrorClass::TransportError => "upstream transport_error",
+        };
+        let mut event = sentry::event_from_error(err);
+        event.message = Some(class_literal.to_string());
+        with_upstream_scope(
+            provider,
+            operation_id,
+            upstream_status,
+            proxy_status,
+            error_type,
+            &msg_short,
+            class,
+            || {
+                sentry::capture_event(event);
+            },
+        );
+    }
+}
+
+/// Attach JWT identity (sub, sandbox_id, job_id) to the current Sentry
+/// scope so every event raised during this request is searchable by
+/// those facets. Set once at the start of `/call`, `/mcp`, and `/help`
+/// handlers.
+///
+/// **Tags MUST be cleared, not just conditionally set.** `configure_scope`
+/// mutates the thread-local hub scope, and tokio reuses worker threads
+/// across requests. If request A had `sandbox_id = "alice"` and request
+/// B on the same worker thread has no `sandbox_id` in its JWT, a naive
+/// `if let Some(id) = ... { set_tag(...) }` leaves "alice" stamped on
+/// every event raised during request B — a multi-tenant data bleed
+/// flagged by Greptile P1 on PR #137. The fix: unconditionally
+/// `remove_tag` for every optional field at the top of the helper, then
+/// set the ones we actually have.
+///
+/// `sub` is the only required JWT claim (auth middleware would reject
+/// the request otherwise), so we always set it. `user` is similarly
+/// always present.
+#[allow(unused_variables)]
+pub fn set_jwt_sentry_scope(claims: &TokenClaims) {
+    #[cfg(feature = "sentry")]
+    sentry::configure_scope(|scope| {
+        // Clear optional tags from any prior request that ran on this
+        // worker thread before stamping the new request's identity.
+        // remove_tag is a no-op if the tag isn't present, so it's safe
+        // to call on cold workers too.
+        scope.remove_tag("sandbox_id");
+        scope.remove_tag("job_id");
+
+        scope.set_tag("sub", claims.sub.as_str());
+        if let Some(ref id) = claims.sandbox_id {
+            scope.set_tag("sandbox_id", id.as_str());
+        }
+        if let Some(ref id) = claims.job_id {
+            scope.set_tag("job_id", id.as_str());
+        }
+        // Sentry's `user.id` is the standard slot for the auth subject —
+        // populating it lets the issue page show "users affected" counts
+        // and gives the search UI a first-class facet. set_user(Some(..))
+        // overwrites any prior value so no `set_user(None)` clear is
+        // needed (unlike the optional tags above which would silently
+        // bleed through).
+        scope.set_user(Some(sentry::User {
+            id: Some(claims.sub.clone()),
+            ..Default::default()
+        }));
+    });
+}
+
+// 8 parameters by design: each is a distinct Sentry tag value resolved
+// at the call site. Bundling into a struct would just move the noise
+// without removing it, and the helper is private. Same allow on the
+// no-sentry stub below for signature parity.
 #[cfg(feature = "sentry")]
+#[allow(clippy::too_many_arguments)]
 fn with_upstream_scope<F: FnOnce()>(
     provider: &str,
     operation_id: &str,
@@ -379,16 +685,19 @@ fn with_upstream_scope<F: FnOnce()>(
     proxy_status: u16,
     error_type: Option<&str>,
     msg_short: &str,
+    class: UpstreamErrorClass,
     body: F,
 ) {
     let upstream_s = upstream_status.to_string();
     let proxy_s = proxy_status.to_string();
+    let class_tag = class.as_tag();
     sentry::with_scope(
         |scope| {
             scope.set_tag("provider", provider);
             scope.set_tag("operation_id", operation_id);
             scope.set_tag("upstream_status", &upstream_s);
             scope.set_tag("proxy_status", &proxy_s);
+            scope.set_tag("upstream_error_class", class_tag);
             if let Some(t) = error_type {
                 scope.set_tag("upstream_error_type", t);
             }
@@ -398,12 +707,18 @@ fn with_upstream_scope<F: FnOnce()>(
                     serde_json::Value::String(msg_short.to_string()),
                 );
             }
+            // Fingerprint keys on the error CLASS, not the upstream status,
+            // so a provider that returns 502 vs 504 doesn't fork into two
+            // buckets. Combined with the per-class literal title, this
+            // gives one issue per (provider, operation, class) — fine-
+            // grained enough to alert on a specific tool going bad but
+            // not so fine that every transient blip is a new issue.
             scope.set_fingerprint(Some(
                 [
                     "ati.proxy.upstream_error",
                     provider,
                     operation_id,
-                    &upstream_s,
+                    class_tag,
                 ]
                 .as_slice(),
             ));
@@ -413,6 +728,7 @@ fn with_upstream_scope<F: FnOnce()>(
 }
 
 #[cfg(not(feature = "sentry"))]
+#[allow(clippy::too_many_arguments)]
 fn with_upstream_scope<F: FnOnce()>(
     _provider: &str,
     _operation_id: &str,
@@ -420,6 +736,7 @@ fn with_upstream_scope<F: FnOnce()>(
     _proxy_status: u16,
     _error_type: Option<&str>,
     _msg_short: &str,
+    _class: UpstreamErrorClass,
     body: F,
 ) {
     body();
@@ -429,8 +746,62 @@ fn with_upstream_scope<F: FnOnce()>(
 mod tests {
     use super::*;
 
+    // --- provider_and_op: the path call sites should actually use ---
+
     #[test]
-    fn split_tool_name_ok() {
+    fn provider_and_op_explicit_colon() {
+        assert_eq!(
+            provider_and_op("finnhub", "finnhub:price_target"),
+            ("finnhub".into(), "price_target".into())
+        );
+    }
+
+    #[test]
+    fn provider_and_op_strips_underscore_prefix() {
+        // The bug from the user's screenshot: PDL ships flat tool names
+        // like `pdl_person_enrichment`. The fix peels the provider as a
+        // `{provider}_` prefix when present.
+        assert_eq!(
+            provider_and_op("pdl", "pdl_person_enrichment"),
+            ("pdl".into(), "person_enrichment".into())
+        );
+    }
+
+    #[test]
+    fn provider_and_op_strips_colon_prefix() {
+        assert_eq!(
+            provider_and_op("github", "github:search_repositories"),
+            ("github".into(), "search_repositories".into())
+        );
+    }
+
+    #[test]
+    fn provider_and_op_no_prefix_keeps_tool_name() {
+        // No prefix to strip — operation is the tool name verbatim. This
+        // is the correct behavior; the OLD code returned "unknown" here,
+        // which clumped every prefixless-tool failure into one mega-
+        // bucket and forced the on-call to read the body to find out
+        // which tool failed.
+        assert_eq!(
+            provider_and_op("parallel", "web_search"),
+            ("parallel".into(), "web_search".into())
+        );
+    }
+
+    #[test]
+    fn provider_and_op_empty_op_after_strip_keeps_tool_name() {
+        // Edge case: `pdl_` — stripping leaves an empty operation, so we
+        // keep the tool_name as-is to avoid generating empty tags.
+        assert_eq!(
+            provider_and_op("pdl", "pdl_"),
+            ("pdl".into(), "pdl_".into())
+        );
+    }
+
+    // --- split_tool_name back-compat shim (no longer fabricates "unknown") ---
+
+    #[test]
+    fn split_tool_name_colon_form() {
         assert_eq!(
             split_tool_name("finnhub:price_target"),
             ("finnhub".into(), "price_target".into())
@@ -438,18 +809,103 @@ mod tests {
     }
 
     #[test]
-    fn split_tool_name_missing_op() {
+    fn split_tool_name_flat_returns_tool_name_as_op() {
+        // The OLD behavior was `("bare_tool", "unknown")` — that lied
+        // about what operation failed. New behavior keeps the tool name
+        // as the op; the caller is expected to overwrite the empty
+        // provider with the registry-resolved name.
         assert_eq!(
             split_tool_name("bare_tool"),
-            ("bare_tool".into(), "unknown".into())
+            ("".into(), "bare_tool".into())
+        );
+    }
+
+    // --- UpstreamErrorClass: classification ---
+
+    #[test]
+    fn classify_400_is_bad_input() {
+        assert_eq!(
+            UpstreamErrorClass::classify(400),
+            UpstreamErrorClass::BadInput
+        );
+        assert_eq!(
+            UpstreamErrorClass::classify(404),
+            UpstreamErrorClass::BadInput
+        );
+        assert_eq!(
+            UpstreamErrorClass::classify(422),
+            UpstreamErrorClass::BadInput
         );
     }
 
     #[test]
-    fn split_tool_name_empty_op() {
+    fn classify_401_is_auth_error() {
         assert_eq!(
-            split_tool_name("provider:"),
-            ("provider".into(), "unknown".into())
+            UpstreamErrorClass::classify(401),
+            UpstreamErrorClass::AuthError
+        );
+        assert_eq!(
+            UpstreamErrorClass::classify(403),
+            UpstreamErrorClass::AuthError
+        );
+        assert_eq!(
+            UpstreamErrorClass::classify(407),
+            UpstreamErrorClass::AuthError
+        );
+    }
+
+    #[test]
+    fn classify_402_is_quota() {
+        assert_eq!(UpstreamErrorClass::classify(402), UpstreamErrorClass::Quota);
+        assert!(UpstreamErrorClass::Quota.is_quota_class());
+    }
+
+    #[test]
+    fn classify_429_is_rate_limited() {
+        assert_eq!(
+            UpstreamErrorClass::classify(429),
+            UpstreamErrorClass::RateLimited
+        );
+        assert!(UpstreamErrorClass::RateLimited.is_quota_class());
+    }
+
+    #[test]
+    fn classify_5xx_is_server_error() {
+        assert_eq!(
+            UpstreamErrorClass::classify(500),
+            UpstreamErrorClass::ServerError
+        );
+        assert_eq!(
+            UpstreamErrorClass::classify(503),
+            UpstreamErrorClass::ServerError
+        );
+        assert_eq!(
+            UpstreamErrorClass::classify(599),
+            UpstreamErrorClass::ServerError
+        );
+        assert!(!UpstreamErrorClass::ServerError.is_quota_class());
+    }
+
+    #[test]
+    fn classify_zero_is_transport_error() {
+        // The proxy passes `upstream_status = 0` for MCP/CLI/transport
+        // failures with no HTTP exchange. Those need their own bucket.
+        assert_eq!(
+            UpstreamErrorClass::classify(0),
+            UpstreamErrorClass::TransportError
+        );
+    }
+
+    #[test]
+    fn class_tags_are_stable_strings() {
+        assert_eq!(UpstreamErrorClass::AuthError.as_tag(), "auth_error");
+        assert_eq!(UpstreamErrorClass::BadInput.as_tag(), "bad_input");
+        assert_eq!(UpstreamErrorClass::Quota.as_tag(), "quota");
+        assert_eq!(UpstreamErrorClass::RateLimited.as_tag(), "rate_limited");
+        assert_eq!(UpstreamErrorClass::ServerError.as_tag(), "server_error");
+        assert_eq!(
+            UpstreamErrorClass::TransportError.as_tag(),
+            "transport_error"
         );
     }
 
@@ -607,5 +1063,215 @@ mod tests {
     #[test]
     fn truncate_short_message_untouched() {
         assert_eq!(scrub_and_truncate("short", 100), "short");
+    }
+
+    // --- Greptile P2 on #137: title pinning on the capture_error path ---
+
+    /// Mirrors what `capture_error_with_scope` does internally to build
+    /// the event it captures. Test surface for the title-pinning fix:
+    /// without setting `message`, the issue title would drift to the
+    /// raw error Display and overwrite the clean class literal that
+    /// `report_upstream_error` is built around.
+    #[cfg(feature = "sentry")]
+    fn build_captured_event_for_test(
+        err: &(dyn std::error::Error + 'static),
+        class: UpstreamErrorClass,
+    ) -> sentry::protocol::Event<'static> {
+        let class_literal = match class {
+            UpstreamErrorClass::AuthError => "upstream auth_error",
+            UpstreamErrorClass::BadInput => "upstream bad_input",
+            UpstreamErrorClass::Quota => "upstream quota",
+            UpstreamErrorClass::RateLimited => "upstream rate_limited",
+            UpstreamErrorClass::ServerError => "upstream server_error",
+            UpstreamErrorClass::TransportError => "upstream transport_error",
+        };
+        let mut event = sentry::event_from_error(err);
+        event.message = Some(class_literal.to_string());
+        event
+    }
+
+    #[cfg(feature = "sentry")]
+    #[test]
+    fn captured_event_message_pins_class_literal_not_error_display() {
+        // The user-visible bug Greptile flagged: `sentry::event_from_error`
+        // leaves `Event.message = None`, and Sentry's UI falls back to
+        // the underlying error's Display for the issue title. Two events
+        // share the same fingerprint, but the second one's Display
+        // clobbers the first's clean class literal in the title bar.
+        //
+        // Fix shape: pin `Event.message` to the class literal BEFORE
+        // capturing the event. The exception block is unchanged, so the
+        // chain still ships; only the title is pinned.
+        let inner = std::io::Error::other("operation timed out");
+        let event = build_captured_event_for_test(&inner, UpstreamErrorClass::BadInput);
+        assert_eq!(event.message.as_deref(), Some("upstream bad_input"));
+        // Sanity: the exception chain is still there (the whole point of
+        // calling `capture_error` in the first place).
+        assert!(
+            !event.exception.is_empty(),
+            "expected the exception block to be populated by event_from_error"
+        );
+        // And the inner error's Display is preserved in the exception
+        // value, just not bleeding into the title field.
+        let exc = event
+            .exception
+            .values
+            .first()
+            .expect("at least one exception");
+        assert_eq!(exc.value.as_deref(), Some("operation timed out"));
+    }
+
+    // --- Greptile P1 on #137: set_jwt_sentry_scope tag-clear regression ---
+    //
+    // Async runtime workers are reused across requests, and
+    // `sentry::configure_scope` mutates the per-thread hub permanently.
+    // Without an explicit `remove_tag`, a prior request's `sandbox_id` /
+    // `job_id` would bleed into the next request on the same worker
+    // thread — a multi-tenant data leak. These tests use sentry's test
+    // transport to inspect actual emitted events.
+    #[cfg(feature = "sentry")]
+    #[test]
+    fn set_jwt_sentry_scope_clears_stale_sandbox_id_between_requests() {
+        let events = sentry::test::with_captured_events(|| {
+            // Request A: full identity.
+            let claims_a = TokenClaims {
+                iss: None,
+                sub: "agent_alice".into(),
+                aud: "ati-proxy".into(),
+                iat: 0,
+                exp: 0,
+                jti: None,
+                scope: String::new(),
+                ati: None,
+                sandbox_id: Some("sandbox_alpha".into()),
+                job_id: Some("job_42".into()),
+            };
+            set_jwt_sentry_scope(&claims_a);
+            sentry::capture_message("during request A", sentry::Level::Error);
+
+            // Request B on the same worker thread: claims have no
+            // sandbox_id and no job_id. The stale values from request
+            // A MUST NOT bleed onto request B's events.
+            let claims_b = TokenClaims {
+                iss: None,
+                sub: "agent_bob".into(),
+                aud: "ati-proxy".into(),
+                iat: 0,
+                exp: 0,
+                jti: None,
+                scope: String::new(),
+                ati: None,
+                sandbox_id: None,
+                job_id: None,
+            };
+            set_jwt_sentry_scope(&claims_b);
+            sentry::capture_message("during request B", sentry::Level::Error);
+        });
+
+        assert_eq!(events.len(), 2, "expected two captured events");
+        let a = events
+            .iter()
+            .find(|e| e.message.as_deref() == Some("during request A"))
+            .expect("event A");
+        let b = events
+            .iter()
+            .find(|e| e.message.as_deref() == Some("during request B"))
+            .expect("event B");
+
+        // Request A's event has the full identity.
+        assert_eq!(a.tags.get("sub").map(String::as_str), Some("agent_alice"));
+        assert_eq!(
+            a.tags.get("sandbox_id").map(String::as_str),
+            Some("sandbox_alpha")
+        );
+        assert_eq!(a.tags.get("job_id").map(String::as_str), Some("job_42"));
+
+        // Request B's event has ONLY the sub it carried. No bleed.
+        assert_eq!(b.tags.get("sub").map(String::as_str), Some("agent_bob"));
+        assert!(
+            !b.tags.contains_key("sandbox_id"),
+            "sandbox_id from prior request bled through: {:?}",
+            b.tags.get("sandbox_id")
+        );
+        assert!(
+            !b.tags.contains_key("job_id"),
+            "job_id from prior request bled through: {:?}",
+            b.tags.get("job_id")
+        );
+    }
+
+    #[cfg(feature = "sentry")]
+    #[test]
+    fn set_jwt_sentry_scope_replaces_user_between_requests() {
+        // `set_user(Some(..))` always overwrites the prior value, so a
+        // dedicated `set_user(None)` clear isn't needed. This test pins
+        // that invariant so future refactors don't silently break it.
+        fn claims_for(sub: &str) -> TokenClaims {
+            TokenClaims {
+                iss: None,
+                sub: sub.into(),
+                aud: "ati-proxy".into(),
+                iat: 0,
+                exp: 0,
+                jti: None,
+                scope: String::new(),
+                ati: None,
+                sandbox_id: None,
+                job_id: None,
+            }
+        }
+        let events = sentry::test::with_captured_events(|| {
+            set_jwt_sentry_scope(&claims_for("agent_alice"));
+            sentry::capture_message("A", sentry::Level::Error);
+
+            set_jwt_sentry_scope(&claims_for("agent_bob"));
+            sentry::capture_message("B", sentry::Level::Error);
+        });
+
+        let a = events
+            .iter()
+            .find(|e| e.message.as_deref() == Some("A"))
+            .unwrap();
+        let b = events
+            .iter()
+            .find(|e| e.message.as_deref() == Some("B"))
+            .unwrap();
+        assert_eq!(
+            a.user.as_ref().and_then(|u| u.id.as_deref()),
+            Some("agent_alice")
+        );
+        assert_eq!(
+            b.user.as_ref().and_then(|u| u.id.as_deref()),
+            Some("agent_bob"),
+            "Request B's user.id should be its own sub, not Alice's stale value"
+        );
+    }
+
+    #[cfg(feature = "sentry")]
+    #[test]
+    fn captured_event_message_pins_every_class() {
+        // Lock in the class → literal mapping so future renames of the
+        // tracing-event literals don't silently desync with the
+        // capture-error path.
+        let err = std::io::Error::other("x");
+        let cases = [
+            (UpstreamErrorClass::AuthError, "upstream auth_error"),
+            (UpstreamErrorClass::BadInput, "upstream bad_input"),
+            (UpstreamErrorClass::Quota, "upstream quota"),
+            (UpstreamErrorClass::RateLimited, "upstream rate_limited"),
+            (UpstreamErrorClass::ServerError, "upstream server_error"),
+            (
+                UpstreamErrorClass::TransportError,
+                "upstream transport_error",
+            ),
+        ];
+        for (class, expected_title) in cases {
+            let event = build_captured_event_for_test(&err, class);
+            assert_eq!(
+                event.message.as_deref(),
+                Some(expected_title),
+                "class {class:?} should pin title to {expected_title:?}"
+            );
+        }
     }
 }
