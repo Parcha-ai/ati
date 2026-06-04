@@ -627,6 +627,15 @@ async fn handle_call(
 ) -> impl IntoResponse {
     // Extract JWT claims from request extensions (set by auth middleware)
     let claims = req.extensions().get::<TokenClaims>().cloned();
+    // Stamp Sentry's scope with the request identity so every event raised
+    // during this request — exceptions, the dynamic-title upstream-error
+    // bucket, panics — is searchable by sub / sandbox_id / job_id. The
+    // scope is per-thread and gets cleared by subsequent `with_scope`
+    // pushes inside the report helpers; the tags we set here ride along
+    // as the bottom layer.
+    if let Some(ref c) = claims {
+        sentry_scope::set_jwt_sentry_scope(c);
+    }
     // Raw inbound bearer (Bearer-token path only — dev/no-JWT paths leave
     // this empty). Used by `GenContext.jwt_token` so auth_generator scripts
     // can forward the sandbox's identity to an upstream MCP. See issue #115.
@@ -856,15 +865,32 @@ async fn handle_call(
                     }),
                 ),
                 Err(e) => {
+                    // Use the registry-resolved provider name (not the
+                    // tool_name) — the old `split_tool_name` lied when the
+                    // tool name had no `:` separator. The error_message
+                    // path also gets the underlying error's `to_string`
+                    // for the Sentry "extra"; the full source chain is
+                    // attached separately via `capture_error_with_scope`
+                    // so the Sentry issue page shows real exception data.
                     let (provider_name, operation_id) =
-                        sentry_scope::split_tool_name(&call_req.tool_name);
+                        sentry_scope::provider_and_op(&provider.name, &call_req.tool_name);
+                    let msg = e.to_string();
                     sentry_scope::report_upstream_error(
                         &provider_name,
                         &operation_id,
                         0,
                         502,
                         None,
-                        Some(&e.to_string()),
+                        Some(&msg),
+                    );
+                    sentry_scope::capture_error_with_scope(
+                        &e,
+                        &provider_name,
+                        &operation_id,
+                        0,
+                        502,
+                        None,
+                        Some(&msg),
                     );
                     (
                         StatusCode::BAD_GATEWAY,
@@ -895,15 +921,29 @@ async fn handle_call(
                     }),
                 ),
                 Err(e) => {
+                    // Same registry-resolved provider treatment as the
+                    // MCP arm — and the structured error attached via
+                    // `capture_error_with_scope` so Sentry sees the real
+                    // exception chain instead of just the flat title.
                     let (provider_name, operation_id) =
-                        sentry_scope::split_tool_name(&call_req.tool_name);
+                        sentry_scope::provider_and_op(&provider.name, &call_req.tool_name);
+                    let msg = e.to_string();
                     sentry_scope::report_upstream_error(
                         &provider_name,
                         &operation_id,
                         0,
                         502,
                         None,
-                        Some(&e.to_string()),
+                        Some(&msg),
+                    );
+                    sentry_scope::capture_error_with_scope(
+                        &e,
+                        &provider_name,
+                        &operation_id,
+                        0,
+                        502,
+                        None,
+                        Some(&msg),
                     );
                     (
                         StatusCode::BAD_GATEWAY,
@@ -970,8 +1010,13 @@ async fn handle_call(
                 }
                 Err(e) => {
                     let duration = start.elapsed();
+                    // Use the registry-resolved provider name so the
+                    // Sentry tags actually identify the provider — the
+                    // old `split_tool_name` returned the whole flat tool
+                    // name as the "provider" and "unknown" as the
+                    // operation for tools like `pdl_person_enrichment`.
                     let (provider_name, operation_id) =
-                        sentry_scope::split_tool_name(&call_req.tool_name);
+                        sentry_scope::provider_and_op(&provider.name, &call_req.tool_name);
                     let (upstream_status, error_type, error_message) = match &e {
                         http::HttpError::ApiError {
                             status,
@@ -982,6 +1027,20 @@ async fn handle_call(
                         _ => (0u16, None, Some(e.to_string())),
                     };
                     sentry_scope::report_upstream_error(
+                        &provider_name,
+                        &operation_id,
+                        upstream_status,
+                        502,
+                        error_type.as_deref(),
+                        error_message.as_deref(),
+                    );
+                    // Attach the structured error (with source chain) as
+                    // a separate exception event so the Sentry issue
+                    // page shows real Rust frames + Display, not just
+                    // the scrubbed body. Quota / rate-limited classes
+                    // short-circuit inside the helper.
+                    sentry_scope::capture_error_with_scope(
+                        &e,
                         &provider_name,
                         &operation_id,
                         upstream_status,

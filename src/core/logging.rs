@@ -97,6 +97,37 @@ pub fn shutdown(guard: Option<SentryGuard>) {
 #[inline]
 pub fn shutdown(_guard: Option<SentryGuard>) {}
 
+/// Sentry `before_send` hook. Runs on every event the SDK is about to
+/// transport. Today's job is narrow: drop events whose
+/// `upstream_error_class` tag identifies them as quota / rate-limited
+/// noise.
+///
+/// Why: 402 (out of credit) and 429 (rate limited) are real and worth
+/// breadcrumbing, but they're billing/throttling outcomes — not code
+/// bugs — and the user reported thousands of them spamming the issue
+/// list and burning quota. The `report_upstream_error` helper sets
+/// `tags.upstream_error_class` for every classified event; we read
+/// that tag here.
+///
+/// We keep the helper's call to `tracing::warn!` for the quota/rate-
+/// limited classes so the breadcrumb buffer still records context for
+/// the *next* real error — but we never let the standalone Sentry
+/// event ship.
+///
+/// Anything without the tag (panics, unrelated `tracing::error!` from
+/// other code paths) passes through unchanged.
+#[cfg(feature = "sentry")]
+fn before_send(
+    event: sentry::protocol::Event<'static>,
+) -> Option<sentry::protocol::Event<'static>> {
+    if let Some(class) = event.tags.get("upstream_error_class").map(String::as_str) {
+        if class == "quota" || class == "rate_limited" {
+            return None;
+        }
+    }
+    Some(event)
+}
+
 /// Initialize Sentry if a DSN is configured. Returns `None` when Sentry is
 /// disabled (no DSN, or feature not compiled in).
 fn init_sentry() -> Option<SentryGuard> {
@@ -139,7 +170,19 @@ fn init_sentry() -> Option<SentryGuard> {
                 traces_sample_rate: sample_rate,
                 attach_stacktrace: true,
                 send_default_pii: false,
+                // Bumped from the SDK default (30) so that a slow-burn
+                // failure — where the eventual error is preceded by a
+                // long tail of tool_call info breadcrumbs — still shows
+                // the breadcrumbs that matter. The breadcrumb buffer is
+                // per-scope so there's no global memory concern.
+                max_breadcrumbs: 100,
+                // Sentry's Logs product — when enabled, structured
+                // tracing fields ride along on every event so we can
+                // search/filter in Sentry's log explorer too, not just
+                // in the issue grouping.
+                enable_logs: true,
                 debug: sentry_debug,
+                before_send: Some(std::sync::Arc::new(before_send)),
                 ..Default::default()
             },
         ));
@@ -154,5 +197,69 @@ fn init_sentry() -> Option<SentryGuard> {
     #[cfg(not(feature = "sentry"))]
     {
         None
+    }
+}
+
+#[cfg(all(test, feature = "sentry"))]
+mod tests {
+    use super::*;
+    use sentry::protocol::Event;
+
+    fn event_with_class(class: &str) -> Event<'static> {
+        let mut ev = Event::default();
+        ev.tags
+            .insert("upstream_error_class".to_string(), class.to_string());
+        ev
+    }
+
+    #[test]
+    fn before_send_drops_quota_class_events() {
+        // 402 path — `report_upstream_error` classifies as `quota` and
+        // emits at Warning. Without before_send, the user reported these
+        // were spamming the issue list and burning Sentry quota.
+        let ev = event_with_class("quota");
+        assert!(before_send(ev).is_none());
+    }
+
+    #[test]
+    fn before_send_drops_rate_limited_class_events() {
+        // 429 path — same noise problem. Breadcrumbs still record the
+        // context for the next real error; this just stops the
+        // standalone events from shipping.
+        let ev = event_with_class("rate_limited");
+        assert!(before_send(ev).is_none());
+    }
+
+    #[test]
+    fn before_send_passes_bad_input_through() {
+        // 400 / 422 is a real bug we want to see.
+        let ev = event_with_class("bad_input");
+        assert!(before_send(ev).is_some());
+    }
+
+    #[test]
+    fn before_send_passes_server_error_through() {
+        let ev = event_with_class("server_error");
+        assert!(before_send(ev).is_some());
+    }
+
+    #[test]
+    fn before_send_passes_auth_error_through() {
+        let ev = event_with_class("auth_error");
+        assert!(before_send(ev).is_some());
+    }
+
+    #[test]
+    fn before_send_passes_transport_error_through() {
+        let ev = event_with_class("transport_error");
+        assert!(before_send(ev).is_some());
+    }
+
+    #[test]
+    fn before_send_passes_events_without_class_tag() {
+        // Panics, generic tracing::error! from elsewhere — no class tag.
+        // Must not be dropped.
+        let ev = Event::default();
+        assert!(before_send(ev).is_some());
     }
 }
