@@ -173,6 +173,9 @@ fn build_test_app(upstream_url: &str) -> axum::Router {
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
 
     build_router(state)
@@ -195,6 +198,9 @@ fn build_test_app_with_jwt(upstream_url: &str) -> axum::Router {
         jwks_json: None,
         auth_cache: AuthCache::new(),
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
     });
@@ -350,6 +356,9 @@ description = "Query"
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -431,6 +440,9 @@ description = "ID to look up"
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -510,6 +522,9 @@ description = "Title"
         jwks_json: None,
         auth_cache: AuthCache::new(),
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
     });
@@ -676,6 +691,9 @@ description = "Query"
         jwks_json: None,
         auth_cache: AuthCache::new(),
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
     });
@@ -1107,6 +1125,9 @@ description = "Query"
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     let app = build_router(state);
 
@@ -1201,6 +1222,9 @@ description = "Data"
         jwks_json: None,
         auth_cache: AuthCache::new(),
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
     });
