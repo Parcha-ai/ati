@@ -126,6 +126,10 @@ method = "POST"
         k
     };
 
+    // 0.7 ProxyState has 8 fields (no db / passthrough / sig_verify /
+    // key_store / admin_token — those are 0.8-only). The test file
+    // shipped on main as part of #136 included those fields; the
+    // backport strips them to match the 0.7 shape.
     let state = Arc::new(ProxyState {
         registry,
         skill_registry,
@@ -133,19 +137,6 @@ method = "POST"
         jwt_config: None,
         jwks_json: None,
         auth_cache: AuthCache::new(),
-        db: ati::core::db::DbState::Disabled,
-        passthrough: None,
-        sig_verify: std::sync::Arc::new(
-            ati::core::sig_verify::SigVerifyConfig::build(
-                ati::core::sig_verify::SigVerifyMode::Log,
-                60,
-                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
-                &ati::core::keyring::Keyring::empty(),
-            )
-            .unwrap(),
-        ),
-        key_store: None,
-        admin_token: None,
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
