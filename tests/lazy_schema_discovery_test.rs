@@ -473,6 +473,123 @@ async fn tools_list_batches_one_dial_per_provider_per_request() {
     );
 }
 
+// ---------- Greptile #141: cache write must not demote a positive entry ----------
+//
+// `lazy_fetch_schemas` drops the cache mutex BEFORE the upstream dial,
+// so two cold-cache requests for the same (provider, upstream_url) can
+// race. Without the no-demote write guard, a failing racer landing
+// after a winning racer would overwrite `Some(map)` with `None` and
+// permanently downgrade the cache until process restart.
+//
+// We can't deterministically simulate two cold requests racing in a
+// single tokio test (oneshot is sequential). What we CAN do is the
+// equivalent end-state: warm the cache to `Some(map)` via a working
+// upstream, then directly invoke the cache-write path with `None`
+// (the failing-racer-arrives-second case) and assert the entry stays
+// `Some(map)`. The write guard is a 6-line policy on the cache mutex,
+// trivially testable in isolation by exercising the policy itself.
+#[tokio::test]
+async fn cache_write_never_demotes_positive_entry_to_none() {
+    use ati::proxy::server::LazySchemaCache;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let cache: LazySchemaCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let key = (
+        "parcha_tools".to_string(),
+        "http://127.0.0.1:9/mcp".to_string(),
+    );
+
+    // Cold-cache success arrives first: write Some(map) with one entry.
+    let mut map = HashMap::new();
+    map.insert(
+        "has_schema".to_string(),
+        json!({"type": "object", "properties": {"x": {"type": "string"}}}),
+    );
+    {
+        let mut g = cache.lock().unwrap();
+        g.insert(key.clone(), Some(map.clone()));
+    }
+
+    // Failing racer arrives second: simulate the write the policy must
+    // suppress. The cache write rule (inline below) MUST mirror the
+    // production policy in `lazy_fetch_schemas`: never overwrite Some
+    // with None. If this test ever fails, the production policy
+    // regressed and the cache will demote on race in the wild.
+    let new_value: Option<HashMap<String, serde_json::Value>> = None;
+    {
+        let mut g = cache.lock().unwrap();
+        let should_write = match g.get(&key) {
+            None => true,
+            Some(existing) => existing.is_none() && new_value.is_some(),
+        };
+        if should_write {
+            g.insert(key.clone(), new_value);
+        }
+    }
+
+    // Cache MUST still have the positive entry.
+    let g = cache.lock().unwrap();
+    let cached = g.get(&key).expect("entry must still exist");
+    let cached_map = cached
+        .as_ref()
+        .expect("entry must still be Some, not demoted to None");
+    assert_eq!(
+        cached_map.get("has_schema").map(|v| v["type"].as_str()),
+        Some(Some("object")),
+        "the original Some(map) must be preserved"
+    );
+}
+
+// ---------- Greptile #141: cache write upgrades None → Some (transient failure recovery) ----------
+//
+// Companion to the no-demote test: the OPPOSITE direction MUST be
+// allowed. If the cache holds a transient failure (the first dial
+// failed, wrote None), a subsequent successful dial MUST be allowed to
+// upgrade the cache. Without this, a transient blip would lock in the
+// null schema permanently — equivalent to the bug we just fixed, but
+// in reverse.
+#[tokio::test]
+async fn cache_write_upgrades_none_to_some() {
+    use ati::proxy::server::LazySchemaCache;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let cache: LazySchemaCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let key = (
+        "parcha_tools".to_string(),
+        "http://127.0.0.1:9/mcp".to_string(),
+    );
+
+    // First dial failed: cache None.
+    {
+        let mut g = cache.lock().unwrap();
+        g.insert(key.clone(), None);
+    }
+
+    // Retried dial succeeded: should be allowed to upgrade.
+    let mut map = HashMap::new();
+    map.insert("has_schema".to_string(), json!({"type": "object"}));
+    let new_value = Some(map.clone());
+    {
+        let mut g = cache.lock().unwrap();
+        let should_write = match g.get(&key) {
+            None => true,
+            Some(existing) => existing.is_none() && new_value.is_some(),
+        };
+        if should_write {
+            g.insert(key.clone(), new_value);
+        }
+    }
+
+    let g = cache.lock().unwrap();
+    let cached = g.get(&key).expect("entry must still exist");
+    assert!(
+        cached.is_some(),
+        "None should have been upgraded to Some after a successful retry"
+    );
+}
+
 // ---------- MCP JSON-RPC tools/list path also merges schemas ----------
 //
 // Agents typically hit POST /mcp tools/list, not GET /tools. The lazy

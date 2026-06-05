@@ -377,8 +377,38 @@ async fn lazy_fetch_schemas(
     // subsequent tool-info request — operators who fix a misconfigured
     // upstream URL will need to restart the proxy (same constraint as the
     // allowlist cache).
+    //
+    // Greptile P2 on PR #141: the mutex is dropped between the cache-miss
+    // check above and the upstream dial, so two cold-cache requests for
+    // the same (provider, upstream_url) can race. Without care, a failing
+    // racer (writes `None`) could land AFTER a winning racer (writes
+    // `Some(map)`) and silently demote the cache to `None`, requiring a
+    // proxy restart to recover. Fix: never overwrite a positive entry —
+    // first-success-wins. The truth table the writer enforces:
+    //
+    //   existing | new      | action
+    //   --------- |---------|--------
+    //   absent    | Some(_)  | insert (cold-cache success)
+    //   absent    | None     | insert (cold-cache failure; future hits
+    //                            short-circuit fast on the cached miss)
+    //   Some(_)   | Some(_)  | leave existing (idempotent; both maps
+    //                            came from the same upstream)
+    //   Some(_)   | None     | leave existing (don't demote — the bug
+    //                            Greptile flagged)
+    //   None      | Some(_)  | upgrade (a retried request succeeded
+    //                            after a transient failure; promote)
+    //   None      | None     | leave existing (idempotent)
+    //
+    // Equivalent in code: only insert when the existing entry is absent
+    // OR the existing entry is `None` AND the new value is `Some(_)`.
     if let Ok(mut cache) = state.lazy_schema_cache.lock() {
-        cache.insert(key, discovered.clone());
+        let should_write = match cache.get(&key) {
+            None => true,
+            Some(existing) => existing.is_none() && discovered.is_some(),
+        };
+        if should_write {
+            cache.insert(key, discovered.clone());
+        }
     }
     discovered
 }
