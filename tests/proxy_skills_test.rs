@@ -46,6 +46,9 @@ fn build_app_with_skills(
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
     build_router(state)
 }
@@ -77,6 +80,9 @@ fn build_app_with_skills_and_jwt(
         key_store: None,
         admin_token: None,
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
     });
