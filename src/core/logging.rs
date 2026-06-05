@@ -50,6 +50,24 @@ pub fn init(mode: LogMode, verbose: bool) -> InitGuards {
         _ => EnvFilter::new("info"),
     };
 
+    // rc.8 panic fix: rustls 0.23 ships with multiple crypto backends
+    // (we transitively link both `ring` via reqwest 0.12's rustls-tls
+    // feature and `aws-lc-rs` via sentry's reqwest 0.13 →
+    // rustls-platform-verifier chain). When both are present, rustls
+    // refuses to auto-pick and panics with "Could not automatically
+    // determine the process-level CryptoProvider" on the FIRST TLS
+    // connection. The canonical fix is to install one explicitly at
+    // boot, before any TLS use. We pick `ring` because it matches the
+    // backend the rest of the binary uses (jsonwebtoken, reqwest's
+    // rustls-tls feature).
+    //
+    // `install_default()` returns `Err` if a provider was already
+    // installed — safe to ignore because the first installer wins and
+    // we don't care who got there first. Both `ring` and `aws-lc-rs`
+    // implement the same TLS standards; consistency at the process
+    // level is what matters.
+    install_crypto_provider();
+
     // Init Sentry first (before subscriber) so sentry-tracing layer can be wired in.
     let sentry_guard = init_sentry();
 
@@ -164,6 +182,23 @@ fn before_send(
         }
     }
     Some(event)
+}
+
+/// Install the rustls 0.23 process-level `CryptoProvider`.
+///
+/// Pinned to `ring` because that's the backend the rest of the binary
+/// already uses (jsonwebtoken signs/verifies with ring; reqwest's
+/// rustls-tls feature pulls ring transitively). The `--features sentry`
+/// build additionally links `aws-lc-rs` via sentry's reqwest 0.13 →
+/// rustls-platform-verifier dependency chain, which is what triggered
+/// the rc.8 panic. Calling install_default() here disambiguates before
+/// any TLS connection.
+///
+/// Safe to call multiple times across the process — `install_default()`
+/// returns `Err` after the first successful install and we discard
+/// that result. No `Once` wrapper needed.
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 /// Initialize Sentry if a DSN is configured. Returns `None` when Sentry is

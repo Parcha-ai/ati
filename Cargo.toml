@@ -58,6 +58,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Includes errors, traces, AND Sentry Logs (structured log forwarding).
 sentry = { version = "0.47", features = ["tracing", "logs", "reqwest", "rustls", "panic", "backtrace", "contexts", "debug-images", "test"], default-features = false, optional = true }
 sentry-tracing = { version = "0.47", optional = true }
+# rustls 0.23 explicit CryptoProvider install at boot. We use rustls
+# transitively via reqwest (`ring` backend) AND sentry's reqwest (which
+# pulls rustls-platform-verifier → `aws-lc-rs` backend). When both
+# backends are linked, rustls 0.23 refuses to auto-pick and panics on
+# the first TLS connection with the "Could not automatically determine
+# the process-level CryptoProvider" message. Direct dep with the `ring`
+# feature lets us call `install_default()` at boot to disambiguate
+# (matches the `ring` backend the rest of the binary uses via
+# jsonwebtoken + reqwest's rustls-tls feature). Single-binary fix —
+# no Cargo.lock surgery needed. rc.8 panic root cause.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 # Optional OpenTelemetry integration (off by default, enable with --features otel).
 # HTTP/protobuf transport at runtime, reqwest-based, rustls — same rationale
