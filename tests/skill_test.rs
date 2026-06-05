@@ -60,6 +60,9 @@ fn build_test_state(skills_dir: &Path) -> Arc<ProxyState> {
         upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     })
 }
 
