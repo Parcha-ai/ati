@@ -43,6 +43,66 @@ fn test_parse_json_value() {
 }
 
 #[test]
+fn test_parse_key_equals_value() {
+    let args = vec![
+        "--file_url=https://example.com/doc.pdf".to_string(),
+        "--parse_mode=auto".to_string(),
+        "--max_results=10".to_string(),
+    ];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(
+        parsed.get("file_url").unwrap(),
+        &json!("https://example.com/doc.pdf")
+    );
+    assert_eq!(parsed.get("parse_mode").unwrap(), &json!("auto"));
+    assert_eq!(parsed.get("max_results").unwrap(), &json!(10));
+}
+
+#[test]
+fn test_parse_key_equals_json_value() {
+    let args = vec![r#"--formats=["markdown","json"]"#.to_string()];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(
+        parsed.get("formats").unwrap(),
+        &json!(["markdown", "json"])
+    );
+}
+
+#[test]
+fn test_parse_key_equals_value_containing_equals() {
+    // Only the FIRST '=' separates key from value.
+    let args = vec!["--query=a=b".to_string()];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(parsed.get("query").unwrap(), &json!("a=b"));
+}
+
+#[test]
+fn test_parse_mixed_equals_and_space_forms() {
+    let args = vec![
+        "--parse_mode=ocr".to_string(),
+        "--query".to_string(),
+        "hello".to_string(),
+        "--verbose_flag".to_string(),
+    ];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(parsed.get("parse_mode").unwrap(), &json!("ocr"));
+    assert_eq!(parsed.get("query").unwrap(), &json!("hello"));
+    assert_eq!(parsed.get("verbose_flag").unwrap(), &json!(true));
+}
+
+#[test]
+fn test_parse_key_equals_empty_value() {
+    let args = vec!["--note=".to_string()];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(parsed.get("note").unwrap(), &json!(""));
+}
+
+#[test]
 fn test_parse_empty_args() {
     let args: Vec<String> = vec![];
     let parsed = parse_tool_args(&args).unwrap();
@@ -146,7 +206,20 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
     while i < args.len() {
         let arg = &args[i];
         if arg.starts_with("--") {
-            let key = arg.trim_start_matches("--").to_string();
+            let stripped = arg.trim_start_matches("--");
+
+            if let Some((key, val_str)) = stripped.split_once('=') {
+                if key.is_empty() {
+                    return Err("Empty argument key".into());
+                }
+                let value = serde_json::from_str(val_str)
+                    .unwrap_or_else(|_| Value::String(val_str.to_string()));
+                map.insert(key.to_string(), value);
+                i += 1;
+                continue;
+            }
+
+            let key = stripped.to_string();
             if key.is_empty() {
                 return Err("Empty argument key".into());
             }

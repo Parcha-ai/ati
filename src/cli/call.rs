@@ -14,7 +14,7 @@ use crate::providers::generic;
 use crate::proxy::client as proxy_client;
 use crate::Cli;
 
-/// Parse CLI args like --key value --flag into a HashMap.
+/// Parse CLI args like --key value, --key=value, --flag into a HashMap.
 /// Strips known global flags (-J, --json, --verbose, --output) that may be
 /// captured by trailing_var_arg.
 fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn std::error::Error>> {
@@ -28,6 +28,8 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
                 i += 1; // skip flag
             } else if arg == "--output" || arg == "--format" {
                 i += 2; // skip flag + value
+            } else if arg.starts_with("--output=") || arg.starts_with("--format=") {
+                i += 1; // skip inline flag=value form
             } else {
                 result.push(arg);
                 i += 1;
@@ -42,7 +44,23 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
     while i < filtered.len() {
         let arg = &filtered[i];
         if arg.starts_with("--") {
-            let key = arg.trim_start_matches("--").to_string();
+            let stripped = arg.trim_start_matches("--");
+
+            // `--key=value` form: split on the first '=' so the standard
+            // clap-style syntax works instead of producing a boolean flag
+            // literally named "key=value" (and silently dropping the value).
+            if let Some((key, val_str)) = stripped.split_once('=') {
+                if key.is_empty() {
+                    return Err("Empty argument key".into());
+                }
+                let value = serde_json::from_str(val_str)
+                    .unwrap_or_else(|_| Value::String(val_str.to_string()));
+                map.insert(key.to_string(), value);
+                i += 1;
+                continue;
+            }
+
+            let key = stripped.to_string();
             if key.is_empty() {
                 return Err("Empty argument key".into());
             }
