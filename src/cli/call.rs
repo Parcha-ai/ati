@@ -14,7 +14,18 @@ use crate::providers::generic;
 use crate::proxy::client as proxy_client;
 use crate::Cli;
 
-/// Parse CLI args like --key value --flag into a HashMap.
+/// Coerce a raw string value into a JSON value, falling back to a JSON string.
+/// `jurisdiction={"country":"HK"}` → object, `max_results=10` → number,
+/// `parse_mode=auto` → string. Shared by every `key`/`value` form below.
+fn coerce_value(val_str: &str) -> Value {
+    serde_json::from_str(val_str).unwrap_or_else(|_| Value::String(val_str.to_string()))
+}
+
+/// Parse CLI args into a HashMap. Every token is a key/value form:
+///   --key value    (space-separated)
+///   --key=value    (clap-style inline)
+///   key=value      (bare, no leading dashes — what MCP-driven agents emit)
+///   --flag         (bare flag → `true`)
 /// Strips known global flags (-J, --json, --verbose, --output) that may be
 /// captured by trailing_var_arg.
 fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn std::error::Error>> {
@@ -28,6 +39,8 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
                 i += 1; // skip flag
             } else if arg == "--output" || arg == "--format" {
                 i += 2; // skip flag + value
+            } else if arg.starts_with("--output=") || arg.starts_with("--format=") {
+                i += 1; // skip inline flag=value form
             } else {
                 result.push(arg);
                 i += 1;
@@ -42,7 +55,21 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
     while i < filtered.len() {
         let arg = &filtered[i];
         if arg.starts_with("--") {
-            let key = arg.trim_start_matches("--").to_string();
+            let stripped = arg.trim_start_matches("--");
+
+            // `--key=value` form: split on the first '=' so the standard
+            // clap-style syntax works instead of producing a boolean flag
+            // literally named "key=value" (and silently dropping the value).
+            if let Some((key, val_str)) = stripped.split_once('=') {
+                if key.is_empty() {
+                    return Err("Empty argument key".into());
+                }
+                map.insert(key.to_string(), coerce_value(val_str));
+                i += 1;
+                continue;
+            }
+
+            let key = stripped.to_string();
             if key.is_empty() {
                 return Err("Empty argument key".into());
             }
@@ -50,17 +77,27 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
             // Check if next arg exists and is a value (not another flag)
             if i + 1 < filtered.len() && !filtered[i + 1].starts_with("--") {
                 let val_str = filtered[i + 1].as_str();
-                // Try to parse as JSON value, fall back to string
-                let value = serde_json::from_str(val_str)
-                    .unwrap_or_else(|_| Value::String(val_str.to_string()));
-                map.insert(key, value);
+                map.insert(key, coerce_value(val_str));
                 i += 2;
             } else {
                 // Flag with no value = true
                 map.insert(key, Value::Bool(true));
                 i += 1;
             }
+        } else if let Some((key, val_str)) = arg.split_once('=') {
+            // Bare `key=value` form (no leading dashes). MCP-driven agents
+            // emit this constantly, e.g. `ati run tool file_url=https://x`.
+            // Without this branch the token falls through and is silently
+            // dropped, so the tool runs with the argument missing (#147).
+            if key.is_empty() {
+                return Err("Empty argument key".into());
+            }
+            map.insert(key.to_string(), coerce_value(val_str));
+            i += 1;
         } else {
+            // Bare positional word with no '=' — not a key/value pair. We do
+            // not support CLI-passthrough tools, so there is nothing to bind
+            // it to; skip it.
             i += 1;
         }
     }
