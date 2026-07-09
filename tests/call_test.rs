@@ -64,10 +64,7 @@ fn test_parse_key_equals_json_value() {
     let args = vec![r#"--formats=["markdown","json"]"#.to_string()];
 
     let parsed = parse_tool_args(&args).unwrap();
-    assert_eq!(
-        parsed.get("formats").unwrap(),
-        &json!(["markdown", "json"])
-    );
+    assert_eq!(parsed.get("formats").unwrap(), &json!(["markdown", "json"]));
 }
 
 #[test]
@@ -100,6 +97,92 @@ fn test_parse_key_equals_empty_value() {
 
     let parsed = parse_tool_args(&args).unwrap();
     assert_eq!(parsed.get("note").unwrap(), &json!(""));
+}
+
+// --- Bare `key=value` form (no leading dashes) — issue #147 ---
+
+#[test]
+fn test_parse_bare_key_equals_value() {
+    // What MCP-driven agents emit: no leading dashes.
+    let args = vec![
+        "file_url=https://example.com/doc.pdf".to_string(),
+        "document_type=ein".to_string(),
+    ];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(
+        parsed.get("file_url").unwrap(),
+        &json!("https://example.com/doc.pdf")
+    );
+    assert_eq!(parsed.get("document_type").unwrap(), &json!("ein"));
+}
+
+#[test]
+fn test_parse_bare_key_equals_matches_dashed_form() {
+    // Acceptance: bare form produces the SAME map as the --key value form.
+    let bare = parse_tool_args(&[
+        "file_url=https://x".to_string(),
+        "document_type=ein".to_string(),
+    ])
+    .unwrap();
+    let dashed = parse_tool_args(&[
+        "--file_url".to_string(),
+        "https://x".to_string(),
+        "--document_type".to_string(),
+        "ein".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(bare, dashed);
+}
+
+#[test]
+fn test_parse_bare_key_equals_json_value() {
+    // JSON coercion identical to the dashed forms.
+    let args = vec![r#"jurisdiction={"country":"HK"}"#.to_string()];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(
+        parsed.get("jurisdiction").unwrap(),
+        &json!({"country": "HK"})
+    );
+    assert!(parsed.get("jurisdiction").unwrap().is_object());
+}
+
+#[test]
+fn test_parse_bare_key_equals_value_containing_equals() {
+    // Only the FIRST '=' separates key from value.
+    let args = vec!["query=a=b".to_string()];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(parsed.get("query").unwrap(), &json!("a=b"));
+}
+
+#[test]
+fn test_parse_bare_key_equals_empty_value() {
+    let args = vec!["note=".to_string()];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(parsed.get("note").unwrap(), &json!(""));
+}
+
+#[test]
+fn test_parse_mixed_bare_and_dashed_forms() {
+    // `ati run tool --file_url https://x document_type=ein`
+    let args = vec![
+        "--file_url".to_string(),
+        "https://x".to_string(),
+        "document_type=ein".to_string(),
+    ];
+
+    let parsed = parse_tool_args(&args).unwrap();
+    assert_eq!(parsed.get("file_url").unwrap(), &json!("https://x"));
+    assert_eq!(parsed.get("document_type").unwrap(), &json!("ein"));
+}
+
+#[test]
+fn test_parse_bare_empty_key_errors() {
+    let args = vec!["=value".to_string()];
+    assert!(parse_tool_args(&args).is_err());
 }
 
 #[test]
@@ -234,6 +317,15 @@ fn parse_tool_args(args: &[String]) -> Result<HashMap<String, Value>, Box<dyn st
                 map.insert(key, Value::Bool(true));
                 i += 1;
             }
+        } else if let Some((key, val_str)) = arg.split_once('=') {
+            // Bare `key=value` form (no leading dashes).
+            if key.is_empty() {
+                return Err("Empty argument key".into());
+            }
+            let value = serde_json::from_str(val_str)
+                .unwrap_or_else(|_| Value::String(val_str.to_string()));
+            map.insert(key.to_string(), value);
+            i += 1;
         } else {
             i += 1;
         }
