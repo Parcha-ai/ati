@@ -426,6 +426,203 @@ description = "Query"
         .contains("Upstream API error"));
 }
 
+/// /call with an upstream 4xx keeps the upstream status instead of 502:
+/// provider-side client failures (auth/quota/rate-limit/bad input) must
+/// not read as gateway faults or feed the sandbox-proxy Caddy 5xx alert.
+#[tokio::test]
+async fn test_call_upstream_client_error_passes_through_403() {
+    let upstream = MockServer::start().await;
+
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).expect("create manifests dir");
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "noauth_provider"
+description = "Provider with no auth"
+base_url = "{}"
+auth_type = "none"
+
+[[tools]]
+name = "noauth_search"
+description = "Search without auth"
+endpoint = "/search"
+method = "GET"
+
+[tools.input_schema]
+type = "object"
+required = ["q"]
+
+[tools.input_schema.properties.q]
+type = "string"
+description = "Query"
+"#,
+        upstream.uri()
+    );
+
+    std::fs::write(manifests_dir.join("noauth.toml"), manifest).expect("write manifest");
+
+    let registry = ManifestRegistry::load(&manifests_dir).expect("load manifests");
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(
+            ResponseTemplate::new(403).set_body_string(r#"{"title":"spend cap reached"}"#),
+        )
+        .mount(&upstream)
+        .await;
+
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring: Keyring::empty(),
+        jwt_config: None,
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+        db: ati::core::db::DbState::Disabled,
+        passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
+        key_store: None,
+        admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+    });
+    let app = build_router(state);
+
+    let body = serde_json::json!({
+        "tool_name": "noauth_search",
+        "args": {"q": "test"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let json = body_json(resp.into_body()).await;
+    assert!(json["error"]
+        .as_str()
+        .unwrap()
+        .contains("Upstream API error"));
+}
+
+/// /call with an upstream 429 passes through as 429 so callers can
+/// apply rate-limit backoff instead of treating it as a gateway fault.
+#[tokio::test]
+async fn test_call_upstream_rate_limit_passes_through_429() {
+    let upstream = MockServer::start().await;
+
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let manifests_dir = dir.path().join("manifests");
+    std::fs::create_dir_all(&manifests_dir).expect("create manifests dir");
+
+    let manifest = format!(
+        r#"
+[provider]
+name = "noauth_provider"
+description = "Provider with no auth"
+base_url = "{}"
+auth_type = "none"
+
+[[tools]]
+name = "noauth_search"
+description = "Search without auth"
+endpoint = "/search"
+method = "GET"
+
+[tools.input_schema]
+type = "object"
+required = ["q"]
+
+[tools.input_schema.properties.q]
+type = "string"
+description = "Query"
+"#,
+        upstream.uri()
+    );
+
+    std::fs::write(manifests_dir.join("noauth.toml"), manifest).expect("write manifest");
+
+    let registry = ManifestRegistry::load(&manifests_dir).expect("load manifests");
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+        .mount(&upstream)
+        .await;
+
+    let skill_registry = SkillRegistry::load(std::path::Path::new("/nonexistent")).unwrap();
+    let state = Arc::new(ProxyState {
+        registry,
+        skill_registry,
+        keyring: Keyring::empty(),
+        jwt_config: None,
+        jwks_json: None,
+        auth_cache: AuthCache::new(),
+        db: ati::core::db::DbState::Disabled,
+        passthrough: None,
+        sig_verify: std::sync::Arc::new(
+            ati::core::sig_verify::SigVerifyConfig::build(
+                ati::core::sig_verify::SigVerifyMode::Log,
+                60,
+                ati::core::sig_verify::DEFAULT_EXEMPT_PATHS,
+                &ati::core::keyring::Keyring::empty(),
+            )
+            .unwrap(),
+        ),
+        key_store: None,
+        admin_token: None,
+        upstream_url_allowlists: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        lazy_schema_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+    });
+    let app = build_router(state);
+
+    let body = serde_json::json!({
+        "tool_name": "noauth_search",
+        "args": {"q": "test"}
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/call")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let json = body_json(resp.into_body()).await;
+    assert!(json["error"]
+        .as_str()
+        .unwrap()
+        .contains("Upstream API error"));
+}
+
 /// /call with auth_type=none + successful upstream returns 200 with result.
 #[tokio::test]
 async fn test_call_noauth_tool_success() {

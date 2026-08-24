@@ -1244,11 +1244,25 @@ async fn handle_call(
                         } => (*status, error_type.clone(), error_message.clone()),
                         _ => (0u16, None, Some(e.to_string())),
                     };
+                    // Upstream 4xx are provider-side client failures (bad
+                    // input, provider auth/quota, rate limits). Serve them
+                    // with their own status instead of a blanket 502 so
+                    // callers stop retrying them as gateway faults and the
+                    // sandbox-proxy Caddy 5xx alert only counts genuine
+                    // upstream server / transport failures. (2026-08-24
+                    // incident: an X API 403 spend-cap re-served as 502
+                    // tripped the BYOC 5xx alert for half an hour.)
+                    let proxy_status = match upstream_status {
+                        400..=499 => {
+                            StatusCode::from_u16(upstream_status).unwrap_or(StatusCode::BAD_GATEWAY)
+                        }
+                        _ => StatusCode::BAD_GATEWAY,
+                    };
                     sentry_scope::report_upstream_error(
                         &provider_name,
                         &operation_id,
                         upstream_status,
-                        502,
+                        proxy_status.as_u16(),
                         error_type.as_deref(),
                         error_message.as_deref(),
                     );
@@ -1262,7 +1276,7 @@ async fn handle_call(
                         &provider_name,
                         &operation_id,
                         upstream_status,
-                        502,
+                        proxy_status.as_u16(),
                         error_type.as_deref(),
                         error_message.as_deref(),
                     );
@@ -1274,7 +1288,7 @@ async fn handle_call(
                         Some(&e.to_string()),
                     );
                     return (
-                        StatusCode::BAD_GATEWAY,
+                        proxy_status,
                         Json(CallResponse {
                             result: Value::Null,
                             error: Some(format!("Upstream API error: {e}")),
