@@ -83,6 +83,17 @@ fn test_sanitize_args_truncates_long_values() {
 }
 
 #[test]
+fn test_sanitize_args_truncates_unicode_at_a_char_boundary() {
+    let value = format!("{}é{}", "a".repeat(199), "z".repeat(10));
+    let sanitized = audit::sanitize_args(&serde_json::json!({ "query": value }));
+
+    assert_eq!(
+        sanitized["query"],
+        serde_json::Value::String(format!("{}...[truncated]", "a".repeat(199)))
+    );
+}
+
+#[test]
 fn test_sanitize_args_leaves_short_values_intact() {
     let args = json!({"query": "short", "count": 5});
     let sanitized = audit::sanitize_args(&args);

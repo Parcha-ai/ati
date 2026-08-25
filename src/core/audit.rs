@@ -141,7 +141,11 @@ pub fn sanitize_args(args: &Value) -> Value {
 fn truncate_value(value: &Value) -> Value {
     match value {
         Value::String(s) if s.len() > MAX_ARG_VALUE_LEN => {
-            Value::String(format!("{}...[truncated]", &s[..MAX_ARG_VALUE_LEN]))
+            let mut end = MAX_ARG_VALUE_LEN;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            Value::String(format!("{}...[truncated]", &s[..end]))
         }
         other => other.clone(),
     }
