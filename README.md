@@ -140,6 +140,9 @@ The agent doesn't write HTTP requests. It doesn't parse JSON responses. It calls
 
 ### Now add an MCP server — same pattern, zero install
 
+For web research, see [Parallel Search MCP setup](docs/PARALLEL.md) for free
+web search and page extraction without an account or API key.
+
 ```bash
 # DeepWiki is a free MCP server — no API key needed
 ati provider add-mcp deepwiki --transport http \
