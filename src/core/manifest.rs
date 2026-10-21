@@ -421,6 +421,8 @@ pub enum HttpMethod {
     Post,
     #[serde(alias = "put", alias = "Put")]
     Put,
+    #[serde(alias = "patch", alias = "Patch")]
+    Patch,
     #[serde(alias = "delete", alias = "Delete")]
     Delete,
 }
@@ -431,6 +433,7 @@ impl std::fmt::Display for HttpMethod {
             HttpMethod::Get => write!(f, "GET"),
             HttpMethod::Post => write!(f, "POST"),
             HttpMethod::Put => write!(f, "PUT"),
+            HttpMethod::Patch => write!(f, "PATCH"),
             HttpMethod::Delete => write!(f, "DELETE"),
         }
     }

@@ -177,8 +177,7 @@ pub fn extract_tools(spec: &OpenAPI, filters: &OpenApiFilters) -> Vec<OpenApiToo
                 "post" => HttpMethod::Post,
                 "put" => HttpMethod::Put,
                 "delete" => HttpMethod::Delete,
-                // PATCH maps to PUT as ATI doesn't have a Patch variant
-                "patch" => HttpMethod::Put,
+                "patch" => HttpMethod::Patch,
                 _ => continue,
             };
 

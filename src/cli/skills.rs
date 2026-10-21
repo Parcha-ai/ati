@@ -1575,7 +1575,7 @@ category = "<category>"
 name = "<provider>:<tool_name>"
 description = "<what this tool does>"
 endpoint = "/<path>"
-method = "<GET|POST|PUT|DELETE>"
+method = "<GET|POST|PUT|PATCH|DELETE>"
 tags = ["tag1", "tag2"]
 [tools.input_schema]
 type = "object"
