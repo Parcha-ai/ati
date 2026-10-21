@@ -483,7 +483,7 @@ pub async fn execute_tool_with_gen(
         let url = format!(
             "{}{}",
             provider.base_url.trim_end_matches('/'),
-            &tool.endpoint
+            tool.endpoint
         );
 
         match tool.method {
