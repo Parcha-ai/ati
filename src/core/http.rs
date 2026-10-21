@@ -383,7 +383,7 @@ fn apply_query_arrays(
 ///    metadata in the input schema. Path params are substituted into the URL template,
 ///    query params go to the query string, header params become request headers,
 ///    and body params go to the JSON body.
-/// 2. **Legacy** (hand-written TOML tools): GET → all args as query params, POST/PUT/DELETE → JSON body.
+/// 2. **Legacy** (hand-written TOML tools): GET → all args as query params, POST/PUT/PATCH/DELETE → JSON body.
 pub async fn execute_tool(
     provider: &Provider,
     tool: &Tool,
@@ -440,10 +440,11 @@ pub async fn execute_tool_with_gen(
                 r = apply_query_arrays(r, &classified.query_arrays);
                 r
             }
-            HttpMethod::Post | HttpMethod::Put => {
+            HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch => {
                 let base_req = match tool.method {
                     HttpMethod::Post => client.post(&url),
                     HttpMethod::Put => client.put(&url),
+                    HttpMethod::Patch => client.patch(&url),
                     _ => unreachable!(),
                 };
                 // Body params: encode as JSON or form-urlencoded based on metadata
@@ -495,6 +496,7 @@ pub async fn execute_tool_with_gen(
             }
             HttpMethod::Post => client.post(&url).json(&merged_args),
             HttpMethod::Put => client.put(&url).json(&merged_args),
+            HttpMethod::Patch => client.patch(&url).json(&merged_args),
             HttpMethod::Delete => client.delete(&url).json(&merged_args),
         }
     };
