@@ -116,7 +116,7 @@ The OpenAPI parser (`core/openapi.rs`) injects `x-ati-param-location` into each 
 - `header` → added as HTTP headers
 - `body` → sent as JSON request body
 
-Hand-written HTTP tools (no `x-ati-param-location`) use legacy mode: GET sends all args as query params, POST/PUT/DELETE sends all as JSON body.
+Hand-written HTTP tools (no `x-ati-param-location`) use legacy mode: GET sends all args as query params, POST/PUT/PATCH/DELETE sends all as JSON body.
 
 ### Skill Resolution Cascade
 
@@ -234,6 +234,6 @@ Internal providers (`internal = true`) are hidden from `ati tool list` — used 
 - `parse_tool_args()` converts `--key value` CLI pairs to `HashMap<String, serde_json::Value>`. Tries JSON parse first, falls back to string. `--flag` alone becomes `true`
 - OAuth2 tokens cached in a static `LazyLock<Mutex<HashMap>>` with expiry tracking
 - MCP JSON-RPC uses incrementing `id` counters; SSE responses parsed for `data:` lines with JSON extraction
-- OpenAPI PATCH operations mapped to PUT (ATI's `HttpMethod` enum has no PATCH variant)
+- OpenAPI PATCH operations retain PATCH and use the same body/query/header classification as POST and PUT
 - Multipart/form-data operations skipped during OpenAPI import
 - Skills without `skill.toml` are supported for backward compatibility (metadata inferred from SKILL.md)

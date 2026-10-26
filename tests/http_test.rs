@@ -189,6 +189,145 @@ fn mock_tool(endpoint: &str, method: HttpMethod, input_schema: Value) -> Tool {
     }
 }
 
+// Exercise the public loader/executor boundary and observe actual loopback
+// requests. Existing methods retain their routing when PATCH is added.
+#[tokio::test]
+async fn test_manifest_http_methods_preserve_wire_semantics() {
+    use ati::core::manifest::ManifestRegistry;
+
+    let keyring = Keyring::empty();
+
+    for verb in ["GET", "POST", "PUT", "DELETE", "PATCH", "patch", "Patch"] {
+        let server = MockServer::start().await;
+        Mock::given(path("/searches/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("test.toml"),
+            format!(
+                r#"
+[provider]
+name = "test"
+description = "Loopback fixture"
+base_url = "{}"
+auth_type = "none"
+[[tools]]
+name = "monitor"
+description = "Update monitoring"
+endpoint = "/searches/42"
+method = "{verb}"
+"#,
+                server.uri()
+            ),
+        )
+        .unwrap();
+        let registry = ManifestRegistry::load(dir.path()).unwrap();
+        let (provider, tool) = registry.get_tool("monitor").unwrap();
+        assert_eq!(tool.method.to_string(), verb.to_uppercase());
+        let args = HashMap::from([("is_monitored".into(), json!(true))]);
+        let result = execute_tool(provider, tool, &args, &keyring).await.unwrap();
+        assert_eq!(result["ok"], true);
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.method.as_str(), verb.to_uppercase());
+        assert_eq!(request.url.path(), "/searches/42");
+        if verb == "GET" {
+            assert_eq!(request.url.query(), Some("is_monitored=true"));
+            assert!(request.body.is_empty());
+        } else {
+            assert_eq!(request.url.query(), None);
+            assert_eq!(
+                request.body_json::<Value>().unwrap(),
+                json!({"is_monitored": true})
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_openapi_http_methods_preserve_wire_semantics() {
+    use ati::core::openapi::{extract_tools, parse_spec, to_ati_tool, OpenApiFilters};
+
+    // Include form bodies because PATCH uses the classified-body branch shared
+    // with POST/PUT. GET/DELETE intentionally retain their existing query-only
+    // classified behavior, even when the specification declares a body.
+    for (verb, encoding) in [
+        ("get", "application/json"),
+        ("post", "application/json"),
+        ("put", "application/json"),
+        ("delete", "application/json"),
+        ("patch", "application/json"),
+        ("patch", "application/x-www-form-urlencoded"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(path("/searches/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let provider = mock_provider(&server.uri());
+        let spec_json = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "Loopback fixture", "version": "1"},
+            "paths": {"/searches/{searchId}": {
+                (verb): {
+                    "operationId": "monitor",
+                    "parameters": [
+                        {"name": "searchId", "in": "path", "required": true,
+                         "schema": {"type": "integer"}},
+                        {"name": "audit", "in": "query", "schema": {"type": "string"}},
+                        {"name": "X-Request-Id", "in": "header", "schema": {"type": "string"}}
+                    ],
+                    "requestBody": {"content": {
+                        (encoding): {"schema": {
+                            "type": "object",
+                            "properties": {"is_monitored": {"type": "boolean"}}
+                        }}
+                    }},
+                    "responses": {"200": {"description": "OK"}}
+                }
+            }}
+        });
+        let spec = parse_spec(&spec_json.to_string()).unwrap();
+        let mut definitions = extract_tools(&spec, &OpenApiFilters::from_provider(&provider));
+        assert_eq!(definitions.len(), 1);
+        let tool = to_ati_tool(definitions.remove(0), "test", &HashMap::new());
+        let args = HashMap::from([
+            ("searchId".into(), json!(42)),
+            ("audit".into(), json!("yes")),
+            ("X-Request-Id".into(), json!("synthetic-request")),
+            ("is_monitored".into(), json!(true)),
+        ]);
+        let result = execute_tool(&provider, &tool, &args, &Keyring::empty())
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], true);
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.method.as_str(), verb.to_uppercase());
+        assert_eq!(request.url.path(), "/searches/42");
+        assert_eq!(request.url.query(), Some("audit=yes"));
+        assert_eq!(request.headers["X-Request-Id"], "synthetic-request");
+        if matches!(verb, "get" | "delete") {
+            assert!(request.body.is_empty());
+        } else if encoding == "application/json" {
+            assert_eq!(request.headers["content-type"], encoding);
+            assert_eq!(
+                request.body_json::<Value>().unwrap(),
+                json!({"is_monitored": true})
+            );
+        } else {
+            assert_eq!(request.headers["content-type"], encoding);
+            assert_eq!(request.body, b"is_monitored=true");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test: array query param with multi format (repeated keys)
 // ---------------------------------------------------------------------------
